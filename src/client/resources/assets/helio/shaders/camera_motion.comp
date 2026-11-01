@@ -1,0 +1,28 @@
+#version 460
+
+// M0 spike: camera-only motion vectors from depth (vanilla has none). Entities and the hand will smear.
+// Output is in the main target's own pixel space, as UV delta current -> previous (DLSS convention).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D depthTex;
+layout(binding = 1, rg16f) uniform writeonly image2D motion;
+
+layout(push_constant) uniform Push {
+	mat4 invViewProj;  // this frame: NDC -> position relative to this frame's camera
+	mat4 prevViewProj; // last frame: position relative to last frame's camera -> clip
+	vec4 cameraDelta;  // this camera position - last camera position
+} pc;
+
+void main() {
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 size = imageSize(motion);
+	if (any(greaterThanEqual(p, size))) return;
+
+	vec2 uv = (vec2(p) + 0.5) / vec2(size);
+	float depth = texelFetch(depthTex, p, 0).r;
+	vec4 h = pc.invViewProj * vec4(uv * 2.0 - 1.0, depth, 1.0);
+	vec4 prevClip = pc.prevViewProj * vec4(h.xyz / h.w + pc.cameraDelta.xyz, 1.0);
+	vec2 prevUv = prevClip.xy / prevClip.w * 0.5 + 0.5;
+	imageStore(motion, p, vec4(prevUv - uv, 0.0, 0.0));
+}

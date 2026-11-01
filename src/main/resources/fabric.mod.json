@@ -1,0 +1,23 @@
+{
+	"schemaVersion": 1,
+	"id": "helio",
+	"version": "${version}",
+	"name": "Helio",
+	"description": "Path tracing and DLSS for Minecraft on Vulkan.",
+	"authors": ["bit"],
+	"license": "TBD",
+	"icon": "assets/helio/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["dev.helio.Helio"]
+	},
+	"mixins": [
+		{ "config": "helio.mixins.json", "environment": "client" }
+	],
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": "26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
