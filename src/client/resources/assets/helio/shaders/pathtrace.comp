@@ -22,6 +22,17 @@ layout(set = 1, binding = 0) uniform sampler2D entityTextures[256]; // this fram
 // Vertices in vanilla's BLOCK layout: position xyz, colour, UV0 uv, light levels (2 shorts); 7 floats for
 // sections, 8 for entities, whose 8th is the index into entityTextures.
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Vertices { float v[]; };
+// Light-emitting blocks around the camera (Lights.java): a table of the sections in range, each pointing at
+// its run of lights.
+struct Light { vec4 posEmission; vec4 colour; }; // block centre relative to the anchor + emission level; linear colour
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightArray { Light l[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightTable {
+	ivec4 origin; // min section of the table relative to the anchor's; w = light count
+	ivec4 dims;
+	uvec2 lights; // LightArray
+	uvec2 pad;
+	uvec2 cells[]; // first light, count; x fastest, then y, then z
+};
 // Per TLAS instance. kind: section layer (0 solid, 1 cutout, 2 translucent) or 3 = entities.
 struct Instance { uvec2 vertices; uint triangles; uint kind; };
 layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer InstanceInfo { Instance i[]; };
@@ -35,6 +46,9 @@ const vec3 MOON = vec3(0.55, 0.65, 1.0) * 0.2;
 const vec3 NIGHT_SKY = vec3(0.6, 0.7, 1.0) * 0.06; // moonlit sky; vanilla's sky colour is near black at night
 const float SKY = 0.9;
 const vec3 BLOCK_LIGHT = vec3(1.0, 0.68, 0.38) * 1.6;
+const float LIGHT = 8.0;        // intensity of an emission-15 block light
+const float EMISSIVE = 4.0;     // radiance of an emission-15 block's own surface, times its texture (M6 bloom keys off it)
+const uint CANDIDATES = 8u;     // lights considered per shading point (RIS)
 const float SUN_COS = 0.99994;  // 0.6 degree disc radius: soft-shadow penumbra
 const float MOON_COS = 0.99996;
 
@@ -52,6 +66,7 @@ layout(push_constant) uniform Push {
 	vec4 skyColor;      // vanilla's sky (zenith) colour, sRGB; w = 1 if the dimension has a sky
 	vec4 fogColor;      // vanilla's fog (horizon) colour, sRGB
 	mat4 viewProj;      // camera-relative world -> NDC, for depths that match vanilla's
+	uvec2 lights;       // LightTable, zero without lights
 } pc;
 
 struct Hit {
@@ -59,6 +74,7 @@ struct Hit {
 	vec3 albedo;    // linear
 	vec3 normal;    // geometric, facing the ray
 	vec2 light;     // vanilla block / sky light level, 0..1
+	float emission; // the block's own light level, 0..1 (sections encode it in vertex alpha)
 };
 
 uint strideOf(uint kind) {
@@ -129,6 +145,7 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 	vec3 tint = tintAt(vb, t.x, stride).rgb * w.x + tintAt(vb, t.y, stride).rgb * w.y + tintAt(vb, t.z, stride).rgb * w.z;
 	h.albedo = pow(texel(vb, inst.kind, t.x, uv).rgb * tint, vec3(2.2));
 	h.light = lightAt(vb, t.x, stride) * w.x + lightAt(vb, t.y, stride) * w.y + lightAt(vb, t.z, stride) * w.z;
+	h.emission = inst.kind == KIND_DYNAMIC ? 0.0 : round((1.0 - tintAt(vb, t.x, stride).a) * 255.0) / 15.0;
 	return h;
 }
 
@@ -141,6 +158,33 @@ uint pcg(uint v) {
 vec2 random2(uvec2 p) {
 	uint a = pcg(p.x + pcg(p.y + pcg(pc.seed)));
 	return vec2(a & 0xFFFFu, pcg(a) & 0xFFFFu) / 65536.0;
+}
+
+// Per-pixel random stream. Without accumulation it doesn't change between frames: still grain, no flicker.
+uint rng;
+float rand() {
+	rng = pcg(rng);
+	return float(rng >> 8) / 16777216.0;
+}
+
+float luminance(vec3 c) {
+	return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// Inverse-square from the block centre, windowed to zero at 15 blocks (vanilla light's reach, and the
+// light table only covers neighbouring sections).
+vec3 lightContribution(Light light, vec3 pos, vec3 n) {
+	vec3 toLight = light.posEmission.xyz - pos;
+	float d2 = dot(toLight, toLight), x = min(d2 / 225.0, 1.0), window = (1.0 - x * x) * (1.0 - x * x);
+	return light.colour.rgb * (LIGHT * light.posEmission.w / 15.0) * max(dot(n, toLight) * inversesqrt(d2), 0.0)
+		* window / (d2 + 0.25);
+}
+
+// Where a ray from o enters the unit box at c (0 if o is inside).
+float boxEntry(vec3 o, vec3 dir, vec3 c) {
+	vec3 inv = 1.0 / dir, t0 = (c - 0.5 - o) * inv, t1 = (c + 0.5 - o) * inv;
+	vec3 tmin = min(t0, t1);
+	return max(max(max(tmin.x, tmin.y), tmin.z), 0.0);
 }
 
 // Uniform direction within a cone of half-angle acos(cosMax) around d.
@@ -167,6 +211,64 @@ vec3 skyIrradiance(vec3 n) {
 	vec3 c = mix(srgbToLinear(pc.fogColor.rgb), srgbToLinear(pc.skyColor.rgb), n.y * 0.5 + 0.5);
 	c = mix(vec3(dot(c, vec3(0.2126, 0.7152, 0.0722))), c, 0.5) * SKY;
 	return max(c, NIGHT_SKY * pc.moonDir.w);
+}
+
+// Block lights by resampled importance sampling: CANDIDATES lights drawn from the 27 sections around pos
+// (a section in proportion to its light count over its squared distance, then a light in it uniformly), one
+// kept in proportion to its unshadowed contribution, then a single shadow ray to a point inside its block
+// (stopping where the ray enters that block, which would otherwise hide its own light).
+vec3 blockLight(vec3 pos, vec3 n) {
+	if (pc.lights == uvec2(0)) return vec3(0.0);
+	LightTable table = LightTable(pc.lights);
+	ivec3 base = ivec3(floor(pos / 16.0));
+	uint first[27], count[27];
+	float cdf[27], total = 0.0;
+	for (int i = 0; i < 27; i++) {
+		ivec3 s = base + ivec3(i % 3 - 1, (i / 3) % 3 - 1, i / 9 - 1), c = s - table.origin.xyz;
+		uvec2 cell = uvec2(0u);
+		if (all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, table.dims.xyz)))
+			cell = table.cells[(c.z * table.dims.y + c.y) * table.dims.x + c.x];
+		vec3 nearest = clamp(pos, vec3(s) * 16.0, vec3(s) * 16.0 + 16.0);
+		float d2 = dot(pos - nearest, pos - nearest);
+		first[i] = cell.x;
+		count[i] = cell.y;
+		total += cell.y > 0u && d2 < 256.0 ? float(cell.y) / (d2 + 4.0) : 0.0;
+		cdf[i] = total;
+	}
+	if (total == 0.0) return vec3(0.0);
+
+	LightArray lights = LightArray(table.lights);
+	float weightSum = 0.0, chosenTarget = 0.0;
+	uint chosen = 0u;
+	vec3 chosenContribution = vec3(0.0);
+	for (uint m = 0u; m < CANDIDATES; m++) {
+		float u = rand() * total, below = 0.0;
+		int i = 0;
+		while (i < 26 && cdf[i] <= u) i++;
+		if (i > 0) below = cdf[i - 1];
+		uint index = first[i] + min(uint(rand() * float(count[i])), count[i] - 1u);
+		float pdf = (cdf[i] - below) / total / float(count[i]);
+		vec3 f = lightContribution(lights.l[index], pos, n);
+		float target = luminance(f), weight = target / pdf;
+		weightSum += weight;
+		if (weight > 0.0 && rand() * weightSum < weight) {
+			chosen = index;
+			chosenTarget = target;
+			chosenContribution = f;
+		}
+	}
+	if (chosenTarget == 0.0) return vec3(0.0);
+
+	vec3 centre = lights.l[chosen].posEmission.xyz;
+	vec3 toPoint = centre + (vec3(rand(), rand(), rand()) - 0.5) * 0.8 - pos;
+	vec3 dir = normalize(toPoint);
+	float tMax = boxEntry(pos, dir, centre) - 0.01;
+	if (tMax > 0.0) {
+		rayQueryEXT shadow;
+		TRACE(shadow, pos + n * 0.002, dir, tMax, MASK_OPAQUE_SCENE, gl_RayFlagsTerminateOnFirstHitEXT)
+		if (HIT(shadow)) return vec3(0.0);
+	}
+	return chosenContribution * (weightSum / (float(CANDIDATES) * chosenTarget));
 }
 
 vec3 heat(float x) {
@@ -236,9 +338,13 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		}
 	}
 
-	// ponytail: sky light scaled by vanilla's sky light level, not traced; step 6 traces it with the bounces.
+	// ponytail: sky light scaled by vanilla's sky light level, and a dim fill from vanilla's block light level
+	// standing in for bounce light; step 6 traces both.
 	float sky = h.light.y * h.light.y;
-	return vec4(h.albedo * (direct + skyIrradiance(h.normal) * sky + BLOCK_LIGHT * pow(h.light.x, 2.2)), 1.0);
+	// Vanilla's light level says whether any block light reaches here: skip sampling (and its shadow ray) if not.
+	vec3 blocks = h.light.x > 0.0 ? blockLight(pos, h.normal) : vec3(0.0);
+	vec3 lit = direct + skyIrradiance(h.normal) * sky + blocks + BLOCK_LIGHT * 0.15 * pow(h.light.x, 2.2);
+	return vec4(h.albedo * (lit + EMISSIVE * h.emission), 1.0);
 }
 
 void main() {
@@ -262,6 +368,7 @@ void main() {
 
 	// Running average of premultiplied radiance + coverage: frame 0 restarts it. Coverage < 1 blends with
 	// vanilla's picture (sky, terrain past the RT distance), which also anti-aliases those edges.
+	rng = pcg(uint(p.x) + pcg(uint(p.y) + pcg(pc.stochastic != 0.0 ? pc.seed : 0u)));
 	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size), uvec2(p));
 	current.rgb *= current.a;
 	vec4 acc = pc.frameIndex == 0u ? current : mix(imageLoad(accumImg, p), current, 1.0 / float(pc.frameIndex + 1u));

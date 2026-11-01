@@ -30,7 +30,8 @@ public final class Memory {
 	/** Bytes currently allocated through {@link #buffer}, for the overlay. */
 	public static final AtomicLong allocated = new AtomicLong();
 
-	public record Buf(long buffer, long allocation, long address, long mapped, long size) {
+	/** address and mapped are rounded up to 256 bytes; offset is how far that is into the VkBuffer. */
+	public record Buf(long buffer, long allocation, long address, long mapped, long size, long offset) {
 		public void free() {
 			vmaDestroyBuffer(vma, buffer, allocation);
 			allocated.addAndGet(-size);
@@ -57,22 +58,25 @@ public final class Memory {
 		vma = 0;
 	}
 
-	/** Buffer with a device address; host-visible ones are persistently mapped. */
+	/**
+	 * Buffer with a 256-byte-aligned device address (what acceleration structures, micromaps and scratch need;
+	 * VMA can't be asked for it in this LWJGL); host-visible ones are persistently mapped.
+	 */
 	public static Buf buffer(long size, int usage, boolean hostVisible) {
 		try (MemoryStack s = MemoryStack.stackPush()) {
 			LongBuffer pBuf = s.mallocLong(1);
 			PointerBuffer pAlloc = s.mallocPointer(1);
 			VmaAllocationInfo info = VmaAllocationInfo.calloc(s);
 			check(vmaCreateBuffer(vma,
-				VkBufferCreateInfo.calloc(s).sType$Default().size(size).usage(usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT),
+				VkBufferCreateInfo.calloc(s).sType$Default().size(size + 255).usage(usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT),
 				VmaAllocationCreateInfo.calloc(s).usage(VMA_MEMORY_USAGE_AUTO)
 					.flags(hostVisible ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT : 0),
 				pBuf, pAlloc, info), "vmaCreateBuffer");
-			long address = vkGetBufferDeviceAddress(vk, VkBufferDeviceAddressInfo.calloc(s).sType$Default().buffer(pBuf.get(0)));
-			// AS storage needs 256-byte alignment; VMA's buffer alignment already covers it on NVIDIA.
-			if ((address & 255) != 0) throw new IllegalStateException("buffer address not 256-aligned: 0x" + Long.toHexString(address));
+			long raw = vkGetBufferDeviceAddress(vk, VkBufferDeviceAddressInfo.calloc(s).sType$Default().buffer(pBuf.get(0)));
+			long offset = (256 - (raw & 255)) & 255;
 			allocated.addAndGet(size);
-			return new Buf(pBuf.get(0), pAlloc.get(0), address, info.pMappedData(), size);
+			long mapped = info.pMappedData();
+			return new Buf(pBuf.get(0), pAlloc.get(0), raw + offset, mapped == 0 ? 0 : mapped + offset, size, offset);
 		}
 	}
 

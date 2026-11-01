@@ -415,8 +415,26 @@ look right with accumulation on (reference) and stable with 1 spp.
    with classic transparency, water in front of an entity is overwritten.
    User-checked: entities vs water/glass, name tags, H toggle. **Entity motion
    vectors moved to M4** (DLSS RR needs them with its other guide buffers).
-5. [ ] Emissive blocks: light list from block light level + texture colour;
-   ReSTIR DI.
+5. [x] Block lights (`rt/Lights.java`): emitters collected per section on the
+   compile worker, only if a neighbour lets light out (buried lava halved the
+   count, 53.7k → 26.7k); colour = mean of the brightest quarter of the particle
+   sprite's opaque texels (`SpriteContents.originalImage`). Per frame a table of
+   the sections within the RT distance is uploaded. RIS (ReSTIR's first stage,
+   no reuse yet): 8 candidates from the 27 neighbouring sections (section ∝ light
+   count / distance², light uniform), inverse-square windowed to 15 blocks, one
+   shadow ray to a point in the chosen block that stops at its box. Skipped where
+   vanilla's block light is 0. Emissive surfaces: emission level in vertex alpha
+   (255 − level; `BlockModelLighter` / `FluidRenderer` hooks), radiance =
+   texture × 4. A dim fill from vanilla's block light level stands in for bounce
+   light until step 6. Without accumulation the random stream is fixed per pixel
+   (still grain, no flicker). User-checked: torches, lantern, soul lantern
+   (cyan), glowstone, lava lake; grain much lower after culling. Cost: ~7 ms at
+   native 1440p in a lava-lit cave (incoherent shadow rays); M4 runs at DLSS
+   internal resolution. Bloom around emitters is M6. ReSTIR temporal/spatial
+   reuse: M7 if RR alone isn't enough.
+   Also fixed: `Memory.buffer` now over-allocates 255 B and aligns the address to
+   256 itself (VMA's aligned create isn't in LWJGL 3.4.3), recording the offset
+   for AS/micromap creation; a 32-aligned light table had disabled the tracer.
 6. [ ] Indirect: 1–2 bounces + SHaRC-style radiance cache. Re-test OMM here.
 7. [ ] Water / glass / ice: reflection + refraction.
 8. [ ] Hybrid preset (RT shadows + reflections only).

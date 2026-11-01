@@ -73,8 +73,8 @@ public final class Scene {
 
 	private record Geo(int layer, Buf vertices, int quads, Blas blas) {}
 
-	/** layers null: remove the section. */
-	private record Upload(long node, Geo[] layers) {}
+	/** layers null: remove the section. lights: Lights.collect output, null if none. */
+	private record Upload(long node, Geo[] layers, int[] lights) {}
 
 	private record Deferred(long frame, Runnable free) {}
 
@@ -105,7 +105,7 @@ public final class Scene {
 	private static boolean dynamicBuilt;
 
 	/** For the trace passes; tlas is 0 when there's nothing to trace. Positions are relative to the anchor block. */
-	public static long tlas, instanceInfo;
+	public static long tlas, instanceInfo, lights;
 	public static int anchorX, anchorY, anchorZ;
 	/** Horizontal distance from the camera that the TLAS surely covers (whole sections within the RT distance). */
 	public static int rtDistanceBlocks;
@@ -135,7 +135,7 @@ public final class Scene {
 	}
 
 	/** Compile worker thread: copy a freshly compiled section's layers. No layers means the section is empty now. */
-	public static void submit(long node, Map<ChunkSectionLayer, MeshData> meshes) {
+	public static void submit(long node, Map<ChunkSectionLayer, MeshData> meshes, int[] lights) {
 		if (!ready) return;
 		Geo[] geos = null;
 		for (Map.Entry<ChunkSectionLayer, MeshData> e : meshes.entrySet()) {
@@ -153,12 +153,12 @@ public final class Scene {
 			if (geos == null) geos = new Geo[ChunkSectionLayer.values().length];
 			geos[e.getKey().ordinal()] = new Geo(e.getKey().ordinal(), vertices, quads, new Blas());
 		}
-		incoming.add(new Upload(node, geos));
+		incoming.add(new Upload(node, geos, lights));
 	}
 
 	/** Vanilla reset a section (unloaded, moved out of range, or the renderer was rebuilt). Any thread. */
 	public static void remove(long node) {
-		if (ready) incoming.add(new Upload(node, null));
+		if (ready) incoming.add(new Upload(node, null, null));
 	}
 
 	/** True on a compile worker while it runs SectionCompiler.compile. */
@@ -166,8 +166,19 @@ public final class Scene {
 	/** Sections are being compiled for the path tracer: no AO or face shading baked into vertex colours. */
 	public static volatile boolean unshaded;
 
+	/** Emission level of the fluid being tesselated (FluidRenderer has no other way to tell its vertices). */
+	public static final ThreadLocal<Integer> FLUID_EMISSION = ThreadLocal.withInitial(() -> 0);
+
 	public static boolean compilingUnshaded() {
 		return unshaded && COMPILING.get();
+	}
+
+	/**
+	 * Vertex alpha 255 - emission: shaders read the emission level back, and vanilla's 0.5 alpha cutoff and
+	 * translucency barely notice (alpha stays above 0.94).
+	 */
+	public static int withEmission(int argb, int emission) {
+		return emission == 0 ? argb : (argb & 0xFFFFFF) | (255 - emission) << 24;
 	}
 
 	/**
@@ -228,6 +239,7 @@ public final class Scene {
 			buildPending(cmd, slot, camera, s);
 			buildDynamic(cmd, slot, s);
 			buildTlas(cmd, slot, camera, cameraPos, s);
+			lights = Lights.upload(slot, camera, rtDistance(), anchorX, anchorY, anchorZ);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			GpuTimers.end(cmd, GpuTimers.Pass.SCENE_BUILD);
 		}
@@ -235,6 +247,7 @@ public final class Scene {
 
 	private static void drainIncoming() {
 		for (Upload u; (u = incoming.poll()) != null; ) {
+			Lights.put(u.node, u.lights);
 			if (u.layers == null) {
 				Geo[] stale = pending.remove(u.node);
 				if (stale != null) freeGeos(stale);
@@ -256,6 +269,7 @@ public final class Scene {
 			long n = e.getLongKey();
 			if (Math.abs(SectionPos.x(n) - camera.x()) > r || Math.abs(SectionPos.z(n) - camera.z()) > r) {
 				deferFree(e.getValue());
+				Lights.put(n, null);
 				it.remove();
 			}
 		}
@@ -577,7 +591,7 @@ public final class Scene {
 	private static long createAs(MemoryStack s, Buf storage, long size, int type) {
 		LongBuffer h = s.mallocLong(1);
 		check(vkCreateAccelerationStructureKHR(vk, VkAccelerationStructureCreateInfoKHR.calloc(s).sType$Default()
-			.buffer(storage.buffer()).size(size).type(type), null, h), "create AS");
+			.buffer(storage.buffer()).offset(storage.offset()).size(size).type(type), null, h), "create AS");
 		return h.get(0);
 	}
 
@@ -637,5 +651,6 @@ public final class Scene {
 		if (quadIndices != null) quadIndices.free();
 		vkDestroyQueryPool(vk, compactionQueries, null);
 		Micromaps.destroy();
+		Lights.destroy();
 	}
 }

@@ -4,6 +4,7 @@
 	"compatibilityLevel": "JAVA_25",
 	"client": [
 		"BlockModelLighterMixin",
+		"FluidRendererMixin",
 		"GameRendererMixin",
 		"LevelExtractorMixin",
 		"LevelRendererMixin",
@@ -14,6 +15,7 @@
 		"RenderTypeGroupMixin",
 		"SectionCompileTaskMixin",
 		"SectionCompilerMixin",
+		"SpriteContentsAccessor",
 		"StagedDrawAccessor",
 		"StagedVertexBufferMixin",
 		"TextureBindingAccessor",

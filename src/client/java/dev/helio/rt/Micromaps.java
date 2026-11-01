@@ -129,7 +129,7 @@ final class Micromaps {
 				info.triangleArray().deviceAddress(input.address() + descOffset[i]);
 				vkGetMicromapBuildSizesEXT(vk, KHRAccelerationStructure.VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, info, sizes);
 				Buf storage = Memory.buffer(sizes.micromapSize(), VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT, false);
-				check(vkCreateMicromapEXT(vk, VkMicromapCreateInfoEXT.calloc(s).sType$Default().buffer(storage.buffer())
+				check(vkCreateMicromapEXT(vk, VkMicromapCreateInfoEXT.calloc(s).sType$Default().buffer(storage.buffer()).offset(storage.offset())
 					.size(sizes.micromapSize()).type(VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT), null, h), "create micromap");
 				result[i] = new Micromap(storage, h.get(0));
 				info.dstMicromap(h.get(0));

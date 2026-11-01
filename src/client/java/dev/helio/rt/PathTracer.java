@@ -42,7 +42,7 @@ import static org.lwjgl.vulkan.VK12.*;
  * so no layout transitions are needed; we add the same barrier after our dispatch.
  */
 public final class PathTracer {
-	private static final int PUSH_SIZE = 240;
+	private static final int PUSH_SIZE = 248;
 	/** Accumulation keeps adapting slowly after this many frames instead of freezing. */
 	private static final int MAX_FRAMES = 256;
 
@@ -265,6 +265,7 @@ public final class PathTracer {
 				.putFloat(144, skyColor.x).putFloat(148, skyColor.y).putFloat(152, skyColor.z).putFloat(156, hasSky ? 1 : 0)
 				.putFloat(160, fogColor.x).putFloat(164, fogColor.y).putFloat(168, fogColor.z).putFloat(172, 0);
 			new Matrix4f(levelProjection).mul(viewRotation).get(176, pc);
+			pc.putLong(240, Scene.lights);
 			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
 
 			vkCmdDispatch(cmd, (main.width + 7) / 8, (main.height + 7) / 8, 1);

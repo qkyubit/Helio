@@ -2,6 +2,7 @@ package dev.helio;
 
 import dev.helio.config.HelioConfig;
 import dev.helio.ngx.FrameGenSpike;
+import dev.helio.rt.Lights;
 import dev.helio.rt.PathTracer;
 import dev.helio.rt.Scene;
 import dev.helio.vk.GpuTimers;
@@ -48,7 +49,7 @@ public final class PerfOverlay {
 		else {
 			lines.add("Scene " + Scene.instanceCount + " BLAS, " + Scene.tlasTriangles / 1000 + "k tris + " + Scene.dynamicTriangles / 1000 + "k entity, " + Scene.sectionCount + " sections, "
 				+ Scene.pendingCount + " queued, build " + ms(Pass.SCENE_BUILD) + ", " + (Memory.allocated.get() >> 20) + " MB");
-			lines.add("Path tracing " + ms(Pass.PATH_TRACE) + (c.accumulate ? ", " + PathTracer.frameIndex + " frames accumulated" : ""));
+			lines.add("Path tracing " + ms(Pass.PATH_TRACE) + ", " + Lights.count + " lights" + (c.accumulate ? ", " + PathTracer.frameIndex + " frames accumulated" : ""));
 		}
 		if (!Double.isNaN(GpuTimers.ms(Pass.DLSS_G)))
 			lines.add("FG " + FrameGenSpike.renderedFps + " -> " + FrameGenSpike.presentedFps + " fps, DLSS-G " + ms(Pass.DLSS_G) + ", motion " + ms(Pass.FG_MOTION));
