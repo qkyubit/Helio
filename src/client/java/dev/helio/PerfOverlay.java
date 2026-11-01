@@ -45,7 +45,7 @@ public final class PerfOverlay {
 		if (!Helio.rayTracing) lines.add("Ray tracing: unsupported");
 		else if (!c.rayTracing) lines.add("Ray tracing: off");
 		else {
-			lines.add("Scene " + Scene.instanceCount + " BLAS, " + Scene.tlasTriangles / 1000 + "k tris, " + Scene.sectionCount + " sections, "
+			lines.add("Scene " + Scene.instanceCount + " BLAS, " + Scene.tlasTriangles / 1000 + "k tris + " + Scene.dynamicTriangles / 1000 + "k entity, " + Scene.sectionCount + " sections, "
 				+ Scene.pendingCount + " queued, build " + ms(Pass.SCENE_BUILD) + ", " + (Memory.allocated.get() >> 20) + " MB");
 			lines.add("Sun shadows " + ms(Pass.SUN_SHADOWS));
 		}

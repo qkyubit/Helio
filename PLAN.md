@@ -309,7 +309,14 @@ Exit: stable TLAS while flying at speed; no hitching from BLAS builds.
 - [x] **Fly test (user, 2026-11-01):** queue rises and drains instantly, no
   hitches, no missing shadows, block updates instant, no crashes. Exit criterion
   met for terrain.
-- [ ] Entities, block entities, held item, particles: dynamic BLAS.
+- [x] **Entities, block entities, dropped items, armour, moving blocks**
+  (`rt/Entities.java`): tagged by render type when vanilla stages the level's
+  feature draws, positions copied at upload (camera-relative, so only the level's
+  `prepareFrame`; the first-person hand and GUI items are separate frames), one
+  opaque BLAS rebuilt per frame (PREFER_FAST_BUILD), mask 8. Overlays and decals
+  (glint, trims, eyes, blob shadows, outlines, text) skipped. User-confirmed
+  shadows from a fox, chest and armour stand. Not yet: entity texture alpha
+  (needs bindless textures, M3), particles, the player's own body in first person.
 - [ ] Opacity micromaps for cutout.
 - [ ] Debug views.
 

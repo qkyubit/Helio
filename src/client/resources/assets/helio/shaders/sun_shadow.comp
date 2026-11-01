@@ -19,7 +19,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Ver
 // One vertex-buffer address per TLAS instance.
 layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer InstanceInfo { uvec2 vertices[]; };
 
-const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u;
+const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u, MASK_DYNAMIC = 8u;
 
 layout(push_constant) uniform Push {
 	mat4 invViewProj;   // inverse(projection * viewRotation): NDC -> camera-relative world
@@ -73,7 +73,7 @@ void main() {
 		imageStore(colorImg, p, vec4(c, 1.0));
 		return;
 	}
-	rayQueryInitializeEXT(rq, scene, gl_RayFlagsTerminateOnFirstHitEXT, MASK_SOLID | MASK_CUTOUT,
+	rayQueryInitializeEXT(rq, scene, gl_RayFlagsTerminateOnFirstHitEXT, MASK_SOLID | MASK_CUTOUT | MASK_DYNAMIC,
 		pos + pc.sunDir.xyz * 0.01, 0.01, pc.sunDir.xyz, 512.0);
 	while (rayQueryProceedEXT(rq)) {
 		if (cutoutHit(rq)) rayQueryConfirmIntersectionEXT(rq);

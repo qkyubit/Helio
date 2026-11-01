@@ -2,6 +2,7 @@ package dev.helio.mixin;
 
 import com.llamalad7.mixinextras.sugar.Local;
 import dev.helio.ngx.FrameGenSpike;
+import dev.helio.rt.Entities;
 import dev.helio.rt.SunShadowSpike;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
@@ -16,6 +17,17 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(LevelRenderer.class)
 public class LevelRendererMixin {
 	@Shadow @Final private LevelRenderState levelRenderState;
+
+	// The level's features (entities, block entities, items) are prepared and uploaded inside this call.
+	@Inject(method = "render", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher;prepareFrame"))
+	private void helio$beginEntityCapture(CallbackInfo ci) {
+		Entities.begin();
+	}
+
+	@Inject(method = "render", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher;prepareFrame", shift = At.Shift.AFTER))
+	private void helio$endEntityCapture(CallbackInfo ci) {
+		Entities.end();
+	}
 
 	// After the level frame graph: main colour + depth hold the finished world, GUI not drawn yet.
 	@Inject(method = "render", at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/framegraph/FrameGraphBuilder;execute", shift = At.Shift.AFTER))

@@ -18,6 +18,7 @@ import net.minecraft.client.renderer.ViewArea;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.SectionRenderDispatcher.RenderSection;
 import net.minecraft.core.SectionPos;
+import net.minecraft.world.phys.Vec3;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
@@ -50,7 +51,7 @@ import static org.lwjgl.vulkan.VK12.*;
  */
 public final class Scene {
 	/** Instance mask per layer: solid geometry is opaque, cutout needs an alpha test, translucent is skipped by shadow rays. */
-	public static final int MASK_SOLID = 1, MASK_CUTOUT = 2, MASK_TRANSLUCENT = 4;
+	public static final int MASK_SOLID = 1, MASK_CUTOUT = 2, MASK_TRANSLUCENT = 4, MASK_DYNAMIC = 8;
 	private static final int[] LAYER_MASK = {MASK_SOLID, MASK_CUTOUT, MASK_TRANSLUCENT};
 	/** Vanilla's BLOCK format: position float3, colour 4 bytes, UV0 float2, lightmap 2 shorts. Shaders hard-code it. */
 	public static final int VERTEX_STRIDE = 28;
@@ -93,6 +94,12 @@ public final class Scene {
 	@SuppressWarnings("unchecked")
 	private static final List<Blas>[] builtInSlot = new List[RING];
 
+	/** Per-frame BLAS of {@link Entities}; each slot is reused {@value #RING} frames later. */
+	private static final Buf[] dynamicVertices = new Buf[RING];
+	private static final Blas[] dynamicBlas = new Blas[RING];
+	private static Buf dynamicScratch;
+	private static boolean dynamicBuilt;
+
 	/** For the trace passes; tlas is 0 when there's nothing to trace. Positions are relative to the anchor block. */
 	public static long tlas, instanceInfo;
 	public static int anchorX, anchorY, anchorZ;
@@ -100,7 +107,7 @@ public final class Scene {
 	public static int rtDistanceBlocks;
 	/** Overlay stats. */
 	public static int sectionCount, instanceCount, pendingCount, lastBuilds;
-	public static long tlasTriangles;
+	public static long tlasTriangles, dynamicTriangles;
 
 	private Scene() {}
 
@@ -175,7 +182,8 @@ public final class Scene {
 	 * Render thread, inside the frame's command buffer, before anything traces. With {@code build}
 	 * false (ray tracing toggled off) only the queue is drained: no GPU work.
 	 */
-	public static void update(VkCommandBuffer cmd, SectionPos camera, boolean build) {
+	public static void update(VkCommandBuffer cmd, Vec3 cameraPos, boolean build) {
+		SectionPos camera = SectionPos.of(cameraPos);
 		frame++;
 		while (!deferred.isEmpty() && deferred.peek().frame + RING <= frame) deferred.poll().free.run();
 		drainIncoming();
@@ -191,7 +199,8 @@ public final class Scene {
 			int slot = (int) (frame % RING);
 			compact(cmd, slot, s);
 			buildPending(cmd, slot, s);
-			buildTlas(cmd, slot, camera, s);
+			buildDynamic(cmd, slot, s);
+			buildTlas(cmd, slot, camera, cameraPos, s);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			GpuTimers.end(cmd, GpuTimers.Pass.SCENE_BUILD);
 		}
@@ -334,7 +343,58 @@ public final class Scene {
 		}
 	}
 
-	private static void buildTlas(VkCommandBuffer cmd, int slot, SectionPos camera, MemoryStack s) {
+	/** Rebuilt from scratch every frame: entities move, animate and change shape. */
+	private static void buildDynamic(VkCommandBuffer cmd, int slot, MemoryStack s) {
+		int quads = Entities.quads;
+		dynamicBuilt = quads > 0;
+		dynamicTriangles = quads * 2L;
+		if (!dynamicBuilt) return;
+		ensureQuadIndices(quads);
+		long bytes = quads * 48L;
+		Buf vertices = dynamicVertices[slot];
+		if (vertices == null || vertices.size() < bytes) {
+			if (vertices != null) vertices.free(); // this slot's last use was RING frames ago
+			vertices = dynamicVertices[slot] = Memory.buffer(Math.max(bytes * 3 / 2, 1 << 20), BUILD_INPUT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+		}
+		memCopy(Entities.positions, vertices.mapped(), bytes);
+
+		VkAccelerationStructureGeometryKHR.Buffer geom = VkAccelerationStructureGeometryKHR.calloc(1, s).sType$Default()
+			.geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR).flags(VK_GEOMETRY_OPAQUE_BIT_KHR);
+		VkAccelerationStructureGeometryTrianglesDataKHR tri = geom.geometry().triangles().sType$Default()
+			.vertexFormat(VK_FORMAT_R32G32B32_SFLOAT).vertexStride(12).maxVertex(quads * 4 - 1).indexType(VK_INDEX_TYPE_UINT32);
+		tri.vertexData().deviceAddress(vertices.address());
+		tri.indexData().deviceAddress(quadIndices.address());
+		VkAccelerationStructureBuildGeometryInfoKHR.Buffer info = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, s).sType$Default()
+			.type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR).flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR)
+			.mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).pGeometries(geom).geometryCount(1);
+		VkAccelerationStructureBuildSizesInfoKHR sizes = VkAccelerationStructureBuildSizesInfoKHR.calloc(s).sType$Default();
+		vkGetAccelerationStructureBuildSizesKHR(vk, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, info.get(0), s.ints(quads * 2), sizes);
+
+		Blas b = dynamicBlas[slot];
+		if (b == null || b.storage.size() < sizes.accelerationStructureSize()) {
+			if (b != null) {
+				vkDestroyAccelerationStructureKHR(vk, b.handle, null);
+				b.storage.free();
+			}
+			b = dynamicBlas[slot] = new Blas();
+			long size = sizes.accelerationStructureSize() * 3 / 2;
+			b.storage = Memory.buffer(size, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false);
+			b.handle = createAs(s, b.storage, size, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
+			b.address = asAddress(s, b.handle);
+		}
+		if (dynamicScratch == null || dynamicScratch.size() < sizes.buildScratchSize()) {
+			if (dynamicScratch != null) {
+				Buf old = dynamicScratch;
+				defer(old::free);
+			}
+			dynamicScratch = Memory.buffer(sizes.buildScratchSize() * 3 / 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false);
+		}
+		info.dstAccelerationStructure(b.handle).scratchData().deviceAddress(dynamicScratch.address());
+		vkCmdBuildAccelerationStructuresKHR(cmd, info, s.pointers(VkAccelerationStructureBuildRangeInfoKHR.calloc(1, s).primitiveCount(quads * 2)));
+		asBarrier(cmd, s);
+	}
+
+	private static void buildTlas(VkCommandBuffer cmd, int slot, SectionPos camera, Vec3 cameraPos, MemoryStack s) {
 		anchorX = camera.minBlockX();
 		anchorY = camera.minBlockY();
 		anchorZ = camera.minBlockZ();
@@ -343,6 +403,7 @@ public final class Scene {
 
 		int count = 0;
 		for (Geo[] geos : sections.values()) for (Geo g : geos) if (g != null) count++;
+		if (dynamicBuilt) count++;
 		Buf buf = instanceBufs[slot];
 		long bytes = (long) count * (VkAccelerationStructureInstanceKHR.SIZEOF + 8);
 		if (buf == null || buf.size() < bytes) {
@@ -363,18 +424,13 @@ public final class Scene {
 			float tx = (sx << 4) - anchorX, ty = (sy << 4) - anchorY, tz = (sz << 4) - anchorZ;
 			for (Geo g : e.getValue()) {
 				if (g == null) continue;
-				long p = buf.mapped() + (long) n * VkAccelerationStructureInstanceKHR.SIZEOF;
-				memPutFloat(p, 1); memPutFloat(p + 4, 0); memPutFloat(p + 8, 0); memPutFloat(p + 12, tx);
-				memPutFloat(p + 16, 0); memPutFloat(p + 20, 1); memPutFloat(p + 24, 0); memPutFloat(p + 28, ty);
-				memPutFloat(p + 32, 0); memPutFloat(p + 36, 0); memPutFloat(p + 40, 1); memPutFloat(p + 44, tz);
-				memPutInt(p + 48, LAYER_MASK[g.layer] << 24); // custom index 0
-				memPutInt(p + 52, VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR << 24); // SBT offset 0
-				memPutLong(p + 56, g.blas.address);
-				memPutLong(buf.mapped() + infoBase + n * 8L, g.vertices.address());
-				n++;
+				putInstance(buf, infoBase, n++, tx, ty, tz, LAYER_MASK[g.layer], g.blas.address, g.vertices.address());
 				triangles += g.quads * 2L;
 			}
 		}
+		// Entity positions are relative to the camera.
+		if (dynamicBuilt) putInstance(buf, infoBase, n++, (float) (cameraPos.x - anchorX), (float) (cameraPos.y - anchorY),
+			(float) (cameraPos.z - anchorZ), MASK_DYNAMIC, dynamicBlas[slot].address, dynamicVertices[slot].address());
 		instanceCount = n;
 		tlasTriangles = triangles;
 		if (n == 0) return;
@@ -406,6 +462,17 @@ public final class Scene {
 		vkCmdBuildAccelerationStructuresKHR(cmd, info, s.pointers(VkAccelerationStructureBuildRangeInfoKHR.calloc(1, s).primitiveCount(n)));
 		tlas = tlasHandle;
 		instanceInfo = buf.address() + infoBase;
+	}
+
+	private static void putInstance(Buf buf, long infoBase, int n, float tx, float ty, float tz, int mask, long blasAddress, long vertexAddress) {
+		long p = buf.mapped() + (long) n * VkAccelerationStructureInstanceKHR.SIZEOF;
+		memPutFloat(p, 1); memPutFloat(p + 4, 0); memPutFloat(p + 8, 0); memPutFloat(p + 12, tx);
+		memPutFloat(p + 16, 0); memPutFloat(p + 20, 1); memPutFloat(p + 24, 0); memPutFloat(p + 28, ty);
+		memPutFloat(p + 32, 0); memPutFloat(p + 36, 0); memPutFloat(p + 40, 1); memPutFloat(p + 44, tz);
+		memPutInt(p + 48, mask << 24); // custom index 0
+		memPutInt(p + 52, VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR << 24); // SBT offset 0
+		memPutLong(p + 56, blasAddress);
+		memPutLong(buf.mapped() + infoBase + n * 8L, vertexAddress);
 	}
 
 	private static void ensureQuadIndices(int quads) {
@@ -482,6 +549,12 @@ public final class Scene {
 			tlasScratch.free();
 		}
 		for (Buf b : instanceBufs) if (b != null) b.free();
+		for (Buf b : dynamicVertices) if (b != null) b.free();
+		for (Blas b : dynamicBlas) if (b != null) {
+			vkDestroyAccelerationStructureKHR(vk, b.handle, null);
+			b.storage.free();
+		}
+		if (dynamicScratch != null) dynamicScratch.free();
 		if (scratch != null) scratch.free();
 		if (quadIndices != null) quadIndices.free();
 		vkDestroyQueryPool(vk, compactionQueries, null);

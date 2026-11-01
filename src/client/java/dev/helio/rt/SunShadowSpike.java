@@ -10,7 +10,6 @@ import dev.helio.mixin.VulkanCommandEncoderAccessor;
 import dev.helio.vk.GpuTimers;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.TextureAtlas;
-import net.minecraft.core.SectionPos;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
@@ -57,7 +56,7 @@ public final class SunShadowSpike {
 			if (device == null) init(Helio.device);
 			VkCommandBuffer cmd = ((VulkanCommandEncoderAccessor) device.createCommandEncoder()).helio$commandBuffer();
 			boolean on = HelioConfig.current.rayTracing;
-			Scene.update(cmd, SectionPos.of(cameraPos), on);
+			Scene.update(cmd, cameraPos, on);
 			if (!on || Scene.tlas == 0) return;
 
 			Vector3f sun = new Matrix4f().rotateY((float) (-Math.PI / 2)).rotateX(sunAngle).transformDirection(new Vector3f(0, 1, 0));
