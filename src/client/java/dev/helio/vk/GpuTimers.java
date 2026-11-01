@@ -16,7 +16,7 @@ import static org.lwjgl.vulkan.VK12.*;
  * submits in flight) and smoothed. Costs a few timestamp writes per frame, so it's always on.
  */
 public final class GpuTimers {
-	public enum Pass { SUN_SHADOWS, FG_MOTION, DLSS_G }
+	public enum Pass { SCENE_BUILD, SUN_SHADOWS, FG_MOTION, DLSS_G }
 
 	private static final int RING = 4, PASSES = Pass.values().length;
 	private static final double SMOOTHING = 0.05;

@@ -1,7 +1,10 @@
 #version 460
 #extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_EXT_scalar_block_layout : require
 
-// M0 spike: per pixel, rebuild the world position from vanilla's depth and trace one ray to the sun.
+// Per pixel, rebuild the world position from vanilla's depth and trace one ray to the sun.
 // Blocked pixels get darkened in place in vanilla's colour target.
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -9,12 +12,37 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform accelerationStructureEXT scene;
 layout(binding = 1) uniform sampler2D depthTex;
 layout(binding = 2, rgba8) uniform image2D colorImg;
+layout(binding = 3) uniform sampler2D blockAtlas;
+
+// Section vertices in vanilla's BLOCK format, 7 floats each: position xyz, colour, UV0 uv, lightmap.
+layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Vertices { float v[]; };
+// One vertex-buffer address per TLAS instance.
+layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer InstanceInfo { uvec2 vertices[]; };
+
+const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u;
 
 layout(push_constant) uniform Push {
-	mat4 invViewProj;  // inverse(projection * viewRotation): NDC -> camera-relative world
-	vec4 cameraInScene; // camera position relative to the scene origin
+	mat4 invViewProj;   // inverse(projection * viewRotation): NDC -> camera-relative world
+	vec4 cameraInScene; // camera position relative to the scene anchor
 	vec4 sunDir;        // xyz towards the sun, w = shadow strength
+	uvec2 instanceInfo;
 } pc;
+
+vec2 uvAt(Vertices vb, uint vertex) {
+	return vec2(vb.v[vertex * 7u + 4u], vb.v[vertex * 7u + 5u]);
+}
+
+// Cutout candidate: does the texel under the hit point pass vanilla's 0.5 alpha cutoff?
+bool cutoutHit(rayQueryEXT rq) {
+	Vertices vb = Vertices(InstanceInfo(pc.instanceInfo).vertices[rayQueryGetIntersectionInstanceIdEXT(rq, false)]);
+	uint prim = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+	uint base = (prim >> 1) * 4u;
+	// Quads are indexed 0 1 2, 2 3 0.
+	uvec3 c = (prim & 1u) == 0u ? uvec3(0u, 1u, 2u) : uvec3(2u, 3u, 0u);
+	vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, false);
+	vec2 uv = uvAt(vb, base + c.x) * (1.0 - b.x - b.y) + uvAt(vb, base + c.y) * b.x + uvAt(vb, base + c.z) * b.y;
+	return textureLod(blockAtlas, uv, 0.0).a >= 0.5;
+}
 
 void main() {
 	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
@@ -29,9 +57,11 @@ void main() {
 	vec3 pos = h.xyz / h.w + pc.cameraInScene.xyz;
 
 	rayQueryEXT rq;
-	rayQueryInitializeEXT(rq, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF,
+	rayQueryInitializeEXT(rq, scene, gl_RayFlagsTerminateOnFirstHitEXT, MASK_SOLID | MASK_CUTOUT,
 		pos + pc.sunDir.xyz * 0.01, 0.01, pc.sunDir.xyz, 512.0);
-	while (rayQueryProceedEXT(rq)) {}
+	while (rayQueryProceedEXT(rq)) {
+		if (cutoutHit(rq)) rayQueryConfirmIntersectionEXT(rq);
+	}
 
 	if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
 		vec4 c = imageLoad(colorImg, p);

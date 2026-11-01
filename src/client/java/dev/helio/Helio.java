@@ -9,8 +9,10 @@ import dev.helio.ngx.DlssLibraries;
 import dev.helio.ngx.FrameGenSpike;
 import dev.helio.ngx.Ngx;
 import dev.helio.ngx.NgxStartup;
+import dev.helio.rt.Scene;
 import dev.helio.vk.GpuTimers;
 import dev.helio.vk.HelioFeatures;
+import dev.helio.vk.Memory;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
@@ -65,6 +67,10 @@ public class Helio implements ClientModInitializer {
 		dlssExtensions = enabled.contains(HelioFeatures.DLSS);
 		reflex = enabled.contains(HelioFeatures.REFLEX);
 		LOG.info("Vulkan device ready: ray tracing={}, DLSS extensions={}, Reflex={}", rayTracing, dlssExtensions, reflex);
+		if (rayTracing) {
+			Memory.init(dev);
+			Scene.init(dev.vkDevice());
+		}
 		if (!dlssExtensions) {
 			dlssStatus = "GPU or driver lacks VK_NVX_binary_import / VK_NVX_image_view_handle";
 		} else if (DlssLibraries.present(helioDir().resolve("ngx"))) {
@@ -133,13 +139,18 @@ public class Helio implements ClientModInitializer {
 	public static void onDeviceClosing() {
 		device.graphicsQueue().waitIdle();
 		GpuTimers.destroy();
-		if (!dlss) return;
-		try {
-			FrameGenSpike.release();
-			Ngx.shutdown(device.vkDevice().address());
-			LOG.info("NGX shut down");
-		} catch (Throwable t) {
-			LOG.error("NGX shutdown failed", t);
+		if (dlss) {
+			try {
+				FrameGenSpike.release();
+				Ngx.shutdown(device.vkDevice().address());
+				LOG.info("NGX shut down");
+			} catch (Throwable t) {
+				LOG.error("NGX shutdown failed", t);
+			}
+		}
+		if (rayTracing) {
+			Scene.destroy();
+			Memory.destroy();
 		}
 	}
 

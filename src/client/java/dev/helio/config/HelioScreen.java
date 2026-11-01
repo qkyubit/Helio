@@ -39,19 +39,25 @@ public class HelioScreen extends OptionsSubScreen {
 		list.addSmall(
 			unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", CycleButton.onOffBuilder(c.rayTracing)
 				.create(Component.translatable("helio.ray_tracing"), (b, v) -> changed(() -> c.rayTracing = v))),
+			unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", CycleButton.builder((Integer n) -> Component.translatable("helio.rt_distance.value", n), c.rayTracingDistance)
+				.withValues(4, 6, 8, 12, 16, 24, 32)
+				.withTooltip(n -> Tooltip.create(Component.translatable("helio.rt_distance.tooltip")))
+				.create(Component.translatable("helio.rt_distance"), (b, v) -> c.rayTracingDistance = v)));
+		list.addSmall(
 			unsupportedIf(!Helio.dlss || !Helio.ngxCaps.frameGeneration(), "DLSS " + Helio.dlssStatus,
 				// ponytail: 2x only until M4 adds multi frame generation (up to 1 + ngxCaps.mfgMax()).
 				CycleButton.builder((Integer n) -> n == 1 ? Component.translatable("options.off") : Component.literal(n + "x"), c.frameGeneration)
 					.withValues(1, 2)
 					.withTooltip(n -> Tooltip.create(Component.translatable("helio.frame_generation.tooltip")))
-					.create(Component.translatable("helio.frame_generation"), (b, v) -> changed(() -> c.frameGeneration = v))));
-		list.addSmall(
+					.create(Component.translatable("helio.frame_generation"), (b, v) -> changed(() -> c.frameGeneration = v))),
 			unsupportedIf(!Helio.reflex, "no VK_NV_low_latency2", CycleButton.builder((ReflexMode m) -> Component.translatable("helio.reflex." + m.name().toLowerCase()), c.reflex)
 				.withValues(ReflexMode.values())
 				.withTooltip(m -> Tooltip.create(Component.translatable("helio.reflex.tooltip")))
-				.create(Component.translatable("helio.reflex"), (b, v) -> changed(() -> c.reflex = v))),
+				.create(Component.translatable("helio.reflex"), (b, v) -> changed(() -> c.reflex = v))));
+		list.addSmall(
 			CycleButton.onOffBuilder(c.perfOverlay)
-				.create(Component.translatable("helio.perf_overlay"), (b, v) -> c.perfOverlay = v));
+				.create(Component.translatable("helio.perf_overlay"), (b, v) -> c.perfOverlay = v),
+			null);
 	}
 
 	/** Any manual change means the settings no longer match a preset. */

@@ -2,9 +2,10 @@ package dev.helio;
 
 import dev.helio.config.HelioConfig;
 import dev.helio.ngx.FrameGenSpike;
-import dev.helio.rt.SunShadowSpike;
+import dev.helio.rt.Scene;
 import dev.helio.vk.GpuTimers;
 import dev.helio.vk.GpuTimers.Pass;
+import dev.helio.vk.Memory;
 import dev.helio.vk.Reflex;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
@@ -43,7 +44,11 @@ public final class PerfOverlay {
 		lines.add("Helio " + c.preset.name().toLowerCase() + ", " + mc.getFps() + " fps");
 		if (!Helio.rayTracing) lines.add("Ray tracing: unsupported");
 		else if (!c.rayTracing) lines.add("Ray tracing: off");
-		else lines.add("Sun shadows " + ms(Pass.SUN_SHADOWS) + ", scene " + SunShadowSpike.sceneTriangles / 1000 + "k tris (rebuild " + SunShadowSpike.lastRebuildMs + " ms CPU)");
+		else {
+			lines.add("Scene " + Scene.instanceCount + " BLAS, " + Scene.tlasTriangles / 1000 + "k tris, " + Scene.sectionCount + " sections, "
+				+ Scene.pendingCount + " queued, build " + ms(Pass.SCENE_BUILD) + ", " + (Memory.allocated.get() >> 20) + " MB");
+			lines.add("Sun shadows " + ms(Pass.SUN_SHADOWS));
+		}
 		if (!Double.isNaN(GpuTimers.ms(Pass.DLSS_G)))
 			lines.add("FG " + FrameGenSpike.renderedFps + " -> " + FrameGenSpike.presentedFps + " fps, DLSS-G " + ms(Pass.DLSS_G) + ", motion " + ms(Pass.FG_MOTION));
 		else lines.add("Frame generation: " + (Helio.dlss ? "off" : "DLSS " + Helio.dlssStatus));

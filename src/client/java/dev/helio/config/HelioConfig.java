@@ -28,6 +28,8 @@ public final class HelioConfig {
 	public Preset preset = Preset.BALANCED;
 	/** Master switch for every ray-traced effect; the toggle key flips it. */
 	public boolean rayTracing = true;
+	/** Chunks around the player that rays can hit, capped by the render distance. */
+	public int rayTracingDistance = 12;
 	/** Presented frames per rendered frame: 1 = off, 2 = DLSS frame generation 2x, up to 1 + driver max for MFG. */
 	public int frameGeneration = 2;
 	public ReflexMode reflex = ReflexMode.ON;
@@ -60,6 +62,7 @@ public final class HelioConfig {
 		if (current.preset == null) current.preset = Preset.BALANCED;
 		if (current.reflex == null) current.reflex = ReflexMode.ON;
 		current.frameGeneration = Math.clamp(current.frameGeneration, 1, 6);
+		current.rayTracingDistance = Math.clamp(current.rayTracingDistance, 2, 32);
 	}
 
 	public static String toJson() {

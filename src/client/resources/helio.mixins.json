@@ -4,8 +4,12 @@
 	"compatibilityLevel": "JAVA_25",
 	"client": [
 		"GameRendererMixin",
+		"LevelExtractorMixin",
 		"LevelRendererMixin",
 		"MinecraftMixin",
+		"RenderSectionMixin",
+		"SectionCompileTaskMixin",
+		"ViewAreaAccessor",
 		"VulkanCommandEncoderAccessor",
 		"VulkanCommandEncoderMixin",
 		"VulkanConstMixin",

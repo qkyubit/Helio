@@ -273,6 +273,33 @@ Exit: mod loads, toggles cleanly, survives missing DLSS libs/unsupported GPU.
 
 Exit: stable TLAS while flying at speed; no hitching from BLAS builds.
 
+**M2 progress:**
+- [x] **Section BLAS from vanilla's meshes** (`rt/Scene.java`). No mesher of our
+  own: a mixin on the section compile task copies each layer's vertices
+  (vanilla BLOCK format, 28 B) into a BDA buffer on the compile worker, so every
+  block model, fluid and 3D pack is in, and block updates arrive as recompiles.
+  Vanilla's `RenderSection.reset` removes a section. One BLAS per section layer,
+  sharing one quad index buffer (vanilla's 0 1 2, 2 3 0 order).
+- [x] Render thread builds from the queue at most 256 BLAS / 256k triangles per
+  frame, in Mojang's command buffer before the trace. Compaction 4 frames later
+  (query → copy → deferred free). Freed GPU objects wait 4 frames.
+- [x] TLAS every frame from all sections within the RT distance, visible or not,
+  camera-section anchor for float precision. Vanilla only compiles visible
+  sections, so `LevelExtractor` also offers it every section within the RT
+  distance; its own dirty check compiles each once.
+- [x] Masks: solid 1 (opaque), cutout 2 (alpha-tested against the block atlas in
+  the ray query loop via instance → vertex-buffer address → UV), translucent 4
+  (shadow rays skip it). Sun shadows moved onto the scene.
+- [x] RT distance setting (4–32 chunks, capped by render distance).
+- First reading, 12-chunk render distance, forest spawn: 9554 BLAS, 7.3M
+  triangles, 5463 sections, 565 MB (vertices + compacted BLAS). Queue drained
+  within seconds of joining; steady-state scene update 0.07 ms GPU; sun shadows
+  0.22 ms with alpha-tested leaves. Clean exit.
+- [ ] Fly-at-speed test (user).
+- [ ] Entities, block entities, held item, particles: dynamic BLAS.
+- [ ] Opacity micromaps for cutout.
+- [ ] Debug views.
+
 ### M3 — Path tracer core
 
 - G-buffer + motion vectors (incl. entities, animated textures).
