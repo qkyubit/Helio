@@ -5,6 +5,7 @@ import com.mojang.renderpearl.backend.vulkan.init.FeatureSet;
 import com.mojang.renderpearl.backend.vulkan.init.VulkanFeature;
 import com.mojang.renderpearl.backend.vulkan.init.VulkanPNextStruct;
 import org.lwjgl.vulkan.VkPhysicalDeviceAccelerationStructureFeaturesKHR;
+import org.lwjgl.vulkan.VkPhysicalDeviceOpacityMicromapFeaturesEXT;
 import org.lwjgl.vulkan.VkPhysicalDevicePresentIdFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayQueryFeaturesKHR;
 
@@ -49,7 +50,12 @@ public final class HelioFeatures {
 		Set.of("VK_NV_low_latency2", "VK_KHR_present_id"),
 		Set.of(new VulkanFeature(new VulkanPNextStruct(VkPhysicalDevicePresentIdFeaturesKHR.class), "presentId")));
 
-	public static final Set<FeatureSet> ALL = Set.of(RAY_TRACING, DLSS, REFLEX);
+	// Lets cutout geometry (leaves, plants) skip most alpha tests during traversal.
+	public static final FeatureSet OPACITY_MICROMAP = new FeatureSet("Helio opacity micromaps",
+		Set.of("VK_EXT_opacity_micromap"),
+		Set.of(new VulkanFeature(new VulkanPNextStruct(VkPhysicalDeviceOpacityMicromapFeaturesEXT.class), "micromap")));
+
+	public static final Set<FeatureSet> ALL = Set.of(RAY_TRACING, DLSS, REFLEX, OPACITY_MICROMAP);
 
 	private HelioFeatures() {}
 }

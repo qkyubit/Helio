@@ -34,6 +34,8 @@ public class Helio implements ClientModInitializer {
 	public static VulkanDevice device;
 	/** Device extensions for each feature were enabled. {@code dlss} additionally means NGX is up. */
 	public static boolean rayTracing, dlssExtensions, dlss, reflex;
+	/** Opacity micromaps for cutout geometry (config {@code opacityMicromaps}, read at startup). */
+	public static boolean omm;
 	public static NgxStartup.Caps ngxCaps;
 	/** Why DLSS is or isn't running, for the settings screen and debug report. */
 	public static String dlssStatus = "not started";
@@ -72,7 +74,8 @@ public class Helio implements ClientModInitializer {
 		rayTracing = enabled.contains(HelioFeatures.RAY_TRACING);
 		dlssExtensions = enabled.contains(HelioFeatures.DLSS);
 		reflex = enabled.contains(HelioFeatures.REFLEX);
-		LOG.info("Vulkan device ready: ray tracing={}, DLSS extensions={}, Reflex={}", rayTracing, dlssExtensions, reflex);
+		omm = rayTracing && enabled.contains(HelioFeatures.OPACITY_MICROMAP) && HelioConfig.current.opacityMicromaps;
+		LOG.info("Vulkan device ready: ray tracing={}, DLSS extensions={}, Reflex={}, opacity micromaps={}", rayTracing, dlssExtensions, reflex, omm);
 		if (rayTracing) {
 			Memory.init(dev);
 			Scene.init(dev.vkDevice());

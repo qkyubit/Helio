@@ -1,0 +1,107 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_EXT_scalar_block_layout : require
+
+// Opacity micromap input for one cutout section layer: 4-state, subdivision level 4 (256 micro-triangles,
+// 64 bytes per triangle). Micro-triangles whose texels are all opaque or all clear skip the alpha test in
+// ray traversal; mixed ones stay "unknown" and fall back to it, so results match the plain alpha test.
+// One invocation per output word (16 micro-triangles).
+
+layout(local_size_x = 64) in;
+
+layout(binding = 0) uniform sampler2D blockAtlas;
+
+// Section vertices in vanilla's BLOCK format, 7 floats each: position xyz, colour, UV0 uv, lightmap.
+layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Vertices { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 4) writeonly buffer Words { uint w[]; };
+
+layout(push_constant) uniform Push {
+	uvec2 vertices;
+	uvec2 data;      // 16 words per triangle
+	uvec2 triangles; // VkMicromapTriangleEXT per triangle
+	uint triangleCount;
+} pc;
+
+const uint LEVEL = 4u, WORDS_PER_TRIANGLE = 16u;
+const uint FORMAT_4_STATE = 2u;
+const uint TRANSPARENT = 0u, OPAQUE = 1u, UNKNOWN_TRANSPARENT = 2u;
+
+// Micro-triangle order ("bird curve"), after NVIDIA's vk_mini_samples mm_opacity/bird_curve_helper.cpp.
+uint extractEvenBits(uint x) {
+	x &= 0x55555555u;
+	x = (x | (x >> 1)) & 0x33333333u;
+	x = (x | (x >> 2)) & 0x0f0f0f0fu;
+	x = (x | (x >> 4)) & 0x00ff00ffu;
+	x = (x | (x >> 8)) & 0x0000ffffu;
+	return x;
+}
+
+uint prefixEor(uint x) {
+	x ^= x >> 1;
+	x ^= x >> 2;
+	x ^= x >> 4;
+	x ^= x >> 8;
+	return x;
+}
+
+// Corners of micro-triangle `index` as (u, v): the weights of the triangle's 2nd and 3rd vertex.
+void microTriangle(uint index, out vec2 p0, out vec2 p1, out vec2 p2) {
+	uint b0 = extractEvenBits(index), b1 = extractEvenBits(index >> 1);
+	uint fx = prefixEor(b0), fy = prefixEor(b0 & ~b1);
+	uint t = fy ^ b1;
+	uint m = (1u << LEVEL) - 1u;
+	uint iu = ((fx & ~t) | (b0 & ~t) | (~b0 & ~fx & t)) & m;
+	uint iv = (fy ^ b0) & m;
+	uint iw = ((~fx & ~t) | (b0 & ~t) | (~b0 & fx & t)) & m;
+	bool upright = ((iu ^ iv ^ iw) & 1u) != 0u;
+	if (!upright) {
+		iu += 1u;
+		iv += 1u;
+	}
+	float s = 1.0 / float(1u << LEVEL), d = upright ? s : -s;
+	vec2 p = vec2(iu, iv) * s;
+	p0 = p;
+	p1 = p + vec2(d, 0.0);
+	p2 = p + vec2(0.0, d);
+}
+
+vec2 uvAt(Vertices vb, uint vertex) {
+	return vec2(vb.v[vertex * 7u + 4u], vb.v[vertex * 7u + 5u]);
+}
+
+void main() {
+	uint id = gl_GlobalInvocationID.x;
+	uint tri = id / WORDS_PER_TRIANGLE, word = id % WORDS_PER_TRIANGLE;
+	if (tri >= pc.triangleCount) return;
+	if (word == 0u) {
+		Words t = Words(pc.triangles);
+		t.w[tri * 2u] = tri * WORDS_PER_TRIANGLE * 4u; // data offset in bytes
+		t.w[tri * 2u + 1u] = LEVEL | (FORMAT_4_STATE << 16);
+	}
+
+	Vertices vb = Vertices(pc.vertices);
+	uint base = (tri >> 1) * 4u;
+	// Quads are indexed 0 1 2, 2 3 0.
+	uvec3 c = (tri & 1u) == 0u ? uvec3(0u, 1u, 2u) : uvec3(2u, 3u, 0u);
+	vec2 t0 = uvAt(vb, base + c.x), t1 = uvAt(vb, base + c.y), t2 = uvAt(vb, base + c.z);
+
+	uint bits = 0u;
+	for (uint i = 0u; i < 16u; i++) {
+		vec2 p0, p1, p2;
+		microTriangle(word * 16u + i, p0, p1, p2);
+		vec2 centre = (p0 + p1 + p2) / 3.0;
+		// Corners and edge midpoints pulled slightly inwards (they sit on texel edges), plus the centre.
+		vec2 samples[7] = vec2[](mix(p0, centre, 0.05), mix(p1, centre, 0.05), mix(p2, centre, 0.05),
+			mix((p0 + p1) * 0.5, centre, 0.05), mix((p1 + p2) * 0.5, centre, 0.05), mix((p2 + p0) * 0.5, centre, 0.05), centre);
+		uint opaque = 0u;
+		for (int k = 0; k < 7; k++) {
+			vec2 b = samples[k];
+			vec2 uv = t0 * (1.0 - b.x - b.y) + t1 * b.x + t2 * b.y;
+			if (textureLod(blockAtlas, uv, 0.0).a >= 0.5) opaque++;
+		}
+		uint state = opaque == 7u ? OPAQUE : opaque == 0u ? TRANSPARENT : UNKNOWN_TRANSPARENT;
+		bits |= state << (2u * i);
+	}
+	Words(pc.data).w[tri * WORDS_PER_TRIANGLE + word] = bits;
+}

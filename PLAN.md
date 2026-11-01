@@ -317,7 +317,17 @@ Exit: stable TLAS while flying at speed; no hitching from BLAS builds.
   (glint, trims, eyes, blob shadows, outlines, text) skipped. User-confirmed
   shadows from a fox, chest and armour stand. Not yet: entity texture alpha
   (needs bindless textures, M3), particles, the player's own body in first person.
-- [ ] Opacity micromaps for cutout.
+- [x] **Opacity micromaps** (`rt/Micromaps.java`, `shaders/omm.comp`): cutout
+  layers get a 4-state, level-4 micromap (256 micro-triangles, 64 B per
+  triangle) classified on the GPU from the block atlas; mixed micro-triangles
+  keep the alpha test. Micro-triangle order from NVIDIA's vk_mini_samples
+  `mm_opacity/bird_curve_helper.cpp`. **A/B in a dense forest (user):** sun
+  shadows 0.78 ms on vs 0.75 ms off, scene memory 1256 vs 628 MB. One coherent
+  first-hit shadow ray per pixel never paid much for alpha tests, so OMM is **off
+  by default** (`opacityMicromaps` in `helio.json`, startup only). Re-measure in
+  M3 with incoherent bounce rays through foliage; if it wins there, cut memory
+  with level 3 (16 B per triangle) and special indices for fully opaque or clear
+  triangles.
 - [ ] Debug views.
 
 ### M3 — Path tracer core
