@@ -349,6 +349,39 @@ Exit: stable TLAS while flying at speed; no hitching from BLAS builds.
 Exit: daytime overworld, cave with torches, and a lava-lit Nether scene all
 look right with accumulation on (reference) and stable with 1 spp.
 
+**M3 architecture (decided 2026-11-01):**
+- **Where:** inside vanilla's `main` frame pass, after the solid render pass
+  (opaque terrain + solid entities) and before translucents, clouds, weather and
+  particles. Helio's compute passes overwrite the main colour with path-traced
+  radiance; vanilla then draws transparent things on top with its own depth.
+  Improved Transparency (OIT) already ends the solid render pass there; with
+  classic transparency, Helio skips `executeClassicTransparency` inside the solid
+  pass and replays it in a fresh render pass after its own work.
+- **Primary visibility:** ray-traced from the camera (the debug views prove the
+  G-buffer path), not read back from vanilla's raster. Vanilla depth stays as is
+  for translucent sorting.
+- **Albedo:** atlas × vertex tint for terrain. Vanilla bakes AO into the vertex
+  colour; strip it by recomputing the tint per face (or compiling sections with
+  AO off for Helio's copy). Entities need their own textures: capture the
+  render type's Sampler0 per draw into a bindless array and keep UVs.
+- **Output:** linear HDR radiance in a Helio image, then a simple tonemap into
+  the main colour until M6's post chain. Temporal accumulation while the camera
+  is still (the reference mode); DLSS RR replaces it in M4.
+
+**M3 steps:**
+1. [ ] Hook point + skeleton: own HDR target, primary rays, sun direct light
+   with shadow ray, flat sky ambient, write to main colour. Retire the M0
+   shadow-overlay pass.
+2. [ ] Accumulation (reference mode) + motion vectors from reprojection
+   (camera); feed DLSS-G the new vectors.
+3. [ ] Soft sun shadows (cone sampling), moon, sky light from a simple sky model.
+4. [ ] Entity textures (bindless) and AO-free albedo.
+5. [ ] Emissive blocks: light list from block light level + texture colour;
+   ReSTIR DI.
+6. [ ] Indirect: 1–2 bounces + SHaRC-style radiance cache. Re-test OMM here.
+7. [ ] Water / glass / ice: reflection + refraction.
+8. [ ] Hybrid preset (RT shadows + reflections only).
+
 ### M4 — DLSS integration
 
 - DLSS RR for RT path (quality modes, DLAA). DLSS SR for non-RT path.
