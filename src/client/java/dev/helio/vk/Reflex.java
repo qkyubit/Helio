@@ -18,7 +18,7 @@ import static org.lwjgl.vulkan.VK12.*;
  */
 public final class Reflex {
 	private static VkDevice device;
-	private static long swapchain, timeline, frameId;
+	private static long swapchain, timeline, frameId, lastPresentId;
 	private static boolean inFrame;
 	private static HelioConfig.ReflexMode appliedMode;
 
@@ -120,9 +120,13 @@ public final class Reflex {
 		inFrame = false;
 	}
 
-	/** Present ID for the present showing this frame's real image (0 = none). */
+	/**
+	 * Present ID for the present showing this frame's real image (0 = none). Loading screens can present
+	 * more than once per frame; IDs must strictly increase, so repeats go without one.
+	 */
 	public static long presentId() {
-		return active() ? frameId : 0;
+		if (!active() || frameId <= lastPresentId) return 0;
+		return lastPresentId = frameId;
 	}
 
 	private static void marker(int marker) {

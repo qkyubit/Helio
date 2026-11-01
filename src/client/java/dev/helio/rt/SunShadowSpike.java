@@ -40,7 +40,7 @@ import static org.lwjgl.vulkan.VK12.*;
  */
 public final class SunShadowSpike {
 	private static final float SHADOW_STRENGTH = 0.55f;
-	private static final int PUSH_SIZE = 104;
+	private static final int PUSH_SIZE = 112;
 
 	private static VulkanDevice device;
 	private static long sampler, setLayout, pipelineLayout, pipeline;
@@ -61,7 +61,7 @@ public final class SunShadowSpike {
 			if (!on || Scene.tlas == 0) return;
 
 			Vector3f sun = new Matrix4f().rotateY((float) (-Math.PI / 2)).rotateX(sunAngle).transformDirection(new Vector3f(0, 1, 0));
-			if (sun.y < 0.02f) return; // ponytail: night = no shadows; moon light is M3
+			if (sun.y < 0.02f && HelioConfig.current.debugView == HelioConfig.DebugView.OFF) return; // ponytail: night = no shadows; moon light is M3
 			dispatch(cmd, cameraPos, viewRotation, sun);
 		} catch (Throwable t) {
 			failed = true;
@@ -161,9 +161,10 @@ public final class SunShadowSpike {
 			ByteBuffer pc = s.malloc(PUSH_SIZE);
 			new Matrix4f(levelProjection).mul(viewRotation).invert().get(0, pc);
 			pc.putFloat(64, (float) (cameraPos.x - Scene.anchorX)).putFloat(68, (float) (cameraPos.y - Scene.anchorY))
-				.putFloat(72, (float) (cameraPos.z - Scene.anchorZ)).putFloat(76, 0)
+				.putFloat(72, (float) (cameraPos.z - Scene.anchorZ)).putFloat(76, HelioConfig.current.debugView.ordinal())
 				.putFloat(80, sun.x).putFloat(84, sun.y).putFloat(88, sun.z).putFloat(92, SHADOW_STRENGTH)
-				.putLong(96, Scene.instanceInfo);
+				.putLong(96, Scene.instanceInfo)
+				.putFloat(104, Scene.rtDistanceBlocks);
 			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
 
 			vkCmdDispatch(cmd, (main.width + 7) / 8, (main.height + 7) / 8, 1);

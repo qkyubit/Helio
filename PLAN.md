@@ -291,11 +291,24 @@ Exit: stable TLAS while flying at speed; no hitching from BLAS builds.
   the ray query loop via instance → vertex-buffer address → UV), translucent 4
   (shadow rays skip it). Sun shadows moved onto the scene.
 - [x] RT distance setting (4–32 chunks, capped by render distance).
-- First reading, 12-chunk render distance, forest spawn: 9554 BLAS, 7.3M
-  triangles, 5463 sections, 565 MB (vertices + compacted BLAS). Queue drained
-  within seconds of joining; steady-state scene update 0.07 ms GPU; sun shadows
-  0.22 ms with alpha-tested leaves. Clean exit.
-- [ ] Fly-at-speed test (user).
+- [x] RT distance fade: shadows fade over the last section instead of popping.
+- [x] Debug view setting: BLAS Instances (primary rays, one colour per instance,
+  magenta = miss).
+- Bugs found in testing: LWJGL's `pGeometries()` doesn't set `geometryCount`
+  (shared with `ppGeometries`), so every BLAS and the TLAS were empty until it was
+  set by hand; compaction copies needed a barrier before the TLAS build; Reflex
+  reused a present ID when a loading screen presented twice in one frame.
+  Testing note: Prism keeps instance settings in memory and rewrites
+  `instance.cfg`, so edit it only with Prism closed. Under the validation layer
+  `vkLatencySleepNV` blocks and DLSS-G feature creation segfaults; test those
+  without it.
+- Dev flag `-Dhelio.flyTest=true`: flies east at 40 blocks/s.
+- Reading, 12-chunk render distance, taiga spawn: 9553 BLAS, 7.35M triangles,
+  5122 sections, 652 MB (vertices + compacted BLAS); steady scene update
+  0.1–0.2 ms GPU.
+- [x] **Fly test (user, 2026-11-01):** queue rises and drains instantly, no
+  hitches, no missing shadows, block updates instant, no crashes. Exit criterion
+  met for terrain.
 - [ ] Entities, block entities, held item, particles: dynamic BLAS.
 - [ ] Opacity micromaps for cutout.
 - [ ] Debug views.

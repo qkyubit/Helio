@@ -23,9 +23,10 @@ const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u;
 
 layout(push_constant) uniform Push {
 	mat4 invViewProj;   // inverse(projection * viewRotation): NDC -> camera-relative world
-	vec4 cameraInScene; // camera position relative to the scene anchor
+	vec4 cameraInScene; // xyz camera position relative to the scene anchor, w = debug view (0 off, 1 instances)
 	vec4 sunDir;        // xyz towards the sun, w = shadow strength
 	uvec2 instanceInfo;
+	float rtDistance;   // blocks the scene surely covers around the camera, horizontally
 } pc;
 
 vec2 uvAt(Vertices vb, uint vertex) {
@@ -57,6 +58,21 @@ void main() {
 	vec3 pos = h.xyz / h.w + pc.cameraInScene.xyz;
 
 	rayQueryEXT rq;
+	if (pc.cameraInScene.w == 1.0) {
+		// Debug: primary ray from the camera; colour per BLAS instance, magenta where the scene has nothing.
+		vec3 dir = normalize(pos - pc.cameraInScene.xyz);
+		rayQueryInitializeEXT(rq, scene, gl_RayFlagsNoneEXT, 0xFFu, pc.cameraInScene.xyz, 0.05, dir, 1024.0);
+		while (rayQueryProceedEXT(rq)) {
+			if (cutoutHit(rq)) rayQueryConfirmIntersectionEXT(rq);
+		}
+		vec3 c = vec3(1.0, 0.0, 1.0);
+		if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+			uint id = uint(rayQueryGetIntersectionInstanceIdEXT(rq, true)) * 2654435761u;
+			c = vec3((id >> 8) & 255u, (id >> 16) & 255u, (id >> 24) & 255u) / 255.0 * 0.8 + 0.2;
+		}
+		imageStore(colorImg, p, vec4(c, 1.0));
+		return;
+	}
 	rayQueryInitializeEXT(rq, scene, gl_RayFlagsTerminateOnFirstHitEXT, MASK_SOLID | MASK_CUTOUT,
 		pos + pc.sunDir.xyz * 0.01, 0.01, pc.sunDir.xyz, 512.0);
 	while (rayQueryProceedEXT(rq)) {
@@ -64,7 +80,10 @@ void main() {
 	}
 
 	if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+		// Fade out over the last section before the RT distance instead of a hard edge.
+		vec2 d = abs(pos.xz - pc.cameraInScene.xz);
+		float fade = 1.0 - smoothstep(pc.rtDistance - 16.0, pc.rtDistance, max(d.x, d.y));
 		vec4 c = imageLoad(colorImg, p);
-		imageStore(colorImg, p, vec4(c.rgb * (1.0 - pc.sunDir.w), c.a));
+		imageStore(colorImg, p, vec4(c.rgb * (1.0 - pc.sunDir.w * fade), c.a));
 	}
 }

@@ -20,6 +20,8 @@ public final class HelioConfig {
 
 	public enum ReflexMode { OFF, ON, BOOST }
 
+	public enum DebugView { OFF, INSTANCES }
+
 	private static final Path FILE = FabricLoader.getInstance().getConfigDir().resolve("helio.json");
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
@@ -34,6 +36,7 @@ public final class HelioConfig {
 	public int frameGeneration = 2;
 	public ReflexMode reflex = ReflexMode.ON;
 	public boolean perfOverlay = false;
+	public DebugView debugView = DebugView.OFF;
 	/** Fetch the DLSS libraries from NVIDIA's GitHub on first launch. Off: drop them into helio/ngx/ by hand. */
 	public boolean downloadDlss = true;
 
@@ -61,6 +64,7 @@ public final class HelioConfig {
 		}
 		if (current.preset == null) current.preset = Preset.BALANCED;
 		if (current.reflex == null) current.reflex = ReflexMode.ON;
+		if (current.debugView == null) current.debugView = DebugView.OFF;
 		current.frameGeneration = Math.clamp(current.frameGeneration, 1, 6);
 		current.rayTracingDistance = Math.clamp(current.rayTracingDistance, 2, 32);
 	}

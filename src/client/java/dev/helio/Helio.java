@@ -46,8 +46,14 @@ public class Helio implements ClientModInitializer {
 		KeyMapping.Category category = KeyMapping.Category.register(Identifier.fromNamespaceAndPath("helio", "helio"));
 		KeyMapping toggleRt = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.helio.toggle_rt", InputConstants.KEY_H, category));
 		KeyMapping settings = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.helio.settings", InputConstants.UNKNOWN.getValue(), category));
+		boolean flyTest = Boolean.getBoolean("helio.flyTest");
 		ClientTickEvents.END_CLIENT_TICK.register(mc -> {
 			SelfCheck.tick(mc);
+			// Dev stress test (-Dhelio.flyTest=true): fly east at 40 blocks/s so new sections stream in nonstop.
+			if (flyTest && mc.player != null && mc.gui.screen() == null) {
+				mc.player.getAbilities().flying = true;
+				mc.player.setPos(mc.player.getX() + 2, Math.max(mc.player.getY(), 100), mc.player.getZ());
+			}
 			while (settings.consumeClick()) mc.gui.setScreen(new HelioScreen(mc.gui.screen()));
 			while (toggleRt.consumeClick()) {
 				HelioConfig c = HelioConfig.current;

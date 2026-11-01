@@ -2,6 +2,7 @@ package dev.helio.config;
 
 import dev.helio.Helio;
 import dev.helio.SelfCheck;
+import dev.helio.config.HelioConfig.DebugView;
 import dev.helio.config.HelioConfig.Preset;
 import dev.helio.config.HelioConfig.ReflexMode;
 import net.minecraft.client.Minecraft;
@@ -57,7 +58,10 @@ public class HelioScreen extends OptionsSubScreen {
 		list.addSmall(
 			CycleButton.onOffBuilder(c.perfOverlay)
 				.create(Component.translatable("helio.perf_overlay"), (b, v) -> c.perfOverlay = v),
-			null);
+			unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", CycleButton.builder((DebugView v) -> Component.translatable("helio.debug_view." + v.name().toLowerCase()), c.debugView)
+				.withValues(DebugView.values())
+				.withTooltip(v -> Tooltip.create(Component.translatable("helio.debug_view.tooltip")))
+				.create(Component.translatable("helio.debug_view"), (b, v) -> c.debugView = v)));
 	}
 
 	/** Any manual change means the settings no longer match a preset. */

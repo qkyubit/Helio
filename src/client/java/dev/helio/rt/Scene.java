@@ -96,6 +96,8 @@ public final class Scene {
 	/** For the trace passes; tlas is 0 when there's nothing to trace. Positions are relative to the anchor block. */
 	public static long tlas, instanceInfo;
 	public static int anchorX, anchorY, anchorZ;
+	/** Horizontal distance from the camera that the TLAS surely covers (whole sections within the RT distance). */
+	public static int rtDistanceBlocks;
 	/** Overlay stats. */
 	public static int sectionCount, instanceCount, pendingCount, lastBuilds;
 	public static long tlasTriangles;
@@ -248,6 +250,7 @@ public final class Scene {
 					oldStorage.free();
 				});
 			}
+			asBarrier(cmd, s); // this frame's TLAS build reads the copies
 		}
 		built.clear();
 	}
@@ -294,7 +297,7 @@ public final class Scene {
 				VkAccelerationStructureBuildGeometryInfoKHR info = infos.get(i).sType$Default()
 					.type(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
 					.flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR)
-					.mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).pGeometries(geoms.slice(i, 1));
+					.mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).pGeometries(geoms.slice(i, 1)).geometryCount(1); // pGeometries() leaves the count at 0
 				count.put(0, g.quads * 2);
 				vkGetAccelerationStructureBuildSizesKHR(vk, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, info, count, sizes);
 				Blas b = g.blas;
@@ -336,6 +339,7 @@ public final class Scene {
 		anchorY = camera.minBlockY();
 		anchorZ = camera.minBlockZ();
 		int r = rtDistance();
+		rtDistanceBlocks = r * 16;
 
 		int count = 0;
 		for (Geo[] geos : sections.values()) for (Geo g : geos) if (g != null) count++;
@@ -380,7 +384,7 @@ public final class Scene {
 		geom.geometry().instances().sType$Default().arrayOfPointers(false).data().deviceAddress(buf.address());
 		VkAccelerationStructureBuildGeometryInfoKHR.Buffer info = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, s).sType$Default()
 			.type(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR).flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
-			.mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).pGeometries(geom);
+			.mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).pGeometries(geom).geometryCount(1);
 		if (n > tlasCapacity) {
 			if (tlasHandle != 0) {
 				long oldHandle = tlasHandle;
