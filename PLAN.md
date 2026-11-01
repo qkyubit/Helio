@@ -369,7 +369,7 @@ look right with accumulation on (reference) and stable with 1 spp.
   is still (the reference mode); DLSS RR replaces it in M4.
 
 **M3 steps:**
-1. [~] Hook point + skeleton (`rt/PathTracer.java`, `shaders/pathtrace.comp`):
+1. [x] Hook point + skeleton (`rt/PathTracer.java`, `shaders/pathtrace.comp`):
    primary rays, sun with a shadow ray, flat sky ambient scaled by vanilla's sky
    light, block-light stand-in from vanilla's light level, ACES fit tonemap into
    the main colour. Runs at `executeOit` HEAD (Improved Transparency) or, with
@@ -377,9 +377,11 @@ look right with accumulation on (reference) and stable with 1 spp.
    in its own render pass after tracing. M0 shadow overlay retired. Entities keep
    vanilla shading darkened in shadow until step 4. View bobbing translates
    inside vanilla's projection, so rays unproject the near plane as origin
-   (user-confirmed: picture stays locked). 1.0 ms at 1440p native. Still to check:
-   caves/torches, classic-transparency path. No separate HDR target yet (writes
-   tonemapped colour directly); accumulation in step 2 needs one.
+   (user-confirmed: picture stays locked). 1.0 ms at 1440p native over 7M
+   triangles, 1.8 ms in a cave over 11M. User-checked: daylight, cave with
+   torches, water/glass/entities drawn over it by vanilla, no edge artifacts.
+   Known: no shadows on water (vanilla draws it; step 7). No separate HDR target
+   yet (writes tonemapped colour directly); accumulation in step 2 needs one.
 2. [ ] Accumulation (reference mode) + motion vectors from reprojection
    (camera); feed DLSS-G the new vectors.
 3. [ ] Soft sun shadows (cone sampling), moon, sky light from a simple sky model.
