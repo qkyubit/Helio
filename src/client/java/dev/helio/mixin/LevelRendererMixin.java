@@ -1,5 +1,7 @@
 package dev.helio.mixin;
 
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.llamalad7.mixinextras.sugar.Local;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.systems.RenderSystem;
@@ -52,32 +54,53 @@ public class LevelRendererMixin {
 		Entities.end();
 	}
 
-	// Improved Transparency: the opaque render pass has ended; translucents come next.
-	@Inject(method = "executeOit", at = @At("HEAD"))
-	private void helio$pathTraceBeforeOit(CallbackInfo ci) {
-		PathTracer.run();
+	/*
+	 * The path tracer replaces opaque terrain only. Vanilla draws terrain, then solid features (entities,
+	 * particles, sign text, overlays) and, with classic transparency, translucents, all in one render pass
+	 * where compute can't run. So the features and classic translucents are held back, and once that pass
+	 * has ended Helio traces, then replays them in a pass of its own over the traced terrain.
+	 */
+	@WrapOperation(method = "executeSolid", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher$PreparedFrame;executeSolid(Lcom/mojang/renderpearl/api/commands/RenderPass;)V"))
+	private void helio$deferSolidFeatures(FeatureRenderDispatcher.PreparedFrame features, RenderPass renderPass, Operation<Void> original) {
+		if (!PathTracer.active()) {
+			original.call(features, renderPass);
+			return;
+		}
+		helio$deferredFeatures = features;
 	}
 
-	// Classic transparency draws inside the opaque render pass, where compute can't run: hold it back...
 	@Inject(method = "executeClassicTransparency", at = @At("HEAD"), cancellable = true)
 	private void helio$deferClassicTransparency(ChunkSectionsToRender sections, FeatureRenderDispatcher.PreparedFrame features, RenderPass renderPass, CallbackInfo ci) {
-		if (helio$replaying || !PathTracer.active()) return;
+		if (helio$replaying || helio$deferredFeatures == null) return;
 		helio$deferredSections = sections;
-		helio$deferredFeatures = features;
 		ci.cancel();
 	}
 
-	// ...then, once that pass has ended, path trace and replay it in a pass of its own.
+	// Improved Transparency: the opaque render pass has ended; OIT translucents come next.
+	@Inject(method = "executeOit", at = @At("HEAD"))
+	private void helio$traceBeforeOit(CallbackInfo ci) {
+		helio$traceAndReplay();
+	}
+
+	// Classic transparency: the combined pass has ended.
 	@Inject(method = "executeOutline", at = @At("HEAD"))
-	private void helio$pathTraceBeforeClassicTransparency(CallbackInfo ci) {
-		if (helio$deferredSections == null) return;
+	private void helio$traceBeforeOutline(CallbackInfo ci) {
+		helio$traceAndReplay();
+	}
+
+	@Unique
+	private void helio$traceAndReplay() {
+		if (helio$deferredFeatures == null) return;
 		PathTracer.run();
 		RenderTarget main = gameRenderer.mainRenderTarget();
 		try (RenderPass pass = RenderSystem.getDevice().createCommandEncoder()
-			.createRenderPass(() -> "Helio translucent", main.getColorTextureView(), Optional.empty(), main.getDepthTextureView(), OptionalDouble.empty())) {
+			.createRenderPass(() -> "Helio solid features", main.getColorTextureView(), Optional.empty(), main.getDepthTextureView(), OptionalDouble.empty())) {
 			RenderSystem.bindDefaultUniforms(pass);
-			helio$replaying = true;
-			executeClassicTransparency(helio$deferredSections, helio$deferredFeatures, pass);
+			helio$deferredFeatures.executeSolid(pass);
+			if (helio$deferredSections != null) {
+				helio$replaying = true;
+				executeClassicTransparency(helio$deferredSections, helio$deferredFeatures, pass);
+			}
 		} finally {
 			helio$replaying = false;
 			helio$deferredSections = null;

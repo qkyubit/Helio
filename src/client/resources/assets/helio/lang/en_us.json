@@ -33,6 +33,8 @@
 	"helio.reflex.on": "On",
 	"helio.reflex.boost": "On + Boost",
 	"helio.perf_overlay": "Performance Overlay",
+	"helio.accumulate": "Reference Accumulation",
+	"helio.accumulate.tooltip": "Averages frames while the camera and world are still, for a clean, anti-aliased reference picture. Moving mobs smear while it's on.",
 	"helio.debug_view": "Debug View",
 	"helio.debug_view.off": "Off",
 	"helio.debug_view.instances": "BLAS Instances",

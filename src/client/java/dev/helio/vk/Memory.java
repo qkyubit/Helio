@@ -10,6 +10,8 @@ import org.lwjgl.util.vma.VmaVulkanFunctions;
 import org.lwjgl.vulkan.VkBufferCreateInfo;
 import org.lwjgl.vulkan.VkBufferDeviceAddressInfo;
 import org.lwjgl.vulkan.VkDevice;
+import org.lwjgl.vulkan.VkImageCreateInfo;
+import org.lwjgl.vulkan.VkImageViewCreateInfo;
 
 import java.nio.LongBuffer;
 import java.util.concurrent.atomic.AtomicLong;
@@ -71,6 +73,31 @@ public final class Memory {
 			if ((address & 255) != 0) throw new IllegalStateException("buffer address not 256-aligned: 0x" + Long.toHexString(address));
 			allocated.addAndGet(size);
 			return new Buf(pBuf.get(0), pAlloc.get(0), address, info.pMappedData(), size);
+		}
+	}
+
+	public record Img(long image, long allocation, long view, int width, int height) {
+		public void free() {
+			vkDestroyImageView(vk, view, null);
+			vmaDestroyImage(vma, image, allocation);
+		}
+	}
+
+	/** Device-local 2D storage image (one mip). Callers move it to VK_IMAGE_LAYOUT_GENERAL before use. */
+	public static Img storageImage(int width, int height, int format) {
+		try (MemoryStack s = MemoryStack.stackPush()) {
+			LongBuffer pImage = s.mallocLong(1);
+			PointerBuffer pAlloc = s.mallocPointer(1);
+			VkImageCreateInfo ci = VkImageCreateInfo.calloc(s).sType$Default().imageType(VK_IMAGE_TYPE_2D).format(format)
+				.mipLevels(1).arrayLayers(1).samples(VK_SAMPLE_COUNT_1_BIT).tiling(VK_IMAGE_TILING_OPTIMAL)
+				.usage(VK_IMAGE_USAGE_STORAGE_BIT).initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
+			ci.extent().set(width, height, 1);
+			check(vmaCreateImage(vma, ci, VmaAllocationCreateInfo.calloc(s).usage(VMA_MEMORY_USAGE_AUTO), pImage, pAlloc, null), "vmaCreateImage");
+			LongBuffer pView = s.mallocLong(1);
+			VkImageViewCreateInfo vi = VkImageViewCreateInfo.calloc(s).sType$Default().image(pImage.get(0)).viewType(VK_IMAGE_VIEW_TYPE_2D).format(format);
+			vi.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1);
+			check(vkCreateImageView(vk, vi, null, pView), "image view");
+			return new Img(pImage.get(0), pAlloc.get(0), pView.get(0), width, height);
 		}
 	}
 

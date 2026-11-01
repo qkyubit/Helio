@@ -62,6 +62,11 @@ public class HelioScreen extends OptionsSubScreen {
 				.withValues(DebugView.values())
 				.withTooltip(v -> Tooltip.create(Component.translatable("helio.debug_view.tooltip")))
 				.create(Component.translatable("helio.debug_view"), (b, v) -> c.debugView = v)));
+		list.addSmall(
+			unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", CycleButton.onOffBuilder(c.accumulate)
+				.withTooltip(v -> Tooltip.create(Component.translatable("helio.accumulate.tooltip")))
+				.create(Component.translatable("helio.accumulate"), (b, v) -> c.accumulate = v)),
+			null);
 	}
 
 	/** Any manual change means the settings no longer match a preset. */

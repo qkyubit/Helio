@@ -4,8 +4,9 @@
 #extension GL_EXT_buffer_reference_uvec2 : require
 #extension GL_EXT_scalar_block_layout : require
 
-// M3 path tracer, step 1: primary ray per pixel, sun with a shadow ray, sky and block light. Runs between
-// vanilla's opaque and translucent passes and overwrites the main colour where rays hit the scene.
+// M3 path tracer: primary ray per pixel, sun with a shadow ray, sky and block light, averaged over frames
+// while nothing changes. Runs between vanilla's opaque and translucent passes and composites into the main
+// colour where rays hit the scene.
 // Lighting is a placeholder until the sky model (step 3), emissives (5) and bounces (6) arrive.
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -13,6 +14,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform accelerationStructureEXT scene;
 layout(binding = 1, rgba8) uniform image2D colorImg;
 layout(binding = 2) uniform sampler2D blockAtlas;
+layout(binding = 3, rgba32f) uniform image2D accumImg; // premultiplied radiance + coverage, averaged over frames
 
 // Section vertices in vanilla's BLOCK format, 7 floats each: position xyz, colour, UV0 uv, lightmap (2 shorts).
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Vertices { float v[]; };
@@ -28,7 +30,6 @@ const uint DEBUG_INSTANCES = 1u, DEBUG_ALBEDO = 2u, DEBUG_NORMALS = 3u, DEBUG_TR
 const vec3 SUN = vec3(1.0, 0.92, 0.80) * 2.4;
 const vec3 SKY = vec3(0.42, 0.58, 0.85) * 0.75;
 const vec3 BLOCK_LIGHT = vec3(1.0, 0.68, 0.38) * 1.6;
-const float ENTITY_SHADOW = 0.55; // entities keep vanilla shading until their textures are bound (step 4)
 
 layout(push_constant) uniform Push {
 	mat4 invViewProj;   // inverse(projection * viewRotation): NDC -> camera-relative world
@@ -36,6 +37,8 @@ layout(push_constant) uniform Push {
 	vec4 sunDir;        // xyz towards the sun, w = daylight (0 night .. 1 day)
 	uvec2 instanceInfo;
 	float rtDistance;   // blocks the scene surely covers around the camera, horizontally
+	uint frameIndex;    // frames accumulated so far; 0 restarts
+	vec2 jitter;        // sub-pixel offset of the primary ray (zero without accumulation)
 } pc;
 
 struct Hit {
@@ -127,38 +130,27 @@ vec3 tonemap(vec3 x) {
 	return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
 }
 
-void main() {
-	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-	ivec2 size = imageSize(colorImg);
-	if (any(greaterThanEqual(p, size))) return;
-
-	// Primary ray through the pixel centre, matching vanilla's projection. View bobbing translates inside
-	// the projection, so the eye isn't at the origin: unproject the near plane (reversed-Z: ndc 1) as well.
-	vec2 ndc = (vec2(p) + 0.5) / vec2(size) * 2.0 - 1.0;
+// Linear radiance seen through pixel position `pixel` (fractional); coverage 0 where vanilla's picture stays.
+vec4 radiance(vec2 pixel, vec2 size) {
+	// Primary ray, matching vanilla's projection. View bobbing translates inside the projection, so the eye
+	// isn't at the origin: unproject the near plane (reversed-Z: ndc 1) as well.
+	vec2 ndc = pixel / size * 2.0 - 1.0;
 	vec4 near = pc.invViewProj * vec4(ndc, 1.0, 1.0), mid = pc.invViewProj * vec4(ndc, 0.5, 1.0);
 	vec3 origin = near.xyz / near.w;
 	vec3 dir = normalize(mid.xyz / mid.w - origin);
 	vec3 camera = pc.cameraInScene.xyz + origin;
 
+	// Terrain only: vanilla draws entities, particles and translucents over this afterwards (entities still
+	// cast shadows below).
 	rayQueryEXT rq;
-	uint debugView = uint(pc.cameraInScene.w);
-	if (debugView != 0u) {
-		vec3 c = vec3(1.0, 0.0, 1.0); // magenta: the scene has nothing here
-		TRACE(rq, camera, dir, 1024.0, 0xFFu, gl_RayFlagsNoneEXT)
-		if (HIT(rq)) c = debugColour(rq, dir, debugView);
-		imageStore(colorImg, p, vec4(c, 1.0));
-		return;
-	}
-
-	// Translucent geometry is left to vanilla, which draws it over this afterwards.
-	TRACE(rq, camera, dir, 1024.0, MASK_SOLID | MASK_CUTOUT | MASK_DYNAMIC, gl_RayFlagsNoneEXT)
-	if (!HIT(rq)) return;
+	TRACE(rq, camera, dir, 1024.0, MASK_SOLID | MASK_CUTOUT, gl_RayFlagsNoneEXT)
+	if (!HIT(rq)) return vec4(0.0);
 	vec3 pos = camera + dir * rayQueryGetIntersectionTEXT(rq, true);
 	Hit h = shade(rq, dir);
 
 	// Past the RT distance the scene thins out; leave vanilla's picture there.
 	vec2 d = abs(pos.xz - camera.xz);
-	if (max(d.x, d.y) > pc.rtDistance) return;
+	if (max(d.x, d.y) > pc.rtDistance) return vec4(0.0);
 
 	vec3 sun = pc.sunDir.xyz;
 	float nl = max(dot(h.normal, sun), 0.0);
@@ -169,19 +161,40 @@ void main() {
 		visible = HIT(shadow) ? 0.0 : 1.0;
 	}
 
-	if (h.kind == KIND_DYNAMIC) {
-		// Entities: vanilla's own shading, darkened where shadowed.
-		if (sun.y > 0.0 && visible == 0.0) {
-			vec4 c = imageLoad(colorImg, p);
-			imageStore(colorImg, p, vec4(c.rgb * (1.0 - ENTITY_SHADOW * pc.sunDir.w), c.a));
-		}
+	float sky = h.light.y * h.light.y;
+	return vec4(h.albedo * (
+		SUN * nl * visible * pc.sunDir.w
+		+ SKY * sky * mix(0.08, 1.0, pc.sunDir.w) * (0.75 + 0.25 * h.normal.y)
+		+ BLOCK_LIGHT * pow(h.light.x, 2.2)), 1.0);
+}
+
+void main() {
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 size = imageSize(colorImg);
+	if (any(greaterThanEqual(p, size))) return;
+
+	uint debugView = uint(pc.cameraInScene.w);
+	if (debugView != 0u) {
+		vec2 ndc = (vec2(p) + 0.5) / vec2(size) * 2.0 - 1.0;
+		vec4 near = pc.invViewProj * vec4(ndc, 1.0, 1.0), mid = pc.invViewProj * vec4(ndc, 0.5, 1.0);
+		vec3 origin = near.xyz / near.w;
+		vec3 dir = normalize(mid.xyz / mid.w - origin);
+		rayQueryEXT rq;
+		vec3 c = vec3(1.0, 0.0, 1.0); // magenta: the scene has nothing here
+		TRACE(rq, pc.cameraInScene.xyz + origin, dir, 1024.0, 0xFFu, gl_RayFlagsNoneEXT)
+		if (HIT(rq)) c = debugColour(rq, dir, debugView);
+		imageStore(colorImg, p, vec4(c, 1.0));
 		return;
 	}
 
-	float sky = h.light.y * h.light.y;
-	vec3 radiance = h.albedo * (
-		SUN * nl * visible * pc.sunDir.w
-		+ SKY * sky * mix(0.08, 1.0, pc.sunDir.w) * (0.75 + 0.25 * h.normal.y)
-		+ BLOCK_LIGHT * pow(h.light.x, 2.2));
-	imageStore(colorImg, p, vec4(pow(tonemap(radiance), vec3(1.0 / 2.2)), 1.0));
+	// Running average of premultiplied radiance + coverage: frame 0 restarts it. Coverage < 1 blends with
+	// vanilla's picture (sky, terrain past the RT distance), which also anti-aliases those edges.
+	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size));
+	current.rgb *= current.a;
+	vec4 acc = pc.frameIndex == 0u ? current : mix(imageLoad(accumImg, p), current, 1.0 / float(pc.frameIndex + 1u));
+	imageStore(accumImg, p, acc);
+	if (acc.a <= 0.0) return;
+	vec4 vanilla = imageLoad(colorImg, p);
+	vec3 traced = pow(tonemap(acc.rgb / acc.a), vec3(1.0 / 2.2));
+	imageStore(colorImg, p, vec4(mix(vanilla.rgb, traced, acc.a), vanilla.a));
 }

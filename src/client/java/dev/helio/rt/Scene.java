@@ -111,6 +111,8 @@ public final class Scene {
 	public static int rtDistanceBlocks;
 	/** Overlay stats. */
 	public static int sectionCount, instanceCount, pendingCount, lastBuilds;
+	/** A section within 2 sections of the camera was rebuilt this frame (a block changed nearby). */
+	public static boolean nearbyRebuild;
 	public static long tlasTriangles, dynamicTriangles;
 
 	private Scene() {}
@@ -202,7 +204,7 @@ public final class Scene {
 			VulkanCommandEncoder.memoryBarrier(cmd, s); // earlier frames' traces and builds are done with what we overwrite
 			int slot = (int) (frame % RING);
 			compact(cmd, slot, s);
-			buildPending(cmd, slot, s);
+			buildPending(cmd, slot, camera, s);
 			buildDynamic(cmd, slot, s);
 			buildTlas(cmd, slot, camera, cameraPos, s);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
@@ -268,7 +270,8 @@ public final class Scene {
 		built.clear();
 	}
 
-	private static void buildPending(VkCommandBuffer cmd, int slot, MemoryStack s) {
+	private static void buildPending(VkCommandBuffer cmd, int slot, SectionPos camera, MemoryStack s) {
+		nearbyRebuild = false;
 		List<Geo> batch = new ArrayList<>();
 		int triangles = 0, maxQuads = 0;
 		var it = pending.long2ObjectEntrySet().fastIterator();
@@ -280,8 +283,11 @@ public final class Scene {
 				triangles += g.quads * 2;
 				maxQuads = Math.max(maxQuads, g.quads);
 			}
-			Geo[] old = sections.put(e.getLongKey(), e.getValue());
+			long node = e.getLongKey();
+			Geo[] old = sections.put(node, e.getValue());
 			if (old != null) deferFree(old);
+			if (Math.abs(SectionPos.x(node) - camera.x()) <= 2 && Math.abs(SectionPos.y(node) - camera.y()) <= 2
+				&& Math.abs(SectionPos.z(node) - camera.z()) <= 2) nearbyRebuild = true;
 			it.remove();
 		}
 		lastBuilds = batch.size();

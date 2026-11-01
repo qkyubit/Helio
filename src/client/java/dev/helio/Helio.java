@@ -9,6 +9,7 @@ import dev.helio.ngx.DlssLibraries;
 import dev.helio.ngx.FrameGenSpike;
 import dev.helio.ngx.Ngx;
 import dev.helio.ngx.NgxStartup;
+import dev.helio.rt.PathTracer;
 import dev.helio.rt.Scene;
 import dev.helio.vk.GpuTimers;
 import dev.helio.vk.HelioFeatures;
@@ -158,6 +159,7 @@ public class Helio implements ClientModInitializer {
 			}
 		}
 		if (rayTracing) {
+			PathTracer.destroy();
 			Scene.destroy();
 			Memory.destroy();
 		}

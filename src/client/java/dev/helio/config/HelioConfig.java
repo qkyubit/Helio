@@ -37,6 +37,8 @@ public final class HelioConfig {
 	public ReflexMode reflex = ReflexMode.ON;
 	public boolean perfOverlay = false;
 	public DebugView debugView = DebugView.OFF;
+	/** Average frames while the picture is still: a clean reference image. Moving entities smear. */
+	public boolean accumulate = false;
 	/**
 	 * Not in the UI; applies at startup. Off by default: for one shadow ray per pixel they saved nothing
 	 * (0.78 vs 0.75 ms) and doubled scene memory (1256 vs 628 MB). Re-measure with M3's bounce rays.

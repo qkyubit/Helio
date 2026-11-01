@@ -382,8 +382,18 @@ look right with accumulation on (reference) and stable with 1 spp.
    torches, water/glass/entities drawn over it by vanilla, no edge artifacts.
    Known: no shadows on water (vanilla draws it; step 7). No separate HDR target
    yet (writes tonemapped colour directly); accumulation in step 2 needs one.
-2. [ ] Accumulation (reference mode) + motion vectors from reprojection
-   (camera); feed DLSS-G the new vectors.
+2. [x] Accumulation: linear radiance + coverage averaged in an RGBA32F image,
+   tonemapped and composited into the main colour in the same shader (coverage
+   blends with vanilla at sky / RT-distance edges). "Reference Accumulation"
+   setting (off by default) jitters primary rays (Halton 2,3) and averages;
+   restarts on view change, sun jump (>0.05 rad) or a rebuild within 2 sections
+   of the camera, otherwise adapts (cap 256 frames). User-checked: climbs to
+   256. **Primary rays trace terrain only now:** vanilla's solid features
+   (entities, opaque particles, sign text, overlays) are held back from the
+   opaque render pass and replayed over the traced terrain (they had been
+   painted over). Entities show vanilla shading again but still cast RT shadows.
+   Motion vectors moved to step 4: with camera motion only they'd equal the
+   current depth-based ones.
 3. [ ] Soft sun shadows (cone sampling), moon, sky light from a simple sky model.
 4. [ ] Entity textures (bindless) and AO-free albedo.
 5. [ ] Emissive blocks: light list from block light level + texture colour;
@@ -425,7 +435,7 @@ Exit: 2–3 popular LabPBR packs (one 3D) render correctly; reload with F3+T.
 - Water: waves, caustics, underwater fog.
 - Post: auto exposure, bloom, AgX tonemap, colour-grading LUT, optional
   film grain / vignette.
-- HDR output on KWin Wayland (HDR10 swapchain), SDR fallback.
+- SDR output only (the user's monitor has no HDR); lighting stays HDR internally.
 
 Exit: side-by-side screenshots you're proud of; HDR verified on your monitor.
 

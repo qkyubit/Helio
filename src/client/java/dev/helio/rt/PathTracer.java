@@ -8,6 +8,7 @@ import dev.helio.Helio;
 import dev.helio.config.HelioConfig;
 import dev.helio.mixin.VulkanCommandEncoderAccessor;
 import dev.helio.vk.GpuTimers;
+import dev.helio.vk.Memory;
 import dev.helio.vk.Shaders;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.TextureAtlas;
@@ -38,7 +39,9 @@ import static org.lwjgl.vulkan.VK12.*;
  * so no layout transitions are needed; we add the same barrier after our dispatch.
  */
 public final class PathTracer {
-	private static final int PUSH_SIZE = 112;
+	private static final int PUSH_SIZE = 128;
+	/** Accumulation keeps adapting slowly after this many frames instead of freezing. */
+	private static final int MAX_FRAMES = 256;
 
 	/** The projection vanilla draws the level with (view bobbing, nausea warp included). */
 	public static final Matrix4f levelProjection = new Matrix4f();
@@ -49,6 +52,13 @@ public final class PathTracer {
 	private static Vec3 cameraPos = Vec3.ZERO;
 	private static final Matrix4f viewRotation = new Matrix4f();
 	private static float sunAngle;
+
+	private static Memory.Img accum;
+	/** Frames averaged into {@link #accum} so far (0: next frame restarts it). For the overlay too. */
+	public static int frameIndex;
+	private static final Matrix4f lastInvViewProj = new Matrix4f();
+	private static Vec3 lastCameraPos = Vec3.ZERO;
+	private static float accumSunAngle;
 
 	private PathTracer() {}
 
@@ -99,10 +109,11 @@ public final class PathTracer {
 				.magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_NEAREST).maxLod(0), null, h), "sampler");
 			sampler = h.get(0);
 
-			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(3, s);
+			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(4, s);
 			b.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
 			b.get(1).binding(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
 			b.get(2).binding(2).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+			b.get(3).binding(3).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
 			// Push descriptors: no pool, and safe to rewrite every frame while earlier frames are in flight.
 			check(vkCreateDescriptorSetLayout(vk, VkDescriptorSetLayoutCreateInfo.calloc(s).sType$Default()
 				.flags(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR).pBindings(b), null, h), "set layout");
@@ -133,33 +144,99 @@ public final class PathTracer {
 		VulkanGpuTextureView atlas = (VulkanGpuTextureView) mc.getTextureManager().getTexture(TextureAtlas.LOCATION_BLOCKS).getTextureView();
 		Vector3f sun = new Matrix4f().rotateY((float) (-Math.PI / 2)).rotateX(sunAngle).transformDirection(new Vector3f(0, 1, 0));
 		float daylight = smoothstep(-0.05f, 0.2f, sun.y);
+		Matrix4f invViewProj = new Matrix4f(levelProjection).mul(viewRotation).invert();
 
 		try (MemoryStack s = MemoryStack.stackPush()) {
+			ensureAccum(cmd, main.width, main.height, s);
+			updateAccumulation(invViewProj);
+			float jitterX = 0, jitterY = 0;
+			if (HelioConfig.current.accumulate) {
+				jitterX = halton(frameIndex + 1, 2) - 0.5f;
+				jitterY = halton(frameIndex + 1, 3) - 0.5f;
+			}
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(3, s);
+			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(4, s);
 			w.get(0).sType$Default().dstBinding(0).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
 				.pNext(VkWriteDescriptorSetAccelerationStructureKHR.calloc(s).sType$Default().pAccelerationStructures(s.longs(Scene.tlas)));
 			w.get(1).sType$Default().dstBinding(1).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
 				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(color.vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
 			w.get(2).sType$Default().dstBinding(2).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
 				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(sampler).imageView(atlas.vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+			w.get(3).sType$Default().dstBinding(3).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(accum.view()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
 			vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, w);
 
 			ByteBuffer pc = s.malloc(PUSH_SIZE);
-			new Matrix4f(levelProjection).mul(viewRotation).invert().get(0, pc);
+			invViewProj.get(0, pc);
 			pc.putFloat(64, (float) (cameraPos.x - Scene.anchorX)).putFloat(68, (float) (cameraPos.y - Scene.anchorY))
 				.putFloat(72, (float) (cameraPos.z - Scene.anchorZ)).putFloat(76, HelioConfig.current.debugView.ordinal())
 				.putFloat(80, sun.x).putFloat(84, sun.y).putFloat(88, sun.z).putFloat(92, daylight)
 				.putLong(96, Scene.instanceInfo)
-				.putFloat(104, Scene.rtDistanceBlocks).putFloat(108, 0);
+				.putFloat(104, Scene.rtDistanceBlocks).putInt(108, frameIndex)
+				.putFloat(112, jitterX).putFloat(116, jitterY);
 			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
 
 			vkCmdDispatch(cmd, (main.width + 7) / 8, (main.height + 7) / 8, 1);
 			GpuTimers.end(cmd, GpuTimers.Pass.PATH_TRACE);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
+			if (HelioConfig.current.accumulate) frameIndex = Math.min(frameIndex + 1, MAX_FRAMES);
 		}
+	}
+
+	/**
+	 * Reference accumulation restarts when the view changes (camera, projection, debug view), the sun jumps
+	 * (/time set), or blocks change right next to the camera. Distant rebuilds (grass spreading, leaf decay)
+	 * and the sun's slow drift just blend in: past {@value #MAX_FRAMES} frames the average keeps adapting.
+	 * Moving entities smear; it's a reference mode for still scenes.
+	 */
+	private static void updateAccumulation(Matrix4f invViewProj) {
+		boolean restart = !HelioConfig.current.accumulate || HelioConfig.current.debugView != HelioConfig.DebugView.OFF
+			|| !invViewProj.equals(lastInvViewProj) || !cameraPos.equals(lastCameraPos)
+			|| Math.abs(sunAngle - accumSunAngle) > 0.05f || Scene.nearbyRebuild;
+		lastInvViewProj.set(invViewProj);
+		lastCameraPos = cameraPos;
+		if (restart) {
+			frameIndex = 0;
+			accumSunAngle = sunAngle;
+		}
+	}
+
+	private static void ensureAccum(VkCommandBuffer cmd, int width, int height, MemoryStack s) {
+		if (accum != null && accum.width() == width && accum.height() == height) return;
+		if (accum != null) {
+			Memory.Img old = accum;
+			Scene.defer(old::free);
+		}
+		accum = Memory.storageImage(width, height, VK_FORMAT_R32G32B32A32_SFLOAT);
+		VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(1, s).sType$Default()
+			.oldLayout(VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK_IMAGE_LAYOUT_GENERAL)
+			.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+			.image(accum.image()).dstAccessMask(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+		barrier.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1);
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, null, null, barrier);
+		frameIndex = 0;
+	}
+
+	private static float halton(int i, int base) {
+		float f = 1, r = 0;
+		for (; i > 0; i /= base) {
+			f /= base;
+			r += f * (i % base);
+		}
+		return r;
+	}
+
+	/** Device closing; the GPU is idle. */
+	public static void destroy() {
+		if (device == null) return;
+		VkDevice vk = device.vkDevice();
+		if (accum != null) accum.free();
+		vkDestroyPipeline(vk, pipeline, null);
+		vkDestroyPipelineLayout(vk, pipelineLayout, null);
+		vkDestroyDescriptorSetLayout(vk, setLayout, null);
+		vkDestroySampler(vk, sampler, null);
 	}
 
 	private static float smoothstep(float a, float b, float x) {
