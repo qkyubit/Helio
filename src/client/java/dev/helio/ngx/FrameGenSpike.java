@@ -228,6 +228,13 @@ public final class FrameGenSpike {
 		Helio.LOG.info("Frame generation spike initialised");
 	}
 
+	/** Releases the DLSS-G feature. Call with the GPU idle, before the device goes away. */
+	public static void release() throws Throwable {
+		if (feature.equals(MemorySegment.NULL)) return;
+		Ngx.releaseFeature(feature);
+		feature = MemorySegment.NULL;
+	}
+
 	private static void ensureTargets(int w, int h) throws Throwable {
 		if (w == width && h == height && interp != null) return;
 		if (interp != null) {

@@ -41,7 +41,7 @@ public final class Ngx {
 	private static SymbolLookup lib;
 
 	private static MethodHandle requiredExtensions, initWithProjectId, getCapabilityParameters, allocateParameters,
-		destroyParameters, setUI, setI, setF, setVoidPointer, getI, getUI, createFeature1, evaluateFeature, releaseFeature;
+		destroyParameters, setUI, setI, setF, setVoidPointer, getI, getUI, createFeature1, evaluateFeature, releaseFeature, shutdown1;
 
 	private Ngx() {}
 
@@ -70,6 +70,7 @@ public final class Ngx {
 		createFeature1 = bind("NVSDK_NGX_VULKAN_CreateFeature1", JAVA_INT, ADDRESS, ADDRESS, JAVA_INT, ADDRESS, ADDRESS);
 		evaluateFeature = bind("NVSDK_NGX_VULKAN_EvaluateFeature_C", JAVA_INT, ADDRESS, ADDRESS, ADDRESS, ADDRESS);
 		releaseFeature = bind("NVSDK_NGX_VULKAN_ReleaseFeature", JAVA_INT, ADDRESS);
+		shutdown1 = bind("NVSDK_NGX_VULKAN_Shutdown1", JAVA_INT, ADDRESS);
 	}
 
 	private static MethodHandle bind(String name, java.lang.foreign.MemoryLayout ret, java.lang.foreign.MemoryLayout... args) {
@@ -233,6 +234,13 @@ public final class Ngx {
 
 	public static void releaseFeature(MemorySegment handle) throws Throwable {
 		check("ReleaseFeature", (int) releaseFeature.invokeExact(handle));
+	}
+
+	/** Frees everything NGX holds on the device. All features must be released first; no-op if never loaded. */
+	public static void shutdown(long device) throws Throwable {
+		if (shutdown1 == null) return;
+		check("Shutdown1", (int) shutdown1.invokeExact(MemorySegment.ofAddress(device)));
+		shutdown1 = null;
 	}
 
 	/** DLSS-SR creation params, as set by NGX_VULKAN_CREATE_DLSS_EXT1. */

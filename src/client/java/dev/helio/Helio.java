@@ -2,7 +2,9 @@ package dev.helio;
 
 import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
 import com.mojang.renderpearl.backend.vulkan.init.FeatureSet;
-import dev.helio.ngx.NgxSelfTest;
+import dev.helio.ngx.FrameGenSpike;
+import dev.helio.ngx.Ngx;
+import dev.helio.ngx.NgxStartup;
 import dev.helio.vk.HelioFeatures;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
@@ -14,6 +16,7 @@ public class Helio implements ClientModInitializer {
 
 	public static VulkanDevice device;
 	public static boolean rayTracing, dlss, reflex;
+	public static NgxStartup.Caps ngxCaps;
 
 	@Override
 	public void onInitializeClient() {
@@ -28,11 +31,28 @@ public class Helio implements ClientModInitializer {
 		LOG.info("Vulkan device ready: ray tracing={}, DLSS extensions={}, Reflex={}", rayTracing, dlss, reflex);
 		if (dlss) {
 			try {
-				onBigStack(() -> NgxSelfTest.run(dev, FabricLoader.getInstance().getGameDir().resolve("helio")));
+				onBigStack(() -> ngxCaps = NgxStartup.run(dev, FabricLoader.getInstance().getGameDir().resolve("helio")));
+				LOG.info("DLSS: {}", ngxCaps);
 			} catch (Throwable t) {
-				LOG.error("NGX self-test failed; DLSS disabled", t);
+				LOG.error("NGX init failed; DLSS disabled", t);
 				dlss = false;
 			}
+		}
+	}
+
+	/**
+	 * DLSS-G keeps Vulkan objects alive in static state; if they outlive the device, its exit-time
+	 * destructors call into Vulkan layers the loader has already unloaded and segfault.
+	 */
+	public static void onDeviceClosing() {
+		if (!dlss) return;
+		try {
+			device.graphicsQueue().waitIdle();
+			FrameGenSpike.release();
+			Ngx.shutdown(device.vkDevice().address());
+			LOG.info("NGX shut down");
+		} catch (Throwable t) {
+			LOG.error("NGX shutdown failed", t);
 		}
 	}
 

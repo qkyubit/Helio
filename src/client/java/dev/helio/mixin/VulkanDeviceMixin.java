@@ -18,4 +18,9 @@ public class VulkanDeviceMixin {
 	private void helio$onCreated(CallbackInfo ci) {
 		Helio.onDeviceCreated((VulkanDevice) (Object) this, enabledFeatures);
 	}
+
+	@Inject(method = "close", at = @At("HEAD"))
+	private void helio$onClosing(CallbackInfo ci) {
+		Helio.onDeviceClosing();
+	}
 }
