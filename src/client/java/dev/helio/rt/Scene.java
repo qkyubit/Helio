@@ -130,6 +130,7 @@ public final class Scene {
 			vkResetQueryPool(vk, compactionQueries, 0, RING * MAX_BUILDS);
 		}
 		for (int i = 0; i < RING; i++) builtInSlot[i] = new ArrayList<>();
+		unshaded = HelioConfig.current.rayTracing;
 		ready = true;
 	}
 
@@ -158,6 +159,26 @@ public final class Scene {
 	/** Vanilla reset a section (unloaded, moved out of range, or the renderer was rebuilt). Any thread. */
 	public static void remove(long node) {
 		if (ready) incoming.add(new Upload(node, null));
+	}
+
+	/** True on a compile worker while it runs SectionCompiler.compile. */
+	public static final ThreadLocal<Boolean> COMPILING = ThreadLocal.withInitial(() -> Boolean.FALSE);
+	/** Sections are being compiled for the path tracer: no AO or face shading baked into vertex colours. */
+	public static volatile boolean unshaded;
+
+	public static boolean compilingUnshaded() {
+		return unshaded && COMPILING.get();
+	}
+
+	/**
+	 * Client tick: when the path tracer turns on or off, recompile every section so vanilla's own terrain
+	 * (drawn when it's off, and translucent blocks always) gets its baked shading back, or loses it.
+	 */
+	public static void tick(Minecraft mc) {
+		boolean want = Helio.rayTracing && HelioConfig.current.rayTracing;
+		if (want == unshaded) return;
+		unshaded = want;
+		if (mc.level != null) mc.levelExtractor.allChanged();
 	}
 
 	/**
@@ -374,18 +395,18 @@ public final class Scene {
 		dynamicTriangles = quads * 2L;
 		if (!dynamicBuilt) return;
 		ensureQuadIndices(quads);
-		long bytes = quads * 48L;
+		long bytes = (long) quads * 4 * Entities.STRIDE;
 		Buf vertices = dynamicVertices[slot];
 		if (vertices == null || vertices.size() < bytes) {
 			if (vertices != null) vertices.free(); // this slot's last use was RING frames ago
 			vertices = dynamicVertices[slot] = Memory.buffer(Math.max(bytes * 3 / 2, 1 << 20), BUILD_INPUT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
 		}
-		memCopy(Entities.positions, vertices.mapped(), bytes);
+		memCopy(Entities.vertices, vertices.mapped(), bytes);
 
 		VkAccelerationStructureGeometryKHR.Buffer geom = VkAccelerationStructureGeometryKHR.calloc(1, s).sType$Default()
-			.geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR).flags(VK_GEOMETRY_OPAQUE_BIT_KHR);
+			.geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR).flags(0); // alpha-tested against each entity's texture
 		VkAccelerationStructureGeometryTrianglesDataKHR tri = geom.geometry().triangles().sType$Default()
-			.vertexFormat(VK_FORMAT_R32G32B32_SFLOAT).vertexStride(12).maxVertex(quads * 4 - 1).indexType(VK_INDEX_TYPE_UINT32);
+			.vertexFormat(VK_FORMAT_R32G32B32_SFLOAT).vertexStride(Entities.STRIDE).maxVertex(quads * 4 - 1).indexType(VK_INDEX_TYPE_UINT32);
 		tri.vertexData().deviceAddress(vertices.address());
 		tri.indexData().deviceAddress(quadIndices.address());
 		VkAccelerationStructureBuildGeometryInfoKHR.Buffer info = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, s).sType$Default()

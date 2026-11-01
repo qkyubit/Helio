@@ -58,7 +58,8 @@ public class LevelRendererMixin {
 	 * The path tracer replaces opaque terrain only. Vanilla draws terrain, then solid features (entities,
 	 * particles, sign text, overlays) and, with classic transparency, translucents, all in one render pass
 	 * where compute can't run. So the features and classic translucents are held back, and once that pass
-	 * has ended Helio traces, then replays them in a pass of its own over the traced terrain.
+	 * has ended Helio traces, then replays them in a pass of its own over the traced terrain, and puts the
+	 * traced entity colour back over vanilla's entities (which it lets draw for their depth).
 	 */
 	@WrapOperation(method = "executeSolid", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher$PreparedFrame;executeSolid(Lcom/mojang/renderpearl/api/commands/RenderPass;)V"))
 	private void helio$deferSolidFeatures(FeatureRenderDispatcher.PreparedFrame features, RenderPass renderPass, Operation<Void> original) {
@@ -106,6 +107,7 @@ public class LevelRendererMixin {
 			helio$deferredSections = null;
 			helio$deferredFeatures = null;
 		}
+		PathTracer.compositeEntities();
 	}
 
 	// After the level frame graph: main colour + depth hold the finished world, GUI not drawn yet.

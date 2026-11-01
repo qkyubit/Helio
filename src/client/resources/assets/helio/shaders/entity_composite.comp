@@ -1,0 +1,21 @@
+#version 460
+
+// After vanilla's solid features: vanilla drew entities (so translucents drawn later respect their depth),
+// lit its own way. Where vanilla's depth is the entity surface the path tracer hit, put the traced colour
+// back. Anything vanilla drew in front (particles, name tags) has a nearer depth and stays.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D depthTex;
+layout(binding = 1, rgba8) uniform image2D colorImg;
+layout(binding = 2, rgba32f) readonly uniform image2D entityImg; // traced colour + NDC depth, a = 0: no entity
+
+void main() {
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	if (any(greaterThanEqual(p, imageSize(colorImg)))) return;
+	vec4 traced = imageLoad(entityImg, p);
+	if (traced.a <= 0.0) return;
+	float depth = texelFetch(depthTex, p, 0).r; // reversed-Z: larger is nearer
+	if (abs(depth - traced.a) > traced.a * 0.003) return;
+	imageStore(colorImg, p, vec4(traced.rgb, imageLoad(colorImg, p).a));
+}

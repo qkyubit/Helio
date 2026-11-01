@@ -3,11 +3,12 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 #extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_nonuniform_qualifier : require
 
 // M3 path tracer: primary ray per pixel, sun with a shadow ray, sky and block light, averaged over frames
 // while nothing changes. Runs between vanilla's opaque and translucent passes and composites into the main
 // colour where rays hit the scene.
-// Lighting is a placeholder until the sky model (step 3), emissives (5) and bounces (6) arrive.
+// Lighting is a placeholder until emissives (step 5) and bounces (6) arrive.
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -15,15 +16,17 @@ layout(binding = 0) uniform accelerationStructureEXT scene;
 layout(binding = 1, rgba8) uniform image2D colorImg;
 layout(binding = 2) uniform sampler2D blockAtlas;
 layout(binding = 3, rgba32f) uniform image2D accumImg; // premultiplied radiance + coverage, averaged over frames
+layout(binding = 4, rgba32f) uniform image2D entityImg; // traced colour + NDC depth where an entity is hit (entity_composite.comp)
+layout(set = 1, binding = 0) uniform sampler2D entityTextures[256]; // this frame's entity textures (Entities.textures)
 
-// Section vertices in vanilla's BLOCK format, 7 floats each: position xyz, colour, UV0 uv, lightmap (2 shorts).
+// Vertices in vanilla's BLOCK layout: position xyz, colour, UV0 uv, light levels (2 shorts); 7 floats for
+// sections, 8 for entities, whose 8th is the index into entityTextures.
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Vertices { float v[]; };
-// Per TLAS instance. kind: section layer (0 solid, 1 cutout, 2 translucent) or 3 = entities, whose vertices
-// are bare float3 positions.
+// Per TLAS instance. kind: section layer (0 solid, 1 cutout, 2 translucent) or 3 = entities.
 struct Instance { uvec2 vertices; uint triangles; uint kind; };
 layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer InstanceInfo { Instance i[]; };
 
-const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u, MASK_DYNAMIC = 8u;
+const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u, MASK_DYNAMIC = 8u, MASK_OPAQUE_SCENE = MASK_SOLID | MASK_CUTOUT | MASK_DYNAMIC;
 const uint KIND_DYNAMIC = 3u;
 const uint DEBUG_INSTANCES = 1u, DEBUG_ALBEDO = 2u, DEBUG_NORMALS = 3u, DEBUG_TRIANGLE_DENSITY = 4u;
 
@@ -48,6 +51,7 @@ layout(push_constant) uniform Push {
 	vec4 moonDir;       // xyz towards the moon, w = rain brightness (1 clear .. 0 raining)
 	vec4 skyColor;      // vanilla's sky (zenith) colour, sRGB; w = 1 if the dimension has a sky
 	vec4 fogColor;      // vanilla's fog (horizon) colour, sRGB
+	mat4 viewProj;      // camera-relative world -> NDC, for depths that match vanilla's
 } pc;
 
 struct Hit {
@@ -57,21 +61,31 @@ struct Hit {
 	vec2 light;     // vanilla block / sky light level, 0..1
 };
 
-vec2 uvAt(Vertices vb, uint vertex) {
-	return vec2(vb.v[vertex * 7u + 4u], vb.v[vertex * 7u + 5u]);
+uint strideOf(uint kind) {
+	return kind == KIND_DYNAMIC ? 8u : 7u;
 }
 
 vec3 posAt(Vertices vb, uint vertex, uint stride) {
 	return vec3(vb.v[vertex * stride], vb.v[vertex * stride + 1u], vb.v[vertex * stride + 2u]);
 }
 
-vec4 tintAt(Vertices vb, uint vertex) {
-	return unpackUnorm4x8(floatBitsToUint(vb.v[vertex * 7u + 3u]));
+vec4 tintAt(Vertices vb, uint vertex, uint stride) {
+	return unpackUnorm4x8(floatBitsToUint(vb.v[vertex * stride + 3u]));
 }
 
-vec2 lightAt(Vertices vb, uint vertex) {
-	uint packed = floatBitsToUint(vb.v[vertex * 7u + 6u]);
+vec2 uvAt(Vertices vb, uint vertex, uint stride) {
+	return vec2(vb.v[vertex * stride + 4u], vb.v[vertex * stride + 5u]);
+}
+
+vec2 lightAt(Vertices vb, uint vertex, uint stride) {
+	uint packed = floatBitsToUint(vb.v[vertex * stride + 6u]);
 	return vec2(packed & 0xFFFFu, packed >> 16) / 240.0;
+}
+
+// The block atlas for sections; the entity's own texture for entities.
+vec4 texel(Vertices vb, uint kind, uint vertex, vec2 uv) {
+	if (kind != KIND_DYNAMIC) return textureLod(blockAtlas, uv, 0.0);
+	return textureLod(entityTextures[nonuniformEXT(floatBitsToUint(vb.v[vertex * 8u + 7u]))], uv, 0.0);
 }
 
 // Quads are indexed 0 1 2, 2 3 0.
@@ -82,11 +96,14 @@ uvec3 triangleVertices(uint prim) {
 
 // Cutout candidate: does the texel under the hit point pass vanilla's 0.5 alpha cutoff?
 bool cutoutHit(rayQueryEXT rq) {
-	Vertices vb = Vertices(InstanceInfo(pc.instanceInfo).i[rayQueryGetIntersectionInstanceIdEXT(rq, false)].vertices);
+	Instance inst = InstanceInfo(pc.instanceInfo).i[rayQueryGetIntersectionInstanceIdEXT(rq, false)];
+	Vertices vb = Vertices(inst.vertices);
+	uint stride = strideOf(inst.kind);
 	uvec3 t = triangleVertices(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false));
 	vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, false);
-	vec2 uv = uvAt(vb, t.x) * (1.0 - b.x - b.y) + uvAt(vb, t.y) * b.x + uvAt(vb, t.z) * b.y;
-	return textureLod(blockAtlas, uv, 0.0).a >= 0.5;
+	vec2 uv = uvAt(vb, t.x, stride) * (1.0 - b.x - b.y) + uvAt(vb, t.y, stride) * b.x + uvAt(vb, t.z, stride) * b.y;
+	// ponytail: entities use vanilla's 0.1 cutoff in some render types; 0.5 is close enough for shadows.
+	return texel(vb, inst.kind, t.x, uv).a >= 0.5;
 }
 
 // A macro, not a function: a ray query initialised inside a callee isn't guaranteed to be the caller's.
@@ -101,20 +118,17 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 	h.kind = inst.kind;
 	Vertices vb = Vertices(inst.vertices);
 	uvec3 t = triangleVertices(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true));
-	uint stride = inst.kind == KIND_DYNAMIC ? 3u : 7u;
+	uint stride = strideOf(inst.kind);
 	vec3 p0 = posAt(vb, t.x, stride);
 	vec3 n = normalize(cross(posAt(vb, t.y, stride) - p0, posAt(vb, t.z, stride) - p0));
 	h.normal = dot(n, dir) > 0.0 ? -n : n;
-	h.albedo = vec3(0.5);
-	h.light = vec2(0.0, 1.0);
-	if (inst.kind == KIND_DYNAMIC) return h;
 	vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, true);
 	vec3 w = vec3(1.0 - b.x - b.y, b.x, b.y);
-	vec2 uv = uvAt(vb, t.x) * w.x + uvAt(vb, t.y) * w.y + uvAt(vb, t.z) * w.z;
-	// ponytail: vanilla bakes AO into the tint; step 4 strips it.
-	vec3 tint = tintAt(vb, t.x).rgb * w.x + tintAt(vb, t.y).rgb * w.y + tintAt(vb, t.z).rgb * w.z;
-	h.albedo = pow(textureLod(blockAtlas, uv, 0.0).rgb * tint, vec3(2.2));
-	h.light = lightAt(vb, t.x) * w.x + lightAt(vb, t.y) * w.y + lightAt(vb, t.z) * w.z;
+	vec2 uv = uvAt(vb, t.x, stride) * w.x + uvAt(vb, t.y, stride) * w.y + uvAt(vb, t.z, stride) * w.z;
+	// Terrain tint is biome colour only (Helio compiles sections without vanilla's AO and face shading).
+	vec3 tint = tintAt(vb, t.x, stride).rgb * w.x + tintAt(vb, t.y, stride).rgb * w.y + tintAt(vb, t.z, stride).rgb * w.z;
+	h.albedo = pow(texel(vb, inst.kind, t.x, uv).rgb * tint, vec3(2.2));
+	h.light = lightAt(vb, t.x, stride) * w.x + lightAt(vb, t.y, stride) * w.y + lightAt(vb, t.z, stride) * w.z;
 	return h;
 }
 
@@ -176,8 +190,13 @@ vec3 tonemap(vec3 x) {
 	return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
 }
 
+// Set by radiance(): the primary ray hit an entity, at this NDC depth.
+bool hitEntity;
+float hitDepth;
+
 // Linear radiance seen through pixel position `pixel` (fractional); coverage 0 where vanilla's picture stays.
 vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
+	hitEntity = false;
 	// Primary ray, matching vanilla's projection. View bobbing translates inside the projection, so the eye
 	// isn't at the origin: unproject the near plane (reversed-Z: ndc 1) as well.
 	vec2 ndc = pixel / size * 2.0 - 1.0;
@@ -186,17 +205,22 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 	vec3 dir = normalize(mid.xyz / mid.w - origin);
 	vec3 camera = pc.cameraInScene.xyz + origin;
 
-	// Terrain only: vanilla draws entities, particles and translucents over this afterwards (entities still
-	// cast shadows below).
+	// Terrain and entities; vanilla draws particles, overlays and translucents over this afterwards.
 	rayQueryEXT rq;
-	TRACE(rq, camera, dir, 1024.0, MASK_SOLID | MASK_CUTOUT, gl_RayFlagsNoneEXT)
+	TRACE(rq, camera, dir, 1024.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
 	if (!HIT(rq)) return vec4(0.0);
 	vec3 pos = camera + dir * rayQueryGetIntersectionTEXT(rq, true);
 	Hit h = shade(rq, dir);
+	if (h.kind == KIND_DYNAMIC) {
+		vec4 clip = pc.viewProj * vec4(pos - pc.cameraInScene.xyz, 1.0);
+		hitEntity = true;
+		hitDepth = clip.z / clip.w;
+	}
 
-	// Past the RT distance the scene thins out; leave vanilla's picture there.
+	// Past the RT distance the terrain thins out; leave vanilla's picture there. Entities are always traced
+	// (vanilla no longer draws them).
 	vec2 d = abs(pos.xz - camera.xz);
-	if (max(d.x, d.y) > pc.rtDistance) return vec4(0.0);
+	if (h.kind != KIND_DYNAMIC && max(d.x, d.y) > pc.rtDistance) return vec4(0.0);
 
 	// Sun by day, moon by night: one shadow ray toward a point on the disc (its centre unless stochastic).
 	bool day = pc.sunDir.y > 0.0;
@@ -207,7 +231,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		float nl = max(dot(h.normal, l), 0.0);
 		if (nl > 0.0) {
 			rayQueryEXT shadow;
-			TRACE(shadow, pos + h.normal * 0.002, l, 512.0, MASK_SOLID | MASK_CUTOUT | MASK_DYNAMIC, gl_RayFlagsTerminateOnFirstHitEXT)
+			TRACE(shadow, pos + h.normal * 0.002, l, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsTerminateOnFirstHitEXT)
 			if (!HIT(shadow)) direct = nl * (day ? sunRadiance(l.y) : MOON * pc.moonDir.w);
 		}
 	}
@@ -242,8 +266,11 @@ void main() {
 	current.rgb *= current.a;
 	vec4 acc = pc.frameIndex == 0u ? current : mix(imageLoad(accumImg, p), current, 1.0 / float(pc.frameIndex + 1u));
 	imageStore(accumImg, p, acc);
+	imageStore(entityImg, p, vec4(0.0));
 	if (acc.a <= 0.0) return;
 	vec4 vanilla = imageLoad(colorImg, p);
 	vec3 traced = pow(tonemap(acc.rgb / acc.a), vec3(1.0 / 2.2));
 	imageStore(colorImg, p, vec4(mix(vanilla.rgb, traced, acc.a), vanilla.a));
+	// Vanilla draws entities over this next (for their depth); entity_composite.comp puts this colour back.
+	if (hitEntity) imageStore(entityImg, p, vec4(traced, hitDepth));
 }

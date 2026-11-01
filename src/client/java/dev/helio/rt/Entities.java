@@ -7,15 +7,19 @@ import com.mojang.renderpearl.api.vertex.VertexFormat;
 import com.mojang.renderpearl.api.vertex.VertexFormatElement;
 import dev.helio.Helio;
 import dev.helio.config.HelioConfig;
+import dev.helio.mixin.RenderSetupAccessor;
 import dev.helio.mixin.RenderTypeAccessor;
 import dev.helio.mixin.StagedDrawAccessor;
+import dev.helio.mixin.TextureBindingAccessor;
 import net.minecraft.client.renderer.StagedVertexBuffer;
 import net.minecraft.client.renderer.rendertype.RenderType;
+import net.minecraft.resources.Identifier;
 
 import java.nio.ByteBuffer;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.lwjgl.system.MemoryUtil.*;
@@ -23,20 +27,30 @@ import static org.lwjgl.system.MemoryUtil.*;
 /**
  * Per-frame geometry of everything vanilla draws as features in the level: entities, block entities,
  * dropped items, armour, moving blocks. Captured from vanilla's shared vertex staging buffer while the
- * level's features are prepared (not the first-person hand or GUI items, which use their own frames),
- * as camera-relative positions. {@link Scene} turns it into one BLAS per frame.
+ * level's features are prepared (not the first-person hand or GUI items, which use their own frames).
+ * {@link Scene} turns it into one BLAS per frame; the path tracer shades it and puts its colour over
+ * vanilla's own entity pixels (vanilla still draws them, so their depth is there for translucents).
+ * <p>
+ * Vertices are vanilla's BLOCK layout plus a texture index, {@value #STRIDE} bytes: camera-relative
+ * position, colour, UV, light levels, index into {@link #textures}.
  */
 public final class Entities {
+	public static final int STRIDE = 32, MAX_TEXTURES = 256;
+
 	/** Render types whose geometry is a solid surface. Glints, trims, eyes, shadows, outlines and text are overlays or decals. */
 	private static final Set<String> SURFACES = Set.of(
 		"entity_solid", "entity_solid_z_offset_forward", "entity_cutout", "entity_cutout_cull", "entity_cutout_z_offset",
 		"entity_translucent", "entity_translucent_cull_item_target", "armor_cutout_no_cull",
 		"item_cutout", "item_translucent", "solid_moving_block", "cutout_moving_block");
+	private static final int FULL_SKY_LIGHT = 240 << 16;
 
-	private static final Set<StagedVertexBuffer.Draw> surfaces = Collections.newSetFromMap(new IdentityHashMap<>());
+	/** Surface draws of this frame and the texture each samples. */
+	private static final Map<StagedVertexBuffer.Draw, Integer> surfaces = new IdentityHashMap<>();
+	/** Textures the captured vertices index, this frame. */
+	static final List<Identifier> textures = new ArrayList<>();
 	private static boolean capturing;
-	/** Camera-relative float3 positions, 4 per quad. Render thread only. */
-	static long positions;
+	/** Vertices, 4 per quad. Render thread only. */
+	static long vertices;
 	private static long capacity;
 	static int quads;
 
@@ -46,6 +60,7 @@ public final class Entities {
 	public static void begin() {
 		capturing = Helio.rayTracing && HelioConfig.current.rayTracing;
 		surfaces.clear();
+		textures.clear();
 		quads = 0;
 	}
 
@@ -55,32 +70,52 @@ public final class Entities {
 	}
 
 	public static void tag(StagedVertexBuffer.Draw draw, RenderType type) {
-		if (capturing && SURFACES.contains(((RenderTypeAccessor) type).helio$name())) surfaces.add(draw);
+		if (!capturing || !SURFACES.contains(((RenderTypeAccessor) type).helio$name())) return;
+		Object binding = ((RenderSetupAccessor) (Object) ((RenderTypeAccessor) type).helio$state()).helio$textures().get("Sampler0");
+		if (binding == null) return;
+		Identifier texture = ((TextureBindingAccessor) binding).helio$location();
+		int index = textures.indexOf(texture);
+		if (index < 0) {
+			if (textures.size() == MAX_TEXTURES) return; // ponytail: vanilla keeps drawing the rest
+			index = textures.size();
+			textures.add(texture);
+		}
+		surfaces.put(draw, index);
 	}
 
 	/** Vanilla is about to copy the frame's draws to the GPU and free them. */
 	public static void capture(List<StagedVertexBuffer.Draw> draws) {
 		if (!capturing) return;
-		for (StagedVertexBuffer.Draw draw : draws) if (surfaces.contains(draw)) append((StagedDrawAccessor) draw);
+		for (StagedVertexBuffer.Draw draw : draws) {
+			Integer texture = surfaces.get(draw);
+			if (texture != null) append((StagedDrawAccessor) draw, texture);
+		}
 	}
 
-	private static void append(StagedDrawAccessor draw) {
+	private static void append(StagedDrawAccessor draw, int texture) {
 		if (draw.helio$primitiveTopology() != PrimitiveTopology.QUADS) return;
 		VertexFormat format = draw.helio$format();
-		VertexFormatElement pos = format.getElement("Position");
-		if (pos == null || pos.format() != GpuFormat.RGB32_FLOAT) return;
+		VertexFormatElement pos = format.getElement("Position"), color = format.getElement("Color"),
+			uv = format.getElement("UV0"), light = format.getElement("UV2");
+		if (pos == null || pos.format() != GpuFormat.RGB32_FLOAT || uv == null || uv.format() != GpuFormat.RG32_FLOAT) return;
 		int stride = format.getVertexSize();
 		for (ByteBufferBuilder.Result slice : draw.helio$vertexBufferSlices()) {
 			ByteBuffer b = slice.byteBuffer();
-			int vertices = b.remaining() / stride / 4 * 4;
-			long needed = ((long) quads * 4 + vertices) * 12;
+			int count = b.remaining() / stride / 4 * 4;
+			long needed = ((long) quads * 4 + count) * STRIDE;
 			if (needed > capacity) {
 				capacity = Math.max(needed, capacity * 2);
-				positions = nmemRealloc(positions, capacity);
+				vertices = nmemRealloc(vertices, capacity);
 			}
-			long src = memAddress(b) + pos.offset(), dst = positions + (long) quads * 48;
-			for (int v = 0; v < vertices; v++) memCopy(src + (long) v * stride, dst + v * 12L, 12);
-			quads += vertices / 4;
+			long src = memAddress(b), dst = vertices + (long) quads * 4 * STRIDE;
+			for (int v = 0; v < count; v++, src += stride, dst += STRIDE) {
+				memCopy(src + pos.offset(), dst, 12);
+				memPutInt(dst + 12, color != null ? memGetInt(src + color.offset()) : -1);
+				memCopy(src + uv.offset(), dst + 16, 8);
+				memPutInt(dst + 24, light != null ? memGetInt(src + light.offset()) : FULL_SKY_LIGHT);
+				memPutInt(dst + 28, texture);
+			}
+			quads += count / 4;
 		}
 	}
 }

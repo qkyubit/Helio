@@ -52,6 +52,7 @@ public class Helio implements ClientModInitializer {
 		boolean flyTest = Boolean.getBoolean("helio.flyTest");
 		ClientTickEvents.END_CLIENT_TICK.register(mc -> {
 			SelfCheck.tick(mc);
+			Scene.tick(mc);
 			// Dev stress test (-Dhelio.flyTest=true): fly east at 40 blocks/s so new sections stream in nonstop.
 			if (flyTest && mc.player != null && mc.gui.screen() == null) {
 				mc.player.getAbilities().flying = true;

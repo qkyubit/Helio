@@ -42,7 +42,7 @@ import static org.lwjgl.vulkan.VK12.*;
  * so no layout transitions are needed; we add the same barrier after our dispatch.
  */
 public final class PathTracer {
-	private static final int PUSH_SIZE = 176;
+	private static final int PUSH_SIZE = 240;
 	/** Accumulation keeps adapting slowly after this many frames instead of freezing. */
 	private static final int MAX_FRAMES = 256;
 
@@ -50,7 +50,12 @@ public final class PathTracer {
 	public static final Matrix4f levelProjection = new Matrix4f();
 
 	private static VulkanDevice device;
-	private static long sampler, setLayout, pipelineLayout, pipeline;
+	private static long sampler, setLayout, textureSetLayout, descriptorPool, pipelineLayout, pipeline;
+	private static long compositeSetLayout, compositeLayout, compositePipeline;
+	private static boolean dispatched;
+	private static final int RING = 4;
+	/** Entity texture arrays, one per frame in flight (rewritten {@value #RING} frames later). */
+	private static final long[] textureSets = new long[RING];
 	private static boolean failed, ranThisFrame;
 	private static Vec3 cameraPos = Vec3.ZERO;
 	private static final Matrix4f viewRotation = new Matrix4f();
@@ -60,7 +65,7 @@ public final class PathTracer {
 	private static final Vector4f fogColor = new Vector4f();
 	private static int seed;
 
-	private static Memory.Img accum;
+	private static Memory.Img accum, entityImg;
 	/** Frames averaged into {@link #accum} so far (0: next frame restarts it). For the overlay too. */
 	public static int frameIndex;
 	private static final Matrix4f lastInvViewProj = new Matrix4f();
@@ -82,6 +87,7 @@ public final class PathTracer {
 		}
 		fogColor.set(camera.fogData.color);
 		ranThisFrame = false;
+		dispatched = false;
 	}
 
 	/** Whether {@link #run} will replace vanilla's opaque picture this frame. */
@@ -123,32 +129,92 @@ public final class PathTracer {
 				.magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_NEAREST).maxLod(0), null, h), "sampler");
 			sampler = h.get(0);
 
-			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(4, s);
+			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(5, s);
 			b.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
 			b.get(1).binding(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
 			b.get(2).binding(2).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
 			b.get(3).binding(3).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+			b.get(4).binding(4).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
 			// Push descriptors: no pool, and safe to rewrite every frame while earlier frames are in flight.
 			check(vkCreateDescriptorSetLayout(vk, VkDescriptorSetLayoutCreateInfo.calloc(s).sType$Default()
 				.flags(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR).pBindings(b), null, h), "set layout");
 			setLayout = h.get(0);
 
+			// Set 1: this frame's entity textures, bindless; slots past the frame's count stay unwritten.
+			VkDescriptorSetLayoutBinding.Buffer tb = VkDescriptorSetLayoutBinding.calloc(1, s);
+			tb.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(Entities.MAX_TEXTURES)
+				.stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+			check(vkCreateDescriptorSetLayout(vk, VkDescriptorSetLayoutCreateInfo.calloc(s).sType$Default().pBindings(tb)
+				.pNext(VkDescriptorSetLayoutBindingFlagsCreateInfo.calloc(s).sType$Default()
+					.pBindingFlags(s.ints(VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT))), null, h), "texture set layout");
+			textureSetLayout = h.get(0);
+			check(vkCreateDescriptorPool(vk, VkDescriptorPoolCreateInfo.calloc(s).sType$Default().maxSets(RING)
+				.pPoolSizes(VkDescriptorPoolSize.calloc(1, s).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+					.descriptorCount(RING * Entities.MAX_TEXTURES)), null, h), "descriptor pool");
+			descriptorPool = h.get(0);
+			LongBuffer sets = s.mallocLong(RING);
+			check(vkAllocateDescriptorSets(vk, VkDescriptorSetAllocateInfo.calloc(s).sType$Default().descriptorPool(descriptorPool)
+				.pSetLayouts(s.longs(textureSetLayout, textureSetLayout, textureSetLayout, textureSetLayout)), sets), "descriptor sets");
+			sets.get(textureSets);
+
 			VkPushConstantRange.Buffer pc = VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(PUSH_SIZE);
 			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default()
-				.pSetLayouts(s.longs(setLayout)).pPushConstantRanges(pc), null, h), "pipeline layout");
+				.pSetLayouts(s.longs(setLayout, textureSetLayout)).pPushConstantRanges(pc), null, h), "pipeline layout");
 			pipelineLayout = h.get(0);
 
-			ByteBuffer spv = Shaders.compile("pathtrace.comp");
-			check(vkCreateShaderModule(vk, VkShaderModuleCreateInfo.calloc(s).sType$Default().pCode(spv), null, h), "shader module");
-			long module = h.get(0);
-			MemoryUtil.memFree(spv);
-			VkComputePipelineCreateInfo.Buffer ci = VkComputePipelineCreateInfo.calloc(1, s).sType$Default().layout(pipelineLayout);
-			ci.stage().sType$Default().stage(VK_SHADER_STAGE_COMPUTE_BIT).module(module).pName(s.UTF8("main"));
-			check(vkCreateComputePipelines(vk, VK_NULL_HANDLE, ci, null, h), "compute pipeline");
-			pipeline = h.get(0);
-			vkDestroyShaderModule(vk, module, null);
+			pipeline = computePipeline(vk, "pathtrace.comp", pipelineLayout, s);
+
+			VkDescriptorSetLayoutBinding.Buffer cb = VkDescriptorSetLayoutBinding.calloc(3, s);
+			cb.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+			cb.get(1).binding(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+			cb.get(2).binding(2).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+			check(vkCreateDescriptorSetLayout(vk, VkDescriptorSetLayoutCreateInfo.calloc(s).sType$Default()
+				.flags(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR).pBindings(cb), null, h), "composite set layout");
+			compositeSetLayout = h.get(0);
+			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(compositeSetLayout)), null, h), "composite layout");
+			compositeLayout = h.get(0);
+			compositePipeline = computePipeline(vk, "entity_composite.comp", compositeLayout, s);
 		}
 		Helio.LOG.info("Path tracer initialised");
+	}
+
+	private static long computePipeline(VkDevice vk, String shader, long layout, MemoryStack s) throws IOException {
+		LongBuffer h = s.mallocLong(1);
+		ByteBuffer spv = Shaders.compile(shader);
+		check(vkCreateShaderModule(vk, VkShaderModuleCreateInfo.calloc(s).sType$Default().pCode(spv), null, h), "shader module");
+		long module = h.get(0);
+		MemoryUtil.memFree(spv);
+		VkComputePipelineCreateInfo.Buffer ci = VkComputePipelineCreateInfo.calloc(1, s).sType$Default().layout(layout);
+		ci.stage().sType$Default().stage(VK_SHADER_STAGE_COMPUTE_BIT).module(module).pName(s.UTF8("main"));
+		check(vkCreateComputePipelines(vk, VK_NULL_HANDLE, ci, null, h), "compute pipeline");
+		vkDestroyShaderModule(vk, module, null);
+		return h.get(0);
+	}
+
+	/** After vanilla's solid features (with no render pass open): traced entity colour back over vanilla's. */
+	public static void compositeEntities() {
+		if (!dispatched || failed) return;
+		try (MemoryStack s = MemoryStack.stackPush()) {
+			VkCommandBuffer cmd = commandBuffer();
+			RenderTarget main = Minecraft.getInstance().gameRenderer.mainRenderTarget();
+			VulkanGpuTextureView color = (VulkanGpuTextureView) main.getColorTextureView();
+			VulkanGpuTextureView depth = (VulkanGpuTextureView) main.getDepthTextureView();
+			VulkanCommandEncoder.memoryBarrier(cmd, s);
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compositePipeline);
+			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(3, s);
+			w.get(0).sType$Default().dstBinding(0).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(sampler).imageView(depth.vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+			w.get(1).sType$Default().dstBinding(1).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(color.vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+			w.get(2).sType$Default().dstBinding(2).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(entityImg.view()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+			vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compositeLayout, 0, w);
+			vkCmdDispatch(cmd, (main.width + 7) / 8, (main.height + 7) / 8, 1);
+			VulkanCommandEncoder.memoryBarrier(cmd, s);
+		} catch (Throwable t) {
+			failed = true;
+			Helio.LOG.error("Entity composite failed; vanilla rendering for the rest of this session", t);
+		}
 	}
 
 	private static void dispatch(VkCommandBuffer cmd) {
@@ -171,7 +237,7 @@ public final class PathTracer {
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(4, s);
+			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(5, s);
 			w.get(0).sType$Default().dstBinding(0).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
 				.pNext(VkWriteDescriptorSetAccelerationStructureKHR.calloc(s).sType$Default().pAccelerationStructures(s.longs(Scene.tlas)));
 			w.get(1).sType$Default().dstBinding(1).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -180,7 +246,10 @@ public final class PathTracer {
 				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(sampler).imageView(atlas.vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
 			w.get(3).sType$Default().dstBinding(3).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
 				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(accum.view()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+			w.get(4).sType$Default().dstBinding(4).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(entityImg.view()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
 			vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, w);
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 1, s.longs(writeEntityTextures(mc, s)), null);
 
 			ByteBuffer pc = s.malloc(PUSH_SIZE);
 			invViewProj.get(0, pc);
@@ -195,13 +264,29 @@ public final class PathTracer {
 				.putFloat(128, moon.x).putFloat(132, moon.y).putFloat(136, moon.z).putFloat(140, rainBrightness)
 				.putFloat(144, skyColor.x).putFloat(148, skyColor.y).putFloat(152, skyColor.z).putFloat(156, hasSky ? 1 : 0)
 				.putFloat(160, fogColor.x).putFloat(164, fogColor.y).putFloat(168, fogColor.z).putFloat(172, 0);
+			new Matrix4f(levelProjection).mul(viewRotation).get(176, pc);
 			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
 
 			vkCmdDispatch(cmd, (main.width + 7) / 8, (main.height + 7) / 8, 1);
 			GpuTimers.end(cmd, GpuTimers.Pass.PATH_TRACE);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			if (HelioConfig.current.accumulate) frameIndex = Math.min(frameIndex + 1, MAX_FRAMES);
+			dispatched = true;
 		}
+	}
+
+	private static long writeEntityTextures(Minecraft mc, MemoryStack s) {
+		long set = textureSets[seed % RING];
+		int n = Entities.textures.size();
+		if (n == 0) return set;
+		VkDescriptorImageInfo.Buffer images = VkDescriptorImageInfo.calloc(n, s);
+		for (int i = 0; i < n; i++) {
+			VulkanGpuTextureView view = (VulkanGpuTextureView) mc.getTextureManager().getTexture(Entities.textures.get(i)).getTextureView();
+			images.get(i).sampler(sampler).imageView(view.vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL);
+		}
+		vkUpdateDescriptorSets(device.vkDevice(), VkWriteDescriptorSet.calloc(1, s).sType$Default().dstSet(set).dstBinding(0)
+			.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(n).pImageInfo(images), null);
+		return set;
 	}
 
 	/**
@@ -225,15 +310,21 @@ public final class PathTracer {
 	private static void ensureAccum(VkCommandBuffer cmd, int width, int height, MemoryStack s) {
 		if (accum != null && accum.width() == width && accum.height() == height) return;
 		if (accum != null) {
-			Memory.Img old = accum;
-			Scene.defer(old::free);
+			Memory.Img oldAccum = accum, oldEntity = entityImg;
+			Scene.defer(() -> {
+				oldAccum.free();
+				oldEntity.free();
+			});
 		}
 		accum = Memory.storageImage(width, height, VK_FORMAT_R32G32B32A32_SFLOAT);
-		VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(1, s).sType$Default()
-			.oldLayout(VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK_IMAGE_LAYOUT_GENERAL)
-			.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
-			.image(accum.image()).dstAccessMask(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-		barrier.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1);
+		entityImg = Memory.storageImage(width, height, VK_FORMAT_R32G32B32A32_SFLOAT);
+		VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(2, s);
+		for (int i = 0; i < 2; i++) {
+			barrier.get(i).sType$Default().oldLayout(VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK_IMAGE_LAYOUT_GENERAL)
+				.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+				.image((i == 0 ? accum : entityImg).image()).dstAccessMask(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT)
+				.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1);
+		}
 		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, null, null, barrier);
 		frameIndex = 0;
 	}
@@ -251,10 +342,18 @@ public final class PathTracer {
 	public static void destroy() {
 		if (device == null) return;
 		VkDevice vk = device.vkDevice();
-		if (accum != null) accum.free();
+		if (accum != null) {
+			accum.free();
+			entityImg.free();
+		}
 		vkDestroyPipeline(vk, pipeline, null);
 		vkDestroyPipelineLayout(vk, pipelineLayout, null);
+		vkDestroyPipeline(vk, compositePipeline, null);
+		vkDestroyPipelineLayout(vk, compositeLayout, null);
+		vkDestroyDescriptorSetLayout(vk, compositeSetLayout, null);
 		vkDestroyDescriptorSetLayout(vk, setLayout, null);
+		vkDestroyDescriptorPool(vk, descriptorPool, null);
+		vkDestroyDescriptorSetLayout(vk, textureSetLayout, null);
 		vkDestroySampler(vk, sampler, null);
 	}
 

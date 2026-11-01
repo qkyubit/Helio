@@ -401,7 +401,20 @@ look right with accumulation on (reference) and stable with 1 spp.
    sample a 0.6° disc only with Reference Accumulation (1 spp flicker until M4's
    RR). Sky light is still scaled by vanilla's sky light level, not traced (step
    6). User-checked: day, sunset, night, rain, soft shadows.
-4. [ ] Entity textures (bindless) and AO-free albedo.
+4. [x] AO-free albedo: while sections compile for the path tracer,
+   `BlockModelLighter` output is reset to white, so vertex colour is the biome
+   tint only (light levels kept); toggling RT recompiles everything
+   (`LevelExtractor.allChanged`). Entities: each surface draw's `Sampler0`
+   texture is captured (≤256 per frame, bindless set 1) with full vertices
+   (BLOCK layout + texture index, 32 B); the dynamic BLAS is alpha-tested;
+   entities are traced and lit like terrain, also past the RT distance.
+   Vanilla still draws entities (their depth keeps water/glass behind them);
+   `entity_composite.comp` then puts the traced colour back where vanilla's
+   depth matches the traced hit (0.3%), so particles and name tags in front
+   stay. Known: coplanar overlays (glint, trims, spider eyes) are covered;
+   with classic transparency, water in front of an entity is overwritten.
+   User-checked: entities vs water/glass, name tags, H toggle. **Entity motion
+   vectors moved to M4** (DLSS RR needs them with its other guide buffers).
 5. [ ] Emissive blocks: light list from block light level + texture colour;
    ReSTIR DI.
 6. [ ] Indirect: 1–2 bounces + SHaRC-style radiance cache. Re-test OMM here.
