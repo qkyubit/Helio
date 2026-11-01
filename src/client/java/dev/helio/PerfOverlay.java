@@ -47,7 +47,7 @@ public final class PerfOverlay {
 		else {
 			lines.add("Scene " + Scene.instanceCount + " BLAS, " + Scene.tlasTriangles / 1000 + "k tris + " + Scene.dynamicTriangles / 1000 + "k entity, " + Scene.sectionCount + " sections, "
 				+ Scene.pendingCount + " queued, build " + ms(Pass.SCENE_BUILD) + ", " + (Memory.allocated.get() >> 20) + " MB");
-			lines.add("Sun shadows " + ms(Pass.SUN_SHADOWS));
+			lines.add("Path tracing " + ms(Pass.PATH_TRACE));
 		}
 		if (!Double.isNaN(GpuTimers.ms(Pass.DLSS_G)))
 			lines.add("FG " + FrameGenSpike.renderedFps + " -> " + FrameGenSpike.presentedFps + " fps, DLSS-G " + ms(Pass.DLSS_G) + ", motion " + ms(Pass.FG_MOTION));

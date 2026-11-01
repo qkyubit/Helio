@@ -4,6 +4,7 @@ import com.mojang.renderpearl.backend.vulkan.VulkanCommandEncoder;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView;
 import dev.helio.vk.Memory;
 import dev.helio.vk.Memory.Buf;
+import dev.helio.vk.Shaders;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import org.lwjgl.system.MemoryStack;
@@ -61,7 +62,7 @@ final class Micromaps {
 			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(setLayout))
 				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(32)), null, h), "pipeline layout");
 			pipelineLayout = h.get(0);
-			ByteBuffer spv = SunShadowSpike.compile("omm.comp");
+			ByteBuffer spv = Shaders.compile("omm.comp");
 			check(vkCreateShaderModule(vk, VkShaderModuleCreateInfo.calloc(s).sType$Default().pCode(spv), null, h), "shader module");
 			long module = h.get(0);
 			MemoryUtil.memFree(spv);

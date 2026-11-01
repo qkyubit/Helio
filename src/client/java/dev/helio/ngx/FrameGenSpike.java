@@ -11,7 +11,7 @@ import dev.helio.Helio;
 import dev.helio.config.HelioConfig;
 import dev.helio.vk.GpuTimers;
 import dev.helio.mixin.VulkanCommandEncoderAccessor;
-import dev.helio.rt.SunShadowSpike;
+import dev.helio.vk.Shaders;
 import dev.helio.vk.Reflex;
 import it.unimi.dsi.fastutil.longs.LongList;
 import net.minecraft.client.Minecraft;
@@ -219,7 +219,7 @@ public final class FrameGenSpike {
 			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(setLayout))
 				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(144)), null, h), "pipeline layout");
 			pipelineLayout = h.get(0);
-			ByteBuffer spv = SunShadowSpike.compile("camera_motion.comp");
+			ByteBuffer spv = Shaders.compile("camera_motion.comp");
 			check(vkCreateShaderModule(vk, VkShaderModuleCreateInfo.calloc(s).sType$Default().pCode(spv), null, h), "shader module");
 			long module = h.get(0);
 			MemoryUtil.memFree(spv);
