@@ -328,7 +328,13 @@ Exit: stable TLAS while flying at speed; no hitching from BLAS builds.
   M3 with incoherent bounce rays through foliage; if it wins there, cut memory
   with level 3 (16 B per triangle) and special indices for fully opaque or clear
   triangles.
-- [ ] Debug views.
+- [x] **Debug views** (Debug View setting; primary ray per pixel, magenta = miss):
+  BLAS Instances, Albedo (atlas × vertex tint, vanilla AO still baked in;
+  entities grey until their textures are bound), Normals (geometric), Triangle
+  Density (hit BLAS triangle count, log scale). Per-instance shader info is now
+  16 B: vertex address, triangle count, kind. User-checked: all line up with the
+  world; magenta only beyond the RT distance.
+- **M2 done (2026-11-01).** Particles and first-person body shadows deferred.
 
 ### M3 — Path tracer core
 

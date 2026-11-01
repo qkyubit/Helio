@@ -16,14 +16,18 @@ layout(binding = 3) uniform sampler2D blockAtlas;
 
 // Section vertices in vanilla's BLOCK format, 7 floats each: position xyz, colour, UV0 uv, lightmap.
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Vertices { float v[]; };
-// One vertex-buffer address per TLAS instance.
-layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer InstanceInfo { uvec2 vertices[]; };
+// Per TLAS instance. kind: section layer (0 solid, 1 cutout, 2 translucent) or 3 = entities, whose vertices
+// are bare float3 positions.
+struct Instance { uvec2 vertices; uint triangles; uint kind; };
+layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer InstanceInfo { Instance i[]; };
 
 const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u, MASK_DYNAMIC = 8u;
+const uint KIND_DYNAMIC = 3u;
+const uint DEBUG_INSTANCES = 1u, DEBUG_ALBEDO = 2u, DEBUG_NORMALS = 3u, DEBUG_TRIANGLE_DENSITY = 4u;
 
 layout(push_constant) uniform Push {
 	mat4 invViewProj;   // inverse(projection * viewRotation): NDC -> camera-relative world
-	vec4 cameraInScene; // xyz camera position relative to the scene anchor, w = debug view (0 off, 1 instances)
+	vec4 cameraInScene; // xyz camera position relative to the scene anchor, w = debug view (0 off, DEBUG_*)
 	vec4 sunDir;        // xyz towards the sun, w = shadow strength
 	uvec2 instanceInfo;
 	float rtDistance;   // blocks the scene surely covers around the camera, horizontally
@@ -35,7 +39,7 @@ vec2 uvAt(Vertices vb, uint vertex) {
 
 // Cutout candidate: does the texel under the hit point pass vanilla's 0.5 alpha cutoff?
 bool cutoutHit(rayQueryEXT rq) {
-	Vertices vb = Vertices(InstanceInfo(pc.instanceInfo).vertices[rayQueryGetIntersectionInstanceIdEXT(rq, false)]);
+	Vertices vb = Vertices(InstanceInfo(pc.instanceInfo).i[rayQueryGetIntersectionInstanceIdEXT(rq, false)].vertices);
 	uint prim = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
 	uint base = (prim >> 1) * 4u;
 	// Quads are indexed 0 1 2, 2 3 0.
@@ -43,6 +47,45 @@ bool cutoutHit(rayQueryEXT rq) {
 	vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, false);
 	vec2 uv = uvAt(vb, base + c.x) * (1.0 - b.x - b.y) + uvAt(vb, base + c.y) * b.x + uvAt(vb, base + c.z) * b.y;
 	return textureLod(blockAtlas, uv, 0.0).a >= 0.5;
+}
+
+vec3 heat(float t) {
+	return clamp(vec3(t * 2.0 - 1.0, 1.0 - abs(t * 2.0 - 1.0), 1.0 - t * 2.0), 0.0, 1.0);
+}
+
+vec3 posAt(Vertices vb, uint vertex, uint stride) {
+	return vec3(vb.v[vertex * stride], vb.v[vertex * stride + 1u], vb.v[vertex * stride + 2u]);
+}
+
+// Debug views of the committed hit of a primary ray.
+vec3 debugColour(rayQueryEXT rq, vec3 dir, uint mode) {
+	uint id = uint(rayQueryGetIntersectionInstanceIdEXT(rq, true));
+	if (mode == DEBUG_INSTANCES) {
+		uint h = id * 2654435761u;
+		return vec3((h >> 8) & 255u, (h >> 16) & 255u, (h >> 24) & 255u) / 255.0 * 0.8 + 0.2;
+	}
+	Instance inst = InstanceInfo(pc.instanceInfo).i[id];
+	if (mode == DEBUG_TRIANGLE_DENSITY) return heat(clamp(log2(float(inst.triangles)) / 14.0, 0.0, 1.0)); // 1 .. 16k
+
+	Vertices vb = Vertices(inst.vertices);
+	uint prim = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+	uint base = (prim >> 1) * 4u;
+	uvec3 c = (prim & 1u) == 0u ? uvec3(0u, 1u, 2u) : uvec3(2u, 3u, 0u);
+	if (mode == DEBUG_NORMALS) {
+		uint stride = inst.kind == KIND_DYNAMIC ? 3u : 7u;
+		vec3 p0 = posAt(vb, base + c.x, stride);
+		vec3 n = normalize(cross(posAt(vb, base + c.y, stride) - p0, posAt(vb, base + c.z, stride) - p0));
+		return (dot(n, dir) > 0.0 ? -n : n) * 0.5 + 0.5;
+	}
+	// Albedo: atlas texel times vertex colour (biome tint, with vanilla's baked AO for now).
+	if (inst.kind == KIND_DYNAMIC) return vec3(0.5);
+	vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+	vec3 w = vec3(1.0 - b.x - b.y, b.x, b.y);
+	vec2 uv = uvAt(vb, base + c.x) * w.x + uvAt(vb, base + c.y) * w.y + uvAt(vb, base + c.z) * w.z;
+	vec3 tint = unpackUnorm4x8(floatBitsToUint(vb.v[(base + c.x) * 7u + 3u])).rgb * w.x
+		+ unpackUnorm4x8(floatBitsToUint(vb.v[(base + c.y) * 7u + 3u])).rgb * w.y
+		+ unpackUnorm4x8(floatBitsToUint(vb.v[(base + c.z) * 7u + 3u])).rgb * w.z;
+	return textureLod(blockAtlas, uv, 0.0).rgb * tint;
 }
 
 void main() {
@@ -58,18 +101,16 @@ void main() {
 	vec3 pos = h.xyz / h.w + pc.cameraInScene.xyz;
 
 	rayQueryEXT rq;
-	if (pc.cameraInScene.w == 1.0) {
-		// Debug: primary ray from the camera; colour per BLAS instance, magenta where the scene has nothing.
+	uint debugView = uint(pc.cameraInScene.w);
+	if (debugView != 0u) {
+		// Debug: primary ray from the camera; magenta where the scene has nothing.
 		vec3 dir = normalize(pos - pc.cameraInScene.xyz);
 		rayQueryInitializeEXT(rq, scene, gl_RayFlagsNoneEXT, 0xFFu, pc.cameraInScene.xyz, 0.05, dir, 1024.0);
 		while (rayQueryProceedEXT(rq)) {
 			if (cutoutHit(rq)) rayQueryConfirmIntersectionEXT(rq);
 		}
 		vec3 c = vec3(1.0, 0.0, 1.0);
-		if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
-			uint id = uint(rayQueryGetIntersectionInstanceIdEXT(rq, true)) * 2654435761u;
-			c = vec3((id >> 8) & 255u, (id >> 16) & 255u, (id >> 24) & 255u) / 255.0 * 0.8 + 0.2;
-		}
+		if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) c = debugColour(rq, dir, debugView);
 		imageStore(colorImg, p, vec4(c, 1.0));
 		return;
 	}

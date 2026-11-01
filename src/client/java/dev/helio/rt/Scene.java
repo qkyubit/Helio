@@ -56,6 +56,7 @@ public final class Scene {
 	private static final int[] LAYER_MASK = {MASK_SOLID, MASK_CUTOUT, MASK_TRANSLUCENT};
 	/** Vanilla's BLOCK format: position float3, colour 4 bytes, UV0 float2, lightmap 2 shorts. Shaders hard-code it. */
 	public static final int VERTEX_STRIDE = 28;
+	private static final int INFO_SIZE = 16, KIND_DYNAMIC = 3;
 	/** Frames until the GPU is surely done with a frame's commands (Mojang keeps at most two in flight). */
 	private static final int RING = 4;
 	// ponytail: fixed per-frame build budget; scale it by measured GPU time if world loads drag.
@@ -446,7 +447,7 @@ public final class Scene {
 		for (Geo[] geos : sections.values()) for (Geo g : geos) if (g != null) count++;
 		if (dynamicBuilt) count++;
 		Buf buf = instanceBufs[slot];
-		long bytes = (long) count * (VkAccelerationStructureInstanceKHR.SIZEOF + 8);
+		long bytes = (long) count * (VkAccelerationStructureInstanceKHR.SIZEOF + INFO_SIZE);
 		if (buf == null || buf.size() < bytes) {
 			if (buf != null) buf.free(); // this slot's last use was RING frames ago
 			buf = instanceBufs[slot] = Memory.buffer(Math.max(bytes * 3 / 2, 1 << 16), BUILD_INPUT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
@@ -465,13 +466,13 @@ public final class Scene {
 			float tx = (sx << 4) - anchorX, ty = (sy << 4) - anchorY, tz = (sz << 4) - anchorZ;
 			for (Geo g : e.getValue()) {
 				if (g == null) continue;
-				putInstance(buf, infoBase, n++, tx, ty, tz, LAYER_MASK[g.layer], g.blas.address, g.vertices.address());
+				putInstance(buf, infoBase, n++, tx, ty, tz, LAYER_MASK[g.layer], g.blas.address, g.vertices.address(), g.quads * 2, g.layer);
 				triangles += g.quads * 2L;
 			}
 		}
 		// Entity positions are relative to the camera.
 		if (dynamicBuilt) putInstance(buf, infoBase, n++, (float) (cameraPos.x - anchorX), (float) (cameraPos.y - anchorY),
-			(float) (cameraPos.z - anchorZ), MASK_DYNAMIC, dynamicBlas[slot].address, dynamicVertices[slot].address());
+			(float) (cameraPos.z - anchorZ), MASK_DYNAMIC, dynamicBlas[slot].address, dynamicVertices[slot].address(), Entities.quads * 2, KIND_DYNAMIC);
 		instanceCount = n;
 		tlasTriangles = triangles;
 		if (n == 0) return;
@@ -505,7 +506,12 @@ public final class Scene {
 		instanceInfo = buf.address() + infoBase;
 	}
 
-	private static void putInstance(Buf buf, long infoBase, int n, float tx, float ty, float tz, int mask, long blasAddress, long vertexAddress) {
+	/**
+	 * Per-instance info for shaders, {@value #INFO_SIZE} bytes: vertex-buffer address, triangle count, kind
+	 * (section layer ordinal, or {@link #KIND_DYNAMIC} for entities, whose vertices are bare float3 positions).
+	 */
+	private static void putInstance(Buf buf, long infoBase, int n, float tx, float ty, float tz, int mask, long blasAddress,
+									long vertexAddress, int triangles, int kind) {
 		long p = buf.mapped() + (long) n * VkAccelerationStructureInstanceKHR.SIZEOF;
 		memPutFloat(p, 1); memPutFloat(p + 4, 0); memPutFloat(p + 8, 0); memPutFloat(p + 12, tx);
 		memPutFloat(p + 16, 0); memPutFloat(p + 20, 1); memPutFloat(p + 24, 0); memPutFloat(p + 28, ty);
@@ -513,7 +519,10 @@ public final class Scene {
 		memPutInt(p + 48, mask << 24); // custom index 0
 		memPutInt(p + 52, VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR << 24); // SBT offset 0
 		memPutLong(p + 56, blasAddress);
-		memPutLong(buf.mapped() + infoBase + n * 8L, vertexAddress);
+		long info = buf.mapped() + infoBase + (long) n * INFO_SIZE;
+		memPutLong(info, vertexAddress);
+		memPutInt(info + 8, triangles);
+		memPutInt(info + 12, kind);
 	}
 
 	private static void ensureQuadIndices(int quads) {
