@@ -1,5 +1,6 @@
 package dev.helio.mixin;
 
+import dev.helio.vk.GpuTimers;
 import dev.helio.vk.Reflex;
 import net.minecraft.client.Minecraft;
 import org.spongepowered.asm.mixin.Mixin;
@@ -18,5 +19,6 @@ public class MinecraftMixin {
 	@Inject(method = "renderFrame", at = @At("HEAD"))
 	private void helio$renderStart(CallbackInfo ci) {
 		Reflex.renderStart();
+		GpuTimers.newFrame();
 	}
 }

@@ -1,6 +1,7 @@
 package dev.helio.vk;
 
 import dev.helio.Helio;
+import dev.helio.config.HelioConfig;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.*;
 
@@ -12,17 +13,14 @@ import static org.lwjgl.vulkan.VK12.*;
 /**
  * NVIDIA Reflex through VK_NV_low_latency2: low-latency mode on Mojang's swapchain, a driver-paced sleep at
  * the start of each frame, and simulation / render-submit / present markers. Each game frame's real present
- * carries its frame ID (VK_KHR_present_id) so the driver can tie markers to it.
- * <p>
- * ponytail: M0 spike flips low-latency mode on/off every {@value #AB_SECONDS}s and logs the measured
- * latency of each, so one session gives an A/B comparison. M1 makes it a setting.
+ * carries its frame ID (VK_KHR_present_id) so the driver can tie markers to it. Mode comes from
+ * {@link HelioConfig#reflex} and is re-applied when it changes.
  */
 public final class Reflex {
-	private static final int AB_SECONDS = 8;
-
 	private static VkDevice device;
-	private static long swapchain, timeline, frameId, abStart;
-	private static boolean lowLatency = true, inFrame;
+	private static long swapchain, timeline, frameId;
+	private static boolean inFrame;
+	private static HelioConfig.ReflexMode appliedMode;
 
 	private Reflex() {}
 
@@ -57,18 +55,21 @@ public final class Reflex {
 	 * them. Like NVIDIA's Reflex+VSync auto cap, also cap rendering just under refresh / presents-per-frame.
 	 */
 	private static void applySleepMode() {
+		HelioConfig.ReflexMode mode = HelioConfig.current.reflex;
+		boolean lowLatency = mode != HelioConfig.ReflexMode.OFF;
 		int intervalUs = 0;
 		if (lowLatency) {
 			float refresh = refreshRate();
 			if (refresh > 0) intervalUs = (int) (1_000_000 / (refresh / presentsPerFrame) * 1.03f);
 		}
 		appliedPresentsPerFrame = presentsPerFrame;
+		appliedMode = mode;
 		try (MemoryStack s = MemoryStack.stackPush()) {
 			int r = vkSetLatencySleepModeNV(device, swapchain, VkLatencySleepModeInfoNV.calloc(s).sType$Default()
-				.lowLatencyMode(lowLatency).lowLatencyBoost(lowLatency).minimumIntervalUs(intervalUs));
+				.lowLatencyMode(lowLatency).lowLatencyBoost(mode == HelioConfig.ReflexMode.BOOST).minimumIntervalUs(intervalUs));
 			if (r != VK_SUCCESS) Helio.LOG.warn("vkSetLatencySleepModeNV returned {}", r);
 		}
-		Helio.LOG.info("Reflex low latency {} (frame interval cap {} us, {} presents per rendered frame)", lowLatency ? "on" : "off", intervalUs, presentsPerFrame);
+		Helio.LOG.info("Reflex {} (frame interval cap {} us, {} presents per rendered frame)", mode, intervalUs, presentsPerFrame);
 	}
 
 	private static int presentsPerFrame = 1, appliedPresentsPerFrame = 1;
@@ -87,18 +88,9 @@ public final class Reflex {
 	/** Start of Minecraft's frame (before input and ticks). */
 	public static void frameStart() {
 		if (!active()) return;
-		long now = System.nanoTime();
-		if (abStart == 0) abStart = now;
-		if (now - abStart > AB_SECONDS * 1_000_000_000L) {
-			report();
-			lowLatency = !lowLatency;
-			applySleepMode();
-			abStart = now;
-		} else if (presentsPerFrame != appliedPresentsPerFrame) {
-			applySleepMode();
-		}
+		if (presentsPerFrame != appliedPresentsPerFrame || HelioConfig.current.reflex != appliedMode) applySleepMode();
 		frameId++;
-		if (lowLatency) {
+		if (appliedMode != HelioConfig.ReflexMode.OFF) {
 			try (MemoryStack s = MemoryStack.stackPush()) {
 				vkLatencySleepNV(device, swapchain, VkLatencySleepInfoNV.calloc(s).sType$Default().signalSemaphore(timeline).value(frameId));
 				vkWaitSemaphores(device, VkSemaphoreWaitInfo.calloc(s).sType$Default().semaphoreCount(1)
@@ -140,8 +132,9 @@ public final class Reflex {
 		}
 	}
 
-	/** Median input sample -> GPU render end over the driver's recent frame reports (median: robust to hitches). */
-	private static void report() {
+	/** Median input sample -> GPU render end in ms over the driver's recent frame reports (robust to hitches), or NaN. */
+	public static double medianLatencyMs() {
+		if (!active()) return Double.NaN;
 		try (MemoryStack s = MemoryStack.stackPush()) {
 			VkLatencyTimingsFrameReportNV.Buffer reports = VkLatencyTimingsFrameReportNV.calloc(64, s);
 			for (VkLatencyTimingsFrameReportNV r : reports) r.sType$Default();
@@ -152,14 +145,9 @@ public final class Reflex {
 				if (r.inputSampleTimeUs() == 0 || r.gpuRenderEndTimeUs() <= r.inputSampleTimeUs()) continue;
 				us[n++] = r.gpuRenderEndTimeUs() - r.inputSampleTimeUs();
 			}
-			String mode = lowLatency ? "ON " : "OFF";
-			if (n == 0) {
-				Helio.LOG.info("Reflex {}: no timing reports yet", mode);
-				return;
-			}
+			if (n == 0) return Double.NaN;
 			java.util.Arrays.sort(us, 0, n);
-			Helio.LOG.info("Reflex {}: input -> GPU done median {} ms, p90 {} ms ({} frames)", mode,
-				String.format("%.2f", us[n / 2] / 1000.0), String.format("%.2f", us[n * 9 / 10] / 1000.0), n);
+			return us[n / 2] / 1000.0;
 		}
 	}
 }

@@ -8,6 +8,8 @@ import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView;
 import dev.helio.Helio;
+import dev.helio.config.HelioConfig;
+import dev.helio.vk.GpuTimers;
 import dev.helio.mixin.VulkanCommandEncoderAccessor;
 import dev.helio.rt.SunShadowSpike;
 import dev.helio.vk.Reflex;
@@ -71,14 +73,15 @@ public final class FrameGenSpike {
 	private static long semsForSwapchain, extraSwapchain;
 	private static int extraImage = -1;
 
-	// Stats
+	// Stats for the overlay, over 1 s windows.
 	private static long statsStart, realFrames, presents;
+	public static long renderedFps, presentedFps;
 
 	private FrameGenSpike() {}
 
 	/** After the level frame graph: capture depth + motion while the main depth still holds the world. */
 	public static void afterLevel(Vec3 cameraPos, Matrix4f viewRotation, Matrix4f projection, float depthFar) {
-		if (failed || !Helio.dlss || Helio.device == null || Minecraft.getInstance().level == null) return;
+		if (failed || !Helio.dlss || HelioConfig.current.frameGeneration < 2 || Helio.device == null || Minecraft.getInstance().level == null) return;
 		try {
 			if (device == null) init(Helio.device);
 			RenderTarget main = Minecraft.getInstance().gameRenderer.mainRenderTarget();
@@ -101,7 +104,10 @@ public final class FrameGenSpike {
 
 			VulkanCommandEncoder encoder = device.createCommandEncoder();
 			encoder.copyTextureToTexture(main.getDepthTexture(), depthCopy, 0, 0, 0, 0, 0, width, height);
-			dispatchMotion(((VulkanCommandEncoderAccessor) encoder).helio$commandBuffer());
+			VkCommandBuffer cmd = ((VulkanCommandEncoderAccessor) encoder).helio$commandBuffer();
+			GpuTimers.begin(cmd, GpuTimers.Pass.FG_MOTION);
+			dispatchMotion(cmd);
+			GpuTimers.end(cmd, GpuTimers.Pass.FG_MOTION);
 			captured = true;
 		} catch (Throwable t) {
 			fail(t);
@@ -120,7 +126,9 @@ public final class FrameGenSpike {
 		try {
 			VkCommandBuffer cmd = ((VulkanCommandEncoderAccessor) encoder).helio$commandBuffer();
 			if (feature.equals(MemorySegment.NULL)) createFeature(cmd);
+			GpuTimers.begin(cmd, GpuTimers.Pass.DLSS_G);
 			evaluate(cmd, (VulkanGpuTextureView) mainView);
+			GpuTimers.end(cmd, GpuTimers.Pass.DLSS_G);
 			try (MemoryStack s = MemoryStack.stackPush()) {
 				VulkanCommandEncoder.memoryBarrier(cmd, s);
 			}
@@ -185,9 +193,10 @@ public final class FrameGenSpike {
 		}
 		long now = System.nanoTime();
 		if (statsStart == 0) statsStart = now;
-		if (now - statsStart > 2_000_000_000L) {
+		if (now - statsStart > 1_000_000_000L) {
 			double sec = (now - statsStart) / 1e9;
-			Helio.LOG.info("FG: {} rendered fps, {} presented fps", Math.round(realFrames / sec), Math.round(presents / sec));
+			renderedFps = Math.round(realFrames / sec);
+			presentedFps = Math.round(presents / sec);
 			statsStart = now;
 			realFrames = presents = 0;
 		}

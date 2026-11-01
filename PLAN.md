@@ -210,9 +210,10 @@ Results:
   median **33.3 ms off vs 24.1 ms on** (-27%). Cost: 87 instead of 90 rendered
   fps, so a few repeated frames per second at 180 Hz. M4 should pace from
   present timing (`VK_KHR_present_wait`, already supported) instead of a fixed 3% margin.
-- Known issue: the game segfaults during exit, inside code from an unloaded
-  library (NGX snippet teardown after `ReleaseFeature`, most likely). M1:
-  shut NGX down cleanly (`NVSDK_NGX_VULKAN_Shutdown1`) before Mojang destroys the device.
+- Exit segfault (fixed in M1): DLSS-G's exit-time destructors called into
+  Vulkan layers the loader had unloaded with the device. Releasing the FG
+  feature and calling `NVSDK_NGX_VULKAN_Shutdown1` at `VulkanDevice.close`
+  HEAD fixes it.
 - Dev: `prismlauncher --launch "Custom RT Mod 26.4" --world "New World"`
   launches straight into the test world.
 
@@ -234,6 +235,28 @@ Generation up to 6x, and Reflex all work natively on Linux with driver
 - "Copy debug report" button (versions, extensions, config, last errors).
 
 Exit: mod loads, toggles cleanly, survives missing DLSS libs/unsupported GPU.
+
+**M1 progress:**
+- Config `config/helio.json`; picking a preset fills the fields, editing one
+  switches to Custom. Only settings with working features exist (RT, frame
+  generation Off/2x, Reflex Off/On/Boost, overlay); upscaling, RR and ray
+  budgets join in M3/M4, which is also when Balanced/Quality/Ultra diverge.
+- Keys: H toggles ray tracing; "Helio settings" (unbound) opens the screen.
+  Mod Menu is optional (`suggests`).
+- DLSS libraries download from the pinned `NVIDIA/DLSS` tag on first launch,
+  only when the device has the DLSS extensions, SHA-256 + size checked, with
+  progress toasts. NGX comes up mid-session once they land. Any
+  `libnvidia-ngx-dlss*.so.*` already in `helio/ngx/` counts (manual drop-in);
+  `downloadDlss: false` turns the download off. Tested: 115 MB in ~6 s.
+- Self-check toast on the title screen (not Vulkan / no RT / no DLSS / NGX
+  failed). Settings greys out unsupported options with the reason; "Copy
+  Debug Report" puts versions, GPU, driver, feature state, config and mods
+  on the clipboard.
+- Overlay (top right, hidden under F3): GPU ms per pass (`GpuTimers`),
+  shadow scene size and rebuild time, FG rendered → presented fps, Reflex
+  input → GPU latency, VRAM via `VK_EXT_memory_budget`. First reading:
+  sun shadows 0.34 ms, DLSS-G 3.37 ms, motion vectors 0.04 ms, 1.6 GB VRAM.
+  No BLAS queue yet: rebuilds are synchronous until M2.
 
 ### M2 — Scene geometry
 

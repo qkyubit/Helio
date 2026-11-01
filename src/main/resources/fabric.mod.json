@@ -9,7 +9,8 @@
 	"icon": "assets/helio/icon.png",
 	"environment": "client",
 	"entrypoints": {
-		"client": ["dev.helio.Helio"]
+		"client": ["dev.helio.Helio"],
+		"modmenu": ["dev.helio.config.ModMenuEntry"]
 	},
 	"mixins": [
 		{ "config": "helio.mixins.json", "environment": "client" }
@@ -19,5 +20,8 @@
 		"minecraft": "26.3",
 		"java": ">=25",
 		"fabric-api": "*"
+	},
+	"suggests": {
+		"modmenu": "*"
 	}
 }

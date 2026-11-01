@@ -5,6 +5,8 @@ import com.mojang.renderpearl.backend.vulkan.VulkanCommandEncoder;
 import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView;
 import dev.helio.Helio;
+import dev.helio.config.HelioConfig;
+import dev.helio.vk.GpuTimers;
 import dev.helio.mixin.VulkanCommandEncoderAccessor;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -59,13 +61,6 @@ public final class SunShadowSpike {
 		{0, 0, -1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0},
 	};
 
-	// GPU timing: a ring of timestamp pairs, read back RING frames later (Mojang keeps <= 2 submits in flight).
-	private static final int RING = 4, LOG_EVERY = 300;
-	private static long queryPool, frame;
-	private static final boolean[] pending = new boolean[RING];
-	private static double nsPerTick, sumMs, maxMs, minMs = Double.MAX_VALUE;
-	private static int samples;
-
 	private static VulkanDevice device;
 	private static long vma, sampler, setLayout, pipelineLayout, pipeline, cmdPool;
 	private static Buf blasBuf, tlasBuf;
@@ -74,6 +69,8 @@ public final class SunShadowSpike {
 	private static boolean failed;
 
 	public static final Matrix4f levelProjection = new Matrix4f();
+	/** Last shadow scene rebuild, for the overlay: CPU mesh + synchronous AS build, and its size. */
+	public static long lastRebuildMs, sceneTriangles;
 
 	private record Buf(long buffer, long allocation, long address, long mapped) {
 		void free() {
@@ -85,7 +82,7 @@ public final class SunShadowSpike {
 
 	/** Called right after vanilla's level frame graph executed. */
 	public static void afterLevel(Vec3 cameraPos, Matrix4f viewRotation, float sunAngle) {
-		if (failed || !Helio.rayTracing || Helio.device == null) return;
+		if (failed || !Helio.rayTracing || !HelioConfig.current.rayTracing || Helio.device == null) return;
 		ClientLevel level = Minecraft.getInstance().level;
 		if (level == null) return;
 		try {
@@ -149,13 +146,6 @@ public final class SunShadowSpike {
 				.flags(VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT).queueFamilyIndex(dev.graphicsQueue().queueFamilyIndex()), null, h), "command pool");
 			cmdPool = h.get(0);
 
-			check(vkCreateQueryPool(vk, VkQueryPoolCreateInfo.calloc(s).sType$Default()
-				.queryType(VK_QUERY_TYPE_TIMESTAMP).queryCount(RING * 2), null, h), "query pool");
-			queryPool = h.get(0);
-			vkResetQueryPool(vk, queryPool, 0, RING * 2);
-			VkPhysicalDeviceProperties props = VkPhysicalDeviceProperties.calloc(s);
-			vkGetPhysicalDeviceProperties(vk.getPhysicalDevice(), props);
-			nsPerTick = props.limits().timestampPeriod();
 		}
 		Helio.LOG.info("Sun shadow spike initialised");
 	}
@@ -218,7 +208,9 @@ public final class SunShadowSpike {
 		sceneOrigin = origin;
 		if (ni == 0) return;
 		buildAccelerationStructures(verts, nv, idx, ni);
-		Helio.LOG.info("Shadow scene: {} triangles around {} (mesh {} ms, AS build {} ms)",
+		lastRebuildMs = (System.nanoTime() - t0) / 1_000_000;
+		sceneTriangles = ni / 3;
+		Helio.LOG.debug("Shadow scene: {} triangles around {} (mesh {} ms, AS build {} ms)",
 			ni / 3, origin.toShortString(), (t1 - t0) / 1_000_000, (System.nanoTime() - t1) / 1_000_000);
 	}
 
@@ -320,11 +312,7 @@ public final class SunShadowSpike {
 		VkCommandBuffer cmd = ((VulkanCommandEncoderAccessor) encoder).helio$commandBuffer();
 
 		try (MemoryStack s = MemoryStack.stackPush()) {
-			int slot = (int) (frame++ % RING);
-			readTiming(s, slot, main.width, main.height);
-			vkResetQueryPool(device.vkDevice(), queryPool, slot * 2, 2);
-			// ALL_COMMANDS: start stamps once prior work is done, end once the dispatch is.
-			KHRSynchronization2.vkCmdWriteTimestamp2KHR(cmd, KHRSynchronization2.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR, queryPool, slot * 2);
+			GpuTimers.begin(cmd, GpuTimers.Pass.SUN_SHADOWS);
 
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
@@ -345,27 +333,8 @@ public final class SunShadowSpike {
 			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
 
 			vkCmdDispatch(cmd, (main.width + 7) / 8, (main.height + 7) / 8, 1);
-			KHRSynchronization2.vkCmdWriteTimestamp2KHR(cmd, KHRSynchronization2.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR, queryPool, slot * 2 + 1);
-			pending[slot] = true;
+			GpuTimers.end(cmd, GpuTimers.Pass.SUN_SHADOWS);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
-		}
-	}
-
-	private static void readTiming(MemoryStack s, int slot, int width, int height) {
-		if (!pending[slot]) return;
-		LongBuffer ts = s.mallocLong(2);
-		if (vkGetQueryPoolResults(device.vkDevice(), queryPool, slot * 2, 2, ts, 8, VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) return;
-		pending[slot] = false;
-		double ms = (ts.get(1) - ts.get(0)) * nsPerTick / 1e6;
-		sumMs += ms;
-		maxMs = Math.max(maxMs, ms);
-		minMs = Math.min(minMs, ms);
-		if (++samples == LOG_EVERY) {
-			Helio.LOG.info("Sun shadow trace @ {}x{}: avg {} ms, min {} ms, max {} ms over {} frames",
-				width, height, String.format("%.3f", sumMs / samples), String.format("%.3f", minMs), String.format("%.3f", maxMs), samples);
-			samples = 0;
-			sumMs = maxMs = 0;
-			minMs = Double.MAX_VALUE;
 		}
 	}
 
