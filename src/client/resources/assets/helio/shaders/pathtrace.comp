@@ -49,6 +49,7 @@ const vec3 BLOCK_LIGHT = vec3(1.0, 0.68, 0.38) * 1.6;
 const float LIGHT = 8.0;        // intensity of an emission-15 block light
 const float EMISSIVE = 4.0;     // radiance of an emission-15 block's own surface, times its texture (M6 bloom keys off it)
 const uint CANDIDATES = 8u;     // lights considered per shading point (RIS)
+const int MAX_BOUNCES = 3;      // reference mode; Russian roulette after the second
 const float SUN_COS = 0.99994;  // 0.6 degree disc radius: soft-shadow penumbra
 const float MOON_COS = 0.99996;
 
@@ -292,6 +293,33 @@ vec3 tonemap(vec3 x) {
 	return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
 }
 
+// Sun or moon (one shadow ray toward a point on the disc, its centre unless stochastic) plus block lights.
+vec3 directLight(Hit h, vec3 pos) {
+	bool day = pc.sunDir.y > 0.0;
+	vec3 lightDir = day ? pc.sunDir.xyz : pc.moonDir.xyz;
+	vec3 direct = vec3(0.0);
+	if (pc.skyColor.w != 0.0 && lightDir.y > 0.0) {
+		vec3 l = pc.stochastic != 0.0 ? sampleCone(lightDir, day ? SUN_COS : MOON_COS, vec2(rand(), rand())) : lightDir;
+		float nl = max(dot(h.normal, l), 0.0);
+		if (nl > 0.0) {
+			rayQueryEXT shadow;
+			TRACE(shadow, pos + h.normal * 0.002, l, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsTerminateOnFirstHitEXT)
+			if (!HIT(shadow)) direct = nl * (day ? sunRadiance(l.y) : MOON * pc.moonDir.w);
+		}
+	}
+	// Vanilla's light level says whether any block light reaches here: skip sampling (and its shadow ray) if not.
+	if (h.light.x > 0.0) direct += blockLight(pos, h.normal);
+	return direct;
+}
+
+// Cosine-weighted direction around n. With radiance = albedo x irradiance (no 1/pi, as everywhere here), a
+// sample's contribution is simply albedo x the radiance arriving along it.
+vec3 cosineSample(vec3 n) {
+	float u = rand(), phi = 6.2831853 * rand(), r = sqrt(u);
+	vec3 t = normalize(cross(abs(n.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0), n));
+	return normalize(t * (r * cos(phi)) + cross(n, t) * (r * sin(phi)) + n * sqrt(1.0 - u));
+}
+
 // Set by radiance(): the primary ray hit an entity, at this NDC depth.
 bool hitEntity;
 float hitDepth;
@@ -324,27 +352,37 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 	vec2 d = abs(pos.xz - camera.xz);
 	if (h.kind != KIND_DYNAMIC && max(d.x, d.y) > pc.rtDistance) return vec4(0.0);
 
-	// Sun by day, moon by night: one shadow ray toward a point on the disc (its centre unless stochastic).
-	bool day = pc.sunDir.y > 0.0;
-	vec3 lightDir = day ? pc.sunDir.xyz : pc.moonDir.xyz;
-	vec3 direct = vec3(0.0);
-	if (pc.skyColor.w != 0.0 && lightDir.y > 0.0) {
-		vec3 l = pc.stochastic != 0.0 ? sampleCone(lightDir, day ? SUN_COS : MOON_COS, random2(p)) : lightDir;
-		float nl = max(dot(h.normal, l), 0.0);
-		if (nl > 0.0) {
-			rayQueryEXT shadow;
-			TRACE(shadow, pos + h.normal * 0.002, l, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsTerminateOnFirstHitEXT)
-			if (!HIT(shadow)) direct = nl * (day ? sunRadiance(l.y) : MOON * pc.moonDir.w);
-		}
+	vec3 radiance = h.albedo * (EMISSIVE * h.emission + directLight(h, pos));
+	if (pc.stochastic == 0.0) {
+		// ponytail: until M4's denoiser, bounce light is approximated outside reference mode: sky light scaled by
+		// vanilla's sky light level, and a dim fill from its block light level.
+		float sky = h.light.y * h.light.y;
+		return vec4(radiance + h.albedo * (skyIrradiance(h.normal) * sky + BLOCK_LIGHT * 0.15 * pow(h.light.x, 2.2)), 1.0);
 	}
 
-	// ponytail: sky light scaled by vanilla's sky light level, and a dim fill from vanilla's block light level
-	// standing in for bounce light; step 6 traces both.
-	float sky = h.light.y * h.light.y;
-	// Vanilla's light level says whether any block light reaches here: skip sampling (and its shadow ray) if not.
-	vec3 blocks = h.light.x > 0.0 ? blockLight(pos, h.normal) : vec3(0.0);
-	vec3 lit = direct + skyIrradiance(h.normal) * sky + blocks + BLOCK_LIGHT * 0.15 * pow(h.light.x, 2.2);
-	return vec4(h.albedo * (lit + EMISSIVE * h.emission), 1.0);
+	// Reference mode: follow the light around. Each bounce picks up direct light where it lands; a ray that
+	// escapes brings the sky's. Emitters a bounce hits add nothing: block-light sampling already counted them.
+	vec3 throughput = h.albedo, x = pos, n = h.normal;
+	for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+		vec3 d = cosineSample(n);
+		rayQueryEXT b;
+		TRACE(b, x + n * 0.002, d, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
+		if (!HIT(b)) {
+			radiance += throughput * skyIrradiance(d);
+			break;
+		}
+		x = x + n * 0.002 + d * rayQueryGetIntersectionTEXT(b, true);
+		Hit hb = shade(b, d);
+		radiance += throughput * hb.albedo * directLight(hb, x);
+		throughput *= hb.albedo;
+		n = hb.normal;
+		if (bounce >= 1) {
+			float survive = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+			if (rand() > survive) break;
+			throughput /= survive;
+		}
+	}
+	return vec4(radiance, 1.0);
 }
 
 void main() {

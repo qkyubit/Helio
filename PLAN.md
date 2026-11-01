@@ -435,7 +435,15 @@ look right with accumulation on (reference) and stable with 1 spp.
    Also fixed: `Memory.buffer` now over-allocates 255 B and aligns the address to
    256 itself (VMA's aligned create isn't in LWJGL 3.4.3), recording the offset
    for AS/micromap creation; a 32-aligned light table had disabled the tracer.
-6. [ ] Indirect: 1–2 bounces + SHaRC-style radiance cache. Re-test OMM here.
+6. [x] Indirect light, **reference mode only** (Reference Accumulation on):
+   up to 3 cosine-sampled bounces (Russian roulette after the 2nd), direct sun/
+   moon + block-light sampling at every bounce, escaped rays bring the sky;
+   emitters hit by bounces add nothing (light sampling already counts them).
+   Replaces the vanilla-sky-level and block-light-fill approximations there;
+   outside reference mode those stay until M4's RR. User-checked: red bleed on
+   white concrete, corner darkening, cave and forest. Cost: 8.5 ms outdoors,
+   29 ms in a lava/lantern cave at native 1440p (reference only). The
+   SHaRC-style radiance cache moves to M4 with real-time GI under RR.
 7. [ ] Water / glass / ice: reflection + refraction.
 8. [ ] Hybrid preset (RT shadows + reflections only).
 
