@@ -394,7 +394,13 @@ look right with accumulation on (reference) and stable with 1 spp.
    painted over). Entities show vanilla shading again but still cast RT shadows.
    Motion vectors moved to step 4: with camera motion only they'd equal the
    current depth-based ones.
-3. [ ] Soft sun shadows (cone sampling), moon, sky light from a simple sky model.
+3. [x] Sun colour from air mass (reddens near the horizon), dimmed by rain;
+   moonlight with its own shadow ray at night; sky light from vanilla's sky
+   (zenith) and fog (horizon) colours by normal, half desaturated, with a moonlit
+   floor at night; no-sky dimensions get a dim fog-tinted ambient. Soft shadows
+   sample a 0.6° disc only with Reference Accumulation (1 spp flicker until M4's
+   RR). Sky light is still scaled by vanilla's sky light level, not traced (step
+   6). User-checked: day, sunset, night, rain, soft shadows.
 4. [ ] Entity textures (bindless) and AO-free albedo.
 5. [ ] Emissive blocks: light list from block light level + texture colour;
    ReSTIR DI.

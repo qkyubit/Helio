@@ -11,11 +11,14 @@ import dev.helio.vk.GpuTimers;
 import dev.helio.vk.Memory;
 import dev.helio.vk.Shaders;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.minecraft.client.renderer.state.level.SkyRenderState;
 import net.minecraft.client.renderer.texture.TextureAtlas;
+import net.minecraft.world.level.dimension.DimensionType.Skybox;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
-import org.joml.Matrix4fc;
 import org.joml.Vector3f;
+import org.joml.Vector4f;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.*;
@@ -39,7 +42,7 @@ import static org.lwjgl.vulkan.VK12.*;
  * so no layout transitions are needed; we add the same barrier after our dispatch.
  */
 public final class PathTracer {
-	private static final int PUSH_SIZE = 128;
+	private static final int PUSH_SIZE = 176;
 	/** Accumulation keeps adapting slowly after this many frames instead of freezing. */
 	private static final int MAX_FRAMES = 256;
 
@@ -51,7 +54,11 @@ public final class PathTracer {
 	private static boolean failed, ranThisFrame;
 	private static Vec3 cameraPos = Vec3.ZERO;
 	private static final Matrix4f viewRotation = new Matrix4f();
-	private static float sunAngle;
+	private static float sunAngle, moonAngle, rainBrightness;
+	private static boolean hasSky;
+	private static final Vector3f skyColor = new Vector3f();
+	private static final Vector4f fogColor = new Vector4f();
+	private static int seed;
 
 	private static Memory.Img accum;
 	/** Frames averaged into {@link #accum} so far (0: next frame restarts it). For the overlay too. */
@@ -63,10 +70,17 @@ public final class PathTracer {
 	private PathTracer() {}
 
 	/** Start of the level render. */
-	public static void beginFrame(Vec3 camera, Matrix4fc rotation, float sun) {
-		cameraPos = camera;
-		viewRotation.set(rotation);
-		sunAngle = sun;
+	public static void beginFrame(CameraRenderState camera, SkyRenderState sky) {
+		cameraPos = camera.pos;
+		viewRotation.set(camera.viewRotationMatrix);
+		hasSky = sky.skybox == Skybox.OVERWORLD;
+		if (hasSky) {
+			sunAngle = sky.sunAngle;
+			moonAngle = sky.moonAngle;
+			rainBrightness = sky.rainBrightness;
+			skyColor.set(sky.skyColor);
+		}
+		fogColor.set(camera.fogData.color);
 		ranThisFrame = false;
 	}
 
@@ -142,7 +156,7 @@ public final class PathTracer {
 		RenderTarget main = mc.gameRenderer.mainRenderTarget();
 		VulkanGpuTextureView color = (VulkanGpuTextureView) main.getColorTextureView();
 		VulkanGpuTextureView atlas = (VulkanGpuTextureView) mc.getTextureManager().getTexture(TextureAtlas.LOCATION_BLOCKS).getTextureView();
-		Vector3f sun = new Matrix4f().rotateY((float) (-Math.PI / 2)).rotateX(sunAngle).transformDirection(new Vector3f(0, 1, 0));
+		Vector3f sun = celestial(sunAngle), moon = celestial(moonAngle);
 		float daylight = smoothstep(-0.05f, 0.2f, sun.y);
 		Matrix4f invViewProj = new Matrix4f(levelProjection).mul(viewRotation).invert();
 
@@ -175,7 +189,12 @@ public final class PathTracer {
 				.putFloat(80, sun.x).putFloat(84, sun.y).putFloat(88, sun.z).putFloat(92, daylight)
 				.putLong(96, Scene.instanceInfo)
 				.putFloat(104, Scene.rtDistanceBlocks).putInt(108, frameIndex)
-				.putFloat(112, jitterX).putFloat(116, jitterY);
+				.putFloat(112, jitterX).putFloat(116, jitterY)
+				// Sampling the sun disc is noisy at 1 sample per pixel: only with accumulation until M4's denoiser.
+				.putInt(120, seed++).putFloat(124, HelioConfig.current.accumulate ? 1 : 0)
+				.putFloat(128, moon.x).putFloat(132, moon.y).putFloat(136, moon.z).putFloat(140, rainBrightness)
+				.putFloat(144, skyColor.x).putFloat(148, skyColor.y).putFloat(152, skyColor.z).putFloat(156, hasSky ? 1 : 0)
+				.putFloat(160, fogColor.x).putFloat(164, fogColor.y).putFloat(168, fogColor.z).putFloat(172, 0);
 			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
 
 			vkCmdDispatch(cmd, (main.width + 7) / 8, (main.height + 7) / 8, 1);
@@ -237,6 +256,11 @@ public final class PathTracer {
 		vkDestroyPipelineLayout(vk, pipelineLayout, null);
 		vkDestroyDescriptorSetLayout(vk, setLayout, null);
 		vkDestroySampler(vk, sampler, null);
+	}
+
+	/** Direction of the sun or moon, as vanilla's sky renderer places them. */
+	private static Vector3f celestial(float angle) {
+		return new Matrix4f().rotateY((float) (-Math.PI / 2)).rotateX(angle).transformDirection(new Vector3f(0, 1, 0));
 	}
 
 	private static float smoothstep(float a, float b, float x) {

@@ -40,7 +40,7 @@ public class LevelRendererMixin {
 
 	@Inject(method = "render", at = @At("HEAD"))
 	private void helio$beginFrame(CallbackInfo ci, @Local(argsOnly = true) CameraRenderState cameraState) {
-		PathTracer.beginFrame(cameraState.pos, cameraState.viewRotationMatrix, levelRenderState.skyRenderState.sunAngle);
+		PathTracer.beginFrame(cameraState, levelRenderState.skyRenderState);
 	}
 
 	// The level's features (entities, block entities, items) are prepared and uploaded inside this call.

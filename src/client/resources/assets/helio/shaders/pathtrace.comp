@@ -27,9 +27,13 @@ const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u, MASK_DYNAMIC = 8u;
 const uint KIND_DYNAMIC = 3u;
 const uint DEBUG_INSTANCES = 1u, DEBUG_ALBEDO = 2u, DEBUG_NORMALS = 3u, DEBUG_TRIANGLE_DENSITY = 4u;
 
-const vec3 SUN = vec3(1.0, 0.92, 0.80) * 2.4;
-const vec3 SKY = vec3(0.42, 0.58, 0.85) * 0.75;
+const vec3 SUN = vec3(1.0, 0.95, 0.88) * 2.6;
+const vec3 MOON = vec3(0.55, 0.65, 1.0) * 0.2;
+const vec3 NIGHT_SKY = vec3(0.6, 0.7, 1.0) * 0.06; // moonlit sky; vanilla's sky colour is near black at night
+const float SKY = 0.9;
 const vec3 BLOCK_LIGHT = vec3(1.0, 0.68, 0.38) * 1.6;
+const float SUN_COS = 0.99994;  // 0.6 degree disc radius: soft-shadow penumbra
+const float MOON_COS = 0.99996;
 
 layout(push_constant) uniform Push {
 	mat4 invViewProj;   // inverse(projection * viewRotation): NDC -> camera-relative world
@@ -39,6 +43,11 @@ layout(push_constant) uniform Push {
 	float rtDistance;   // blocks the scene surely covers around the camera, horizontally
 	uint frameIndex;    // frames accumulated so far; 0 restarts
 	vec2 jitter;        // sub-pixel offset of the primary ray (zero without accumulation)
+	uint seed;          // changes every frame
+	float stochastic;   // 1: sample area lights (needs accumulation or a denoiser), 0: their centre
+	vec4 moonDir;       // xyz towards the moon, w = rain brightness (1 clear .. 0 raining)
+	vec4 skyColor;      // vanilla's sky (zenith) colour, sRGB; w = 1 if the dimension has a sky
+	vec4 fogColor;      // vanilla's fog (horizon) colour, sRGB
 } pc;
 
 struct Hit {
@@ -109,6 +118,43 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 	return h;
 }
 
+uint pcg(uint v) {
+	uint state = v * 747796405u + 2891336453u;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return (word >> 22u) ^ word;
+}
+
+vec2 random2(uvec2 p) {
+	uint a = pcg(p.x + pcg(p.y + pcg(pc.seed)));
+	return vec2(a & 0xFFFFu, pcg(a) & 0xFFFFu) / 65536.0;
+}
+
+// Uniform direction within a cone of half-angle acos(cosMax) around d.
+vec3 sampleCone(vec3 d, float cosMax, vec2 u) {
+	float c = mix(1.0, cosMax, u.x), s = sqrt(1.0 - c * c), phi = 6.2831853 * u.y;
+	vec3 t = normalize(cross(abs(d.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0), d));
+	return normalize(t * (cos(phi) * s) + cross(d, t) * (sin(phi) * s) + d * c);
+}
+
+vec3 srgbToLinear(vec3 c) {
+	return pow(c, vec3(2.2));
+}
+
+// Sunlight reddens through more air near the horizon and dims with rain.
+vec3 sunRadiance(float y) {
+	float airmass = 1.0 / max(y, 0.035);
+	return SUN * exp(-vec3(0.020, 0.045, 0.10) * (airmass - 1.0)) * pc.moonDir.w * pc.moonDir.w;
+}
+
+// Light from the sky dome onto a surface facing n: vanilla's sky colour overhead, fog colour at the horizon,
+// half desaturated (vanilla's sky is very blue, and there's no warm ground bounce until step 6).
+vec3 skyIrradiance(vec3 n) {
+	if (pc.skyColor.w == 0.0) return srgbToLinear(pc.fogColor.rgb) * 0.15; // Nether, End: no sky
+	vec3 c = mix(srgbToLinear(pc.fogColor.rgb), srgbToLinear(pc.skyColor.rgb), n.y * 0.5 + 0.5);
+	c = mix(vec3(dot(c, vec3(0.2126, 0.7152, 0.0722))), c, 0.5) * SKY;
+	return max(c, NIGHT_SKY * pc.moonDir.w);
+}
+
 vec3 heat(float x) {
 	return clamp(vec3(x * 2.0 - 1.0, 1.0 - abs(x * 2.0 - 1.0), 1.0 - x * 2.0), 0.0, 1.0);
 }
@@ -131,7 +177,7 @@ vec3 tonemap(vec3 x) {
 }
 
 // Linear radiance seen through pixel position `pixel` (fractional); coverage 0 where vanilla's picture stays.
-vec4 radiance(vec2 pixel, vec2 size) {
+vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 	// Primary ray, matching vanilla's projection. View bobbing translates inside the projection, so the eye
 	// isn't at the origin: unproject the near plane (reversed-Z: ndc 1) as well.
 	vec2 ndc = pixel / size * 2.0 - 1.0;
@@ -152,20 +198,23 @@ vec4 radiance(vec2 pixel, vec2 size) {
 	vec2 d = abs(pos.xz - camera.xz);
 	if (max(d.x, d.y) > pc.rtDistance) return vec4(0.0);
 
-	vec3 sun = pc.sunDir.xyz;
-	float nl = max(dot(h.normal, sun), 0.0);
-	float visible = 0.0;
-	if (sun.y > 0.0 && nl > 0.0) {
-		rayQueryEXT shadow;
-		TRACE(shadow, pos + h.normal * 0.002, sun, 512.0, MASK_SOLID | MASK_CUTOUT | MASK_DYNAMIC, gl_RayFlagsTerminateOnFirstHitEXT)
-		visible = HIT(shadow) ? 0.0 : 1.0;
+	// Sun by day, moon by night: one shadow ray toward a point on the disc (its centre unless stochastic).
+	bool day = pc.sunDir.y > 0.0;
+	vec3 lightDir = day ? pc.sunDir.xyz : pc.moonDir.xyz;
+	vec3 direct = vec3(0.0);
+	if (pc.skyColor.w != 0.0 && lightDir.y > 0.0) {
+		vec3 l = pc.stochastic != 0.0 ? sampleCone(lightDir, day ? SUN_COS : MOON_COS, random2(p)) : lightDir;
+		float nl = max(dot(h.normal, l), 0.0);
+		if (nl > 0.0) {
+			rayQueryEXT shadow;
+			TRACE(shadow, pos + h.normal * 0.002, l, 512.0, MASK_SOLID | MASK_CUTOUT | MASK_DYNAMIC, gl_RayFlagsTerminateOnFirstHitEXT)
+			if (!HIT(shadow)) direct = nl * (day ? sunRadiance(l.y) : MOON * pc.moonDir.w);
+		}
 	}
 
+	// ponytail: sky light scaled by vanilla's sky light level, not traced; step 6 traces it with the bounces.
 	float sky = h.light.y * h.light.y;
-	return vec4(h.albedo * (
-		SUN * nl * visible * pc.sunDir.w
-		+ SKY * sky * mix(0.08, 1.0, pc.sunDir.w) * (0.75 + 0.25 * h.normal.y)
-		+ BLOCK_LIGHT * pow(h.light.x, 2.2)), 1.0);
+	return vec4(h.albedo * (direct + skyIrradiance(h.normal) * sky + BLOCK_LIGHT * pow(h.light.x, 2.2)), 1.0);
 }
 
 void main() {
@@ -189,7 +238,7 @@ void main() {
 
 	// Running average of premultiplied radiance + coverage: frame 0 restarts it. Coverage < 1 blends with
 	// vanilla's picture (sky, terrain past the RT distance), which also anti-aliases those edges.
-	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size));
+	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size), uvec2(p));
 	current.rgb *= current.a;
 	vec4 acc = pc.frameIndex == 0u ? current : mix(imageLoad(accumImg, p), current, 1.0 / float(pc.frameIndex + 1u));
 	imageStore(accumImg, p, acc);
