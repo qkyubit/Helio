@@ -53,7 +53,10 @@ const uint CANDIDATES = 8u;     // lights considered per shading point (RIS)
 const int MAX_BOUNCES = 3;      // reference mode; Russian roulette after the second
 const float SUN_COS = 0.99994;  // 0.6 degree disc radius: soft-shadow penumbra
 const float MOON_COS = 0.99996;
-const float GLINT = 50.0;       // sun and moon discs seen in reflections, over their direct light
+const float GLINT = 50.0;       // sun and moon seen in reflections, over their direct light
+// Vanilla's sun and moon as seen (half-width over distance): its quads are 30 and 20 wide at 100, the sun's
+// bright core is the middle 8 of its texture's 32 pixels with a faint halo out to 22, the moon's face 20.
+const float SUN_SIZE = 0.075, SUN_HALO = 0.206, MOON_SIZE = 0.125;
 const float WATER_IOR = 1.33, GLASS_IOR = 1.5;
 const float WATER_OPACITY = 0.3;     // how much of water's texture shows on its surface; the rest is seen through
 const float WATER_ABSORPTION = 0.15; // per block, as a power of the water's (linear) tint
@@ -373,14 +376,27 @@ vec3 surfaceRadiance(Hit h, vec3 pos) {
 	return radiance;
 }
 
+// How far d points from the centre of vanilla's square sun or moon towards c, as half-width over distance
+// (> 1e9 behind it). Vanilla's quad has one edge along world Z, the axis the sky turns around.
+float celestialOffset(vec3 d, vec3 c) {
+	float z = dot(d, c);
+	vec3 across = cross(c, vec3(0.0, 0.0, 1.0));
+	return z > 0.0 ? max(abs(d.z), abs(dot(d, across))) / z : 1e10;
+}
+
 // What a reflected or refracted ray that escapes sees: vanilla's sky (fog colour at the horizon) and the sun
-// or moon disc.
+// or moon as vanilla draws them.
 vec3 skyRadiance(vec3 d) {
 	if (pc.skyColor.w == 0.0) return srgbToLinear(pc.fogColor.rgb) * 0.15;
 	vec3 c = mix(srgbToLinear(pc.fogColor.rgb), srgbToLinear(pc.skyColor.rgb), smoothstep(0.0, 0.5, d.y));
 	c = max(c, NIGHT_SKY * pc.moonDir.w);
-	if (pc.sunDir.y > 0.0 && dot(d, pc.sunDir.xyz) > SUN_COS) c += sunRadiance(pc.sunDir.y) * GLINT;
-	else if (pc.moonDir.y > 0.0 && dot(d, pc.moonDir.xyz) > MOON_COS) c += MOON * pc.moonDir.w * GLINT;
+	if (pc.sunDir.y > 0.0) {
+		float k = celestialOffset(d, pc.sunDir.xyz);
+		// The halo fades like the texture's (40 to 7 of 255, sRGB) from the core's edge outwards.
+		float halo = k < SUN_HALO ? pow(mix(40.0, 7.0, (k - SUN_SIZE) / (SUN_HALO - SUN_SIZE)) / 255.0, 2.2) : 0.0;
+		c += sunRadiance(pc.sunDir.y) * GLINT * (k < SUN_SIZE ? 1.0 : halo);
+	}
+	if (pc.moonDir.y > 0.0 && celestialOffset(d, pc.moonDir.xyz) < MOON_SIZE) c += MOON * pc.moonDir.w * GLINT;
 	return c;
 }
 
