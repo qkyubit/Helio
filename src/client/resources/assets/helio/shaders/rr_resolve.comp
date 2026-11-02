@@ -1,0 +1,28 @@
+#version 460
+
+// After DLSS Ray Reconstruction: tonemap its clean radiance into the main colour (it covers the whole frame:
+// pathtrace.comp gave it vanilla's picture where nothing was traced), and fill in the traced colour that
+// entity_composite.comp later puts back over vanilla's entities. The sky keeps vanilla's own pixels: its
+// sun, hard-edged and near white, flickers in brightness through RR.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, rgba16f) readonly uniform image2D denoised;
+layout(binding = 1, rgba8) uniform image2D colorImg;
+layout(binding = 2, rgba32f) uniform image2D entityImg; // a: depth from pathtrace.comp, rgb (every pixel) filled in here
+layout(binding = 3) uniform sampler2D depthTex;         // vanilla's depth so far: 0 (reversed-Z) is sky
+
+// Narkowicz's ACES fit, as in pathtrace.comp.
+vec3 tonemap(vec3 x) {
+	return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+
+void main() {
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	if (any(greaterThanEqual(p, imageSize(colorImg)))) return;
+	float depth = imageLoad(entityImg, p).a;
+	vec3 c = pow(tonemap(max(imageLoad(denoised, p).rgb, vec3(0.0))), vec3(1.0 / 2.2));
+	imageStore(entityImg, p, vec4(c, depth));
+	if (depth == 0.0 && texelFetch(depthTex, p, 0).r == 0.0) return; // sky, no traced entity in front
+	imageStore(colorImg, p, vec4(c, imageLoad(colorImg, p).a));
+}

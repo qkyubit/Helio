@@ -11,10 +11,15 @@ import dev.helio.mixin.RenderSetupAccessor;
 import dev.helio.mixin.RenderTypeAccessor;
 import dev.helio.mixin.StagedDrawAccessor;
 import dev.helio.mixin.TextureBindingAccessor;
+import net.minecraft.client.renderer.OrderedSubmitNodeCollector;
 import net.minecraft.client.renderer.StagedVertexBuffer;
+import net.minecraft.client.renderer.SubmitNodeCollector;
+import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.resources.Identifier;
 
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -36,6 +41,16 @@ import static org.lwjgl.system.MemoryUtil.*;
  */
 public final class Entities {
 	public static final int STRIDE = 32, MAX_TEXTURES = 256;
+	/** Texture-index flag on the first-person body's vertices: camera rays pass through it (pathtrace.comp). */
+	private static final int BODY = 1 << 16;
+	/**
+	 * The player's own body in first person, which vanilla doesn't draw: Helio extracts it anyway and submits it
+	 * with render types renamed {@value #BODY_PREFIX}..., which vanilla skips drawing and Helio captures for
+	 * shadows and bounce light. Null in third person.
+	 */
+	public static EntityRenderState firstPersonBody;
+	public static final String BODY_PREFIX = "helio_body/";
+	private static final Map<RenderType, RenderType> bodyTypes = new IdentityHashMap<>();
 
 	/** Render types whose geometry is a solid surface. Glints, trims, eyes, shadows, outlines and text are overlays or decals. */
 	private static final Set<String> SURFACES = Set.of(
@@ -70,7 +85,9 @@ public final class Entities {
 	}
 
 	public static void tag(StagedVertexBuffer.Draw draw, RenderType type) {
-		if (!capturing || !SURFACES.contains(((RenderTypeAccessor) type).helio$name())) return;
+		String name = ((RenderTypeAccessor) type).helio$name();
+		boolean body = name.startsWith(BODY_PREFIX);
+		if (!capturing || !SURFACES.contains(body ? name.substring(BODY_PREFIX.length()) : name)) return;
 		Object binding = ((RenderSetupAccessor) (Object) ((RenderTypeAccessor) type).helio$state()).helio$textures().get("Sampler0");
 		if (binding == null) return;
 		Identifier texture = ((TextureBindingAccessor) binding).helio$location();
@@ -80,7 +97,32 @@ public final class Entities {
 			index = textures.size();
 			textures.add(texture);
 		}
-		surfaces.put(draw, index);
+		surfaces.put(draw, body ? index | BODY : index);
+	}
+
+	/**
+	 * Submits the first-person body: calls carrying a render type go through with its body copy; everything
+	 * else (held items, name tag, blob shadow) is dropped. Default methods run on the wrapper, so they end in
+	 * those calls too.
+	 */
+	public static SubmitNodeCollector bodyCollector(SubmitNodeCollector collector) {
+		return (SubmitNodeCollector) wrap(collector, SubmitNodeCollector.class);
+	}
+
+	private static Object wrap(Object target, Class<?> type) {
+		return Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, (proxy, method, args) -> {
+			if (method.isDefault()) return InvocationHandler.invokeDefault(proxy, method, args);
+			if (method.getDeclaringClass() == Object.class) return method.invoke(target, args);
+			if (method.getReturnType() == OrderedSubmitNodeCollector.class) return wrap(method.invoke(target, args), OrderedSubmitNodeCollector.class);
+			boolean model = false;
+			for (int i = 0; args != null && i < args.length; i++) {
+				if (args[i] instanceof RenderType t) {
+					args[i] = bodyTypes.computeIfAbsent(t, k -> RenderType.create(BODY_PREFIX + ((RenderTypeAccessor) k).helio$name(), ((RenderTypeAccessor) k).helio$state()));
+					model = true;
+				}
+			}
+			return model || method.getReturnType() != void.class ? method.invoke(target, args) : null;
+		});
 	}
 
 	/** Vanilla is about to copy the frame's draws to the GPU and free them. */

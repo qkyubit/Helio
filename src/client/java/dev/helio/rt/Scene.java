@@ -18,6 +18,8 @@ import net.minecraft.client.renderer.ViewArea;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.SectionRenderDispatcher.RenderSection;
 import net.minecraft.core.SectionPos;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
@@ -168,8 +170,17 @@ public final class Scene {
 
 	/** Emission level of the fluid being tesselated (FluidRenderer has no other way to tell its vertices). */
 	public static final ThreadLocal<Integer> FLUID_EMISSION = ThreadLocal.withInitial(() -> 0);
-	/** Water's vertices claim emission 1, which no translucent block has: the path tracer reads it as water. */
-	public static final int WATER_MARK = 1;
+	/**
+	 * Water's vertices claim emission 1, which no translucent block has: the path tracer reads it as water.
+	 * Foliage does the same in the cutout layer (whose only real emission-1 block, the brewing stand, loses it).
+	 */
+	public static final int WATER_MARK = 1, FOLIAGE_MARK = 1;
+
+	/** Leaves and plants: thin, so the path tracer lets light through them. */
+	public static boolean isFoliage(BlockState state) {
+		return state.is(BlockTags.LEAVES) || state.is(BlockTags.REPLACEABLE_BY_TREES) || state.is(BlockTags.FLOWERS)
+			|| state.is(BlockTags.SAPLINGS) || state.is(BlockTags.CROPS);
+	}
 
 	public static boolean compilingUnshaded() {
 		return unshaded && COMPILING.get();

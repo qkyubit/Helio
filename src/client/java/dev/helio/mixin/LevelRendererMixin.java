@@ -5,6 +5,7 @@ import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.llamalad7.mixinextras.sugar.Local;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.renderpearl.api.commands.RenderPass;
 import dev.helio.ngx.FrameGenSpike;
 import dev.helio.rt.Entities;
@@ -12,10 +13,13 @@ import dev.helio.rt.PathTracer;
 import dev.helio.rt.Scene;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LevelRenderer;
+import net.minecraft.client.renderer.SubmitNodeCollector;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.ChunkSectionsToRender;
 import net.minecraft.client.renderer.chunk.SectionMesh;
 import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
+import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
+import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.feature.FeatureRenderDispatcher;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
@@ -112,6 +116,13 @@ public class LevelRendererMixin {
 			helio$deferredFeatures = null;
 		}
 		PathTracer.compositeEntities();
+	}
+
+	// The first-person body goes in with render types vanilla won't draw (Entities.bodyCollector).
+	@WrapOperation(method = "submitEntities", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;submit(Lnet/minecraft/client/renderer/entity/state/EntityRenderState;Lnet/minecraft/client/renderer/state/level/CameraRenderState;DDDLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/SubmitNodeCollector;)V"))
+	private void helio$submitBody(EntityRenderDispatcher dispatcher, EntityRenderState state, CameraRenderState camera, double x, double y, double z,
+		PoseStack poseStack, SubmitNodeCollector output, Operation<Void> original) {
+		original.call(dispatcher, state, camera, x, y, z, poseStack, state == Entities.firstPersonBody ? Entities.bodyCollector(output) : output);
 	}
 
 	// Inside the RT distance the path tracer draws translucent terrain itself (reflected and refracted).

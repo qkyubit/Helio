@@ -477,6 +477,23 @@ look right with accumulation on (reference) and stable with 1 spp.
 Exit: 1440p, RR Balanced, base ≥ 60 FPS in the M3 test scenes; with FG,
 output near 180 Hz and no HUD smearing.
 
+**M4 steps** (planned 2026-11-02; Reflex and 2x FG already run from M0/M1):
+1. [ ] Ray Reconstruction at native resolution (DLAA): stochastic sampling every
+   frame (soft shadows, light RIS, 1 GI bounce) instead of the 1-spp
+   approximations; guides (diffuse/specular albedo, world normals + roughness,
+   HW depth, camera motion vectors); pixels the tracer leaves to vanilla (sky,
+   past the RT distance) go in as vanilla's colour so RR covers the whole
+   frame; a resolve pass tonemaps RR's output. Reference Accumulation stays.
+2. [ ] Internal resolution: RR Quality / Balanced / Performance, the tracer at
+   render size, vanilla's colour and depth sampled into it; DLSS SR (or DLAA)
+   when ray tracing is off. Quality setting in the UI.
+3. [ ] Entity motion vectors (previous-frame entity vertices) for RR and FG.
+4. [ ] SHaRC-style radiance cache: more bounces for about the cost of one.
+5. [ ] Reflections under RR: specular hit distance + matrices (or specular
+   motion vectors) for water and glass; transparency guide if particles ghost.
+6. [ ] Multi frame generation 3x/4x, HUD after FG input, presets map to DLSS
+   modes; M4 exit check.
+
 ### M5 — PBR and 3D resource packs
 
 - LabPBR 1.3: `_n` (normal, AO, height) and `_s` (smoothness, F0/metal IDs,

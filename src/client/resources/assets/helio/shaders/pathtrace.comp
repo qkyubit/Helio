@@ -17,6 +17,14 @@ layout(binding = 1, rgba8) uniform image2D colorImg;
 layout(binding = 2) uniform sampler2D blockAtlas;
 layout(binding = 3, rgba32f) uniform image2D accumImg; // premultiplied radiance + coverage, averaged over frames
 layout(binding = 4, rgba32f) uniform image2D entityImg; // traced colour + NDC depth where an entity is hit (entity_composite.comp)
+layout(binding = 5) uniform sampler2D depthTex; // vanilla's depth so far: sky and terrain past the RT distance
+// DLSS Ray Reconstruction's inputs (RayReconstruction.java), written instead of compositing when Frame.denoise is set.
+layout(binding = 6, rgba16f) uniform writeonly image2D rrColor;    // noisy linear radiance
+layout(binding = 7, rgba8) uniform writeonly image2D rrDiffuse;    // diffuse albedo
+layout(binding = 8, rgba8) uniform writeonly image2D rrSpecular;   // specular albedo
+layout(binding = 9, rgba16f) uniform writeonly image2D rrNormals;  // world normal, roughness in w
+layout(binding = 10, r32f) uniform writeonly image2D rrDepth;      // NDC depth (reversed-Z), like vanilla's
+layout(binding = 11, rg16f) uniform writeonly image2D rrMotion;    // pixels from here to where it was last frame
 layout(set = 1, binding = 0) uniform sampler2D entityTextures[256]; // this frame's entity textures (Entities.textures)
 
 // Vertices in vanilla's BLOCK layout: position xyz, colour, UV0 uv, light levels (2 shorts); 7 floats for
@@ -33,13 +41,19 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Li
 	uvec2 pad;
 	uvec2 cells[]; // first light, count; x fastest, then y, then z
 };
+// What changes each frame but doesn't fit in the push constants.
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Frame {
+	mat4 prevViewProj;  // last frame's viewProj (position relative to its camera -> clip)
+	vec4 cameraDelta;   // this frame's camera position - last frame's; w = bounces (stochastic only)
+	uint denoise;       // 1: write RR's inputs, RR and rr_resolve.comp finish the picture
+};
 // Per TLAS instance. kind: section layer (0 solid, 1 cutout, 2 translucent) or 3 = entities.
 struct Instance { uvec2 vertices; uint triangles; uint kind; };
 layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer InstanceInfo { Instance i[]; };
 
 const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u, MASK_TRANSLUCENT = 4u, MASK_DYNAMIC = 8u;
 const uint MASK_OPAQUE_SCENE = MASK_SOLID | MASK_CUTOUT | MASK_DYNAMIC;
-const uint KIND_TRANSLUCENT = 2u, KIND_DYNAMIC = 3u;
+const uint KIND_CUTOUT = 1u, KIND_TRANSLUCENT = 2u, KIND_DYNAMIC = 3u;
 const uint DEBUG_INSTANCES = 1u, DEBUG_ALBEDO = 2u, DEBUG_NORMALS = 3u, DEBUG_TRIANGLE_DENSITY = 4u;
 
 const vec3 SUN = vec3(1.0, 0.95, 0.88) * 2.6;
@@ -50,7 +64,6 @@ const vec3 BLOCK_LIGHT = vec3(1.0, 0.68, 0.38) * 1.6;
 const float LIGHT = 8.0;        // intensity of an emission-15 block light
 const float EMISSIVE = 4.0;     // radiance of an emission-15 block's own surface, times its texture (M6 bloom keys off it)
 const uint CANDIDATES = 8u;     // lights considered per shading point (RIS)
-const int MAX_BOUNCES = 3;      // reference mode; Russian roulette after the second
 const float SUN_COS = 0.99994;  // 0.6 degree disc radius: soft-shadow penumbra
 const float MOON_COS = 0.99996;
 const float GLINT = 50.0;       // sun and moon seen in reflections, over their direct light
@@ -62,6 +75,7 @@ const float WATER_OPACITY = 0.3;     // how much of water's texture shows on its
 const float WATER_ABSORPTION = 0.15; // per block, as a power of the water's (linear) tint
 const float WATER_SCATTER = 0.1;     // light the water itself sends back, over the sky and sun reaching it
 const vec3 WATER_TINT = vec3(0.046, 0.184, 0.782); // vanilla's default 0x3F76E4: absorption when the camera starts underwater
+const float FOLIAGE_TRANSMISSION = 0.5; // light leaves and grass let through, over what they reflect
 const int MAX_LAYERS = 6;       // translucent surfaces a view ray passes before the next one counts as opaque
 
 layout(push_constant) uniform Push {
@@ -79,6 +93,7 @@ layout(push_constant) uniform Push {
 	vec4 fogColor;      // vanilla's fog (horizon) colour, sRGB; w = 1 if the camera is underwater
 	mat4 viewProj;      // camera-relative world -> NDC, for depths that match vanilla's
 	uvec2 lights;       // LightTable, zero without lights
+	uvec2 frame;        // Frame
 } pc;
 
 struct Hit {
@@ -90,6 +105,7 @@ struct Hit {
 	vec3 tint;      // linear vertex colour (biome tint)
 	float opacity;  // texture alpha: translucent surfaces let the rest through
 	bool water;     // marked by vertex alpha (Scene.WATER_MARK)
+	bool foliage;   // leaves and plants (Scene.FOLIAGE_MARK in the cutout layer): lets light through
 };
 
 uint strideOf(uint kind) {
@@ -116,7 +132,7 @@ vec2 lightAt(Vertices vb, uint vertex, uint stride) {
 // The block atlas for sections; the entity's own texture for entities.
 vec4 texel(Vertices vb, uint kind, uint vertex, vec2 uv) {
 	if (kind != KIND_DYNAMIC) return textureLod(blockAtlas, uv, 0.0);
-	return textureLod(entityTextures[nonuniformEXT(floatBitsToUint(vb.v[vertex * 8u + 7u]))], uv, 0.0);
+	return textureLod(entityTextures[nonuniformEXT(floatBitsToUint(vb.v[vertex * 8u + 7u]) & 0xFFFFu)], uv, 0.0);
 }
 
 // Quads are indexed 0 1 2, 2 3 0.
@@ -125,12 +141,17 @@ uvec3 triangleVertices(uint prim) {
 	return base + ((prim & 1u) == 0u ? uvec3(0u, 1u, 2u) : uvec3(2u, 3u, 0u));
 }
 
+// True while tracing what the camera sees directly: rays then pass through the player's own body in first
+// person (entity vertices flagged with Entities.BODY), which only shadows and bounce light see.
+bool cameraRay = false;
+
 // Cutout candidate: does the texel under the hit point pass vanilla's 0.5 alpha cutoff?
 bool cutoutHit(rayQueryEXT rq) {
 	Instance inst = InstanceInfo(pc.instanceInfo).i[rayQueryGetIntersectionInstanceIdEXT(rq, false)];
 	Vertices vb = Vertices(inst.vertices);
 	uint stride = strideOf(inst.kind);
 	uvec3 t = triangleVertices(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false));
+	if (cameraRay && inst.kind == KIND_DYNAMIC && (floatBitsToUint(vb.v[t.x * 8u + 7u]) & 0x10000u) != 0u) return false;
 	vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, false);
 	vec2 uv = uvAt(vb, t.x, stride) * (1.0 - b.x - b.y) + uvAt(vb, t.y, stride) * b.x + uvAt(vb, t.z, stride) * b.y;
 	// ponytail: entities use vanilla's 0.1 cutoff in some render types; 0.5 is close enough for shadows.
@@ -142,6 +163,8 @@ bool cutoutHit(rayQueryEXT rq) {
 #define TRACE(rq, origin, dir, tMax, mask, flags) \
 	rayQueryInitializeEXT(rq, scene, flags, mask, origin, 0.0, dir, tMax); \
 	while (rayQueryProceedEXT(rq)) { if (cutoutHit(rq)) rayQueryConfirmIntersectionEXT(rq); }
+#define TRACE_CAMERA(rq, origin, dir, tMax, mask) \
+	cameraRay = true; TRACE(rq, origin, dir, tMax, mask, gl_RayFlagsNoneEXT) cameraRay = false;
 #define HIT(rq) (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT)
 
 Hit shade(rayQueryEXT rq, vec3 dir) {
@@ -166,7 +189,8 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 	h.light = lightAt(vb, t.x, stride) * w.x + lightAt(vb, t.y, stride) * w.y + lightAt(vb, t.z, stride) * w.z;
 	float level = round((1.0 - tintAt(vb, t.x, stride).a) * 255.0);
 	h.water = inst.kind == KIND_TRANSLUCENT && level == 1.0;
-	h.emission = inst.kind == KIND_DYNAMIC || h.water ? 0.0 : level / 15.0;
+	h.foliage = inst.kind == KIND_CUTOUT && level == 1.0;
+	h.emission = inst.kind == KIND_DYNAMIC || h.water || h.foliage ? 0.0 : level / 15.0;
 	return h;
 }
 
@@ -320,10 +344,15 @@ vec3 directLight(Hit h, vec3 pos) {
 	vec3 direct = vec3(0.0);
 	if (pc.skyColor.w != 0.0 && lightDir.y > 0.0) {
 		vec3 l = pc.stochastic != 0.0 ? sampleCone(lightDir, day ? SUN_COS : MOON_COS, vec2(rand(), rand())) : lightDir;
-		float nl = max(dot(h.normal, l), 0.0);
+		float nl = dot(h.normal, l);
+		vec3 side = h.normal;
+		if (h.foliage && nl < 0.0) { // lit from behind: some of it comes through
+			nl *= -FOLIAGE_TRANSMISSION;
+			side = -side;
+		}
 		if (nl > 0.0) {
 			rayQueryEXT shadow;
-			TRACE(shadow, pos + h.normal * 0.002, l, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsTerminateOnFirstHitEXT)
+			TRACE(shadow, pos + side * 0.002, l, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsTerminateOnFirstHitEXT)
 			if (!HIT(shadow)) direct = nl * (day ? sunRadiance(l.y) : MOON * pc.moonDir.w);
 		}
 	}
@@ -340,8 +369,12 @@ vec3 cosineSample(vec3 n) {
 	return normalize(t * (r * cos(phi)) + cross(n, t) * (r * sin(phi)) + n * sqrt(1.0 - u));
 }
 
+// Bounces followed when stochastic (Frame.cameraDelta.w: 3 for the reference, 1 under RR); Russian roulette
+// after the second.
+int bounces;
+
 // Light leaving an opaque (or textured translucent) surface back along the ray: its emission and direct
-// light, plus bounce light (approximated, or followed in reference mode).
+// light, plus bounce light (approximated, or followed when stochastic).
 vec3 surfaceRadiance(Hit h, vec3 pos) {
 	vec3 radiance = h.albedo * (EMISSIVE * h.emission + directLight(h, pos));
 	if (pc.stochastic == 0.0) {
@@ -351,10 +384,16 @@ vec3 surfaceRadiance(Hit h, vec3 pos) {
 		return radiance + h.albedo * (skyIrradiance(h.normal) * sky + BLOCK_LIGHT * 0.15 * pow(h.light.x, 2.2));
 	}
 
-	// Reference mode: follow the light around. Each bounce picks up direct light where it lands; a ray that
+	// Stochastic: follow the light around. Each bounce picks up direct light where it lands; a ray that
 	// escapes brings the sky's. Emitters a bounce hits add nothing: block-light sampling already counted them.
 	vec3 throughput = h.albedo, x = pos, n = h.normal;
-	for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+	bool foliage = h.foliage;
+	for (int bounce = 0; bounce < bounces; bounce++) {
+		// Foliage scatters to either side: through it with probability T / (1 + T), weighted to match.
+		if (foliage) {
+			if (rand() * (1.0 + FOLIAGE_TRANSMISSION) < FOLIAGE_TRANSMISSION) n = -n;
+			throughput *= 1.0 + FOLIAGE_TRANSMISSION;
+		}
 		vec3 d = cosineSample(n);
 		rayQueryEXT b;
 		TRACE(b, x + n * 0.002, d, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
@@ -367,6 +406,7 @@ vec3 surfaceRadiance(Hit h, vec3 pos) {
 		radiance += throughput * hb.albedo * directLight(hb, x);
 		throughput *= hb.albedo;
 		n = hb.normal;
+		foliage = hb.foliage;
 		if (bounce >= 1) {
 			float survive = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
 			if (rand() > survive) break;
@@ -419,6 +459,10 @@ void throughWater(float d, inout vec3 result, inout vec3 weight) {
 // Set by radiance(): what the primary ray hit first (an entity, or water / glass / ice), at this NDC depth.
 bool hitEntity, hitTranslucent;
 float hitDepth;
+// And RR's guides for it: albedo of what's seen (blended through water and glass), the first surface's
+// reflectance, normal, roughness and position relative to the camera.
+vec3 guideAlbedo, guideSpecular, guideNormal, guidePos;
+float guideRoughness;
 
 // Linear radiance seen through pixel position `pixel` (fractional); coverage 0 where vanilla's picture stays.
 vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
@@ -434,7 +478,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 
 	// Terrain, entities and translucent terrain; vanilla draws particles and overlays over this afterwards.
 	rayQueryEXT rq;
-	TRACE(rq, camera, dir, 1024.0, MASK_OPAQUE_SCENE | MASK_TRANSLUCENT, gl_RayFlagsNoneEXT)
+	TRACE_CAMERA(rq, camera, dir, 1024.0, MASK_OPAQUE_SCENE | MASK_TRANSLUCENT)
 	if (!HIT(rq)) return vec4(0.0);
 	float t = rayQueryGetIntersectionTEXT(rq, true);
 	vec3 pos = camera + dir * t;
@@ -443,15 +487,19 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		// Vanilla still draws translucent sections past the RT distance (Scene.tracesTranslucent): look through.
 		ivec2 section = ivec2(floor((pos.xz - h.normal.xz * 0.01) / 16.0));
 		if (any(greaterThan(abs(section), ivec2(int(pc.rtDistance) / 16)))) {
-			TRACE(rq, camera, dir, 1024.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
+			TRACE_CAMERA(rq, camera, dir, 1024.0, MASK_OPAQUE_SCENE)
 			if (!HIT(rq)) return vec4(0.0);
 			t = rayQueryGetIntersectionTEXT(rq, true);
 			pos = camera + dir * t;
 			h = shade(rq, dir);
 		}
 	}
+	guidePos = pos - pc.cameraInScene.xyz;
+	guideNormal = h.normal;
+	guideRoughness = h.kind == KIND_TRANSLUCENT ? 0.0 : 1.0;
+	guideAlbedo = guideSpecular = vec3(0.0);
 	if (h.kind == KIND_DYNAMIC || h.kind == KIND_TRANSLUCENT) {
-		vec4 clip = pc.viewProj * vec4(pos - pc.cameraInScene.xyz, 1.0);
+		vec4 clip = pc.viewProj * vec4(guidePos, 1.0);
 		hitEntity = h.kind == KIND_DYNAMIC;
 		hitTranslucent = h.kind == KIND_TRANSLUCENT;
 		hitDepth = clip.z / clip.w;
@@ -475,6 +523,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		if (inWater) throughWater(t, result, weight);
 		if (h.kind != KIND_TRANSLUCENT || layer == MAX_LAYERS - 1) {
 			result += weight * surfaceRadiance(h, pos);
+			guideAlbedo += weight * h.albedo;
 			break;
 		}
 
@@ -485,6 +534,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		float fresnel = total ? 1.0 : f0 + (1.0 - f0) * pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
 		if (!reflected) {
 			reflected = true;
+			guideSpecular = vec3(fresnel);
 			vec3 r = reflect(dir, h.normal), keep = weight * fresnel;
 			rayQueryEXT rr;
 			TRACE(rr, pos + h.normal * 0.002, r, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
@@ -499,6 +549,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		weight *= 1.0 - fresnel;
 		float opacity = h.opacity * (h.water ? WATER_OPACITY : 1.0);
 		result += weight * opacity * surfaceRadiance(h, pos);
+		guideAlbedo += weight * opacity * h.albedo;
 		weight *= 1.0 - opacity;
 		if (max(weight.r, max(weight.g, weight.b)) < 0.01) break;
 
@@ -508,7 +559,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		}
 		dir = through;
 		vec3 from = pos - h.normal * 0.002;
-		TRACE(rq, from, dir, 512.0, MASK_OPAQUE_SCENE | MASK_TRANSLUCENT, gl_RayFlagsNoneEXT)
+		TRACE_CAMERA(rq, from, dir, 512.0, MASK_OPAQUE_SCENE | MASK_TRANSLUCENT)
 		if (!HIT(rq)) {
 			result += weight * (inWater ? waterGlow : skyRadiance(dir));
 			break;
@@ -518,6 +569,51 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		h = shade(rq, dir);
 	}
 	return vec4(result, 1.0);
+}
+
+// Inverse of tonemap() after vanilla's gamma: the linear radiance that would come out as this sRGB colour.
+vec3 untonemap(vec3 srgb) {
+	vec3 y = min(pow(srgb, vec3(2.2)), vec3(0.99));
+	vec3 a = 2.51 - 2.43 * y, b = 0.03 - 0.59 * y, c = -0.14 * y;
+	return (-b + sqrt(b * b - 4.0 * a * c)) / (2.0 * a);
+}
+
+// Vanilla's picture at a fractional pixel position, bilinear: vanilla draws unjittered, so sampling it where
+// this frame's rays went keeps it consistent with the jitter RR is told about (else the sun's edges shimmer).
+vec3 vanillaAt(vec2 pixel, ivec2 size) {
+	vec2 f = pixel - 0.5;
+	ivec2 i = ivec2(floor(f)), hi = size - 1;
+	vec2 t = f - vec2(i);
+	vec3 a = imageLoad(colorImg, clamp(i, ivec2(0), hi)).rgb, b = imageLoad(colorImg, clamp(i + ivec2(1, 0), ivec2(0), hi)).rgb;
+	vec3 c = imageLoad(colorImg, clamp(i + ivec2(0, 1), ivec2(0), hi)).rgb, d = imageLoad(colorImg, clamp(i + 1, ivec2(0), hi)).rgb;
+	return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
+}
+
+// RR's inputs. Where the tracer leaves vanilla's picture (sky, past the RT distance) RR gets that picture as
+// radiance, with vanilla's depth, so RR anti-aliases and stabilises the whole frame and its edges.
+void writeDenoiserInputs(ivec2 p, ivec2 size, vec4 current, Frame frame) {
+	// Position relative to the camera, homogeneous: w = 0 for the sky (reversed-Z depth 0 is infinitely far).
+	vec4 rel;
+	if (current.a > 0.0) {
+		rel = vec4(guidePos, 1.0);
+		imageStore(rrColor, p, vec4(current.rgb, 1.0));
+		imageStore(rrDiffuse, p, vec4(guideAlbedo, 1.0));
+		imageStore(rrSpecular, p, vec4(guideSpecular, 1.0));
+		imageStore(rrNormals, p, vec4(guideNormal, guideRoughness));
+	} else {
+		vec2 ndc = (vec2(p) + 0.5) / vec2(size) * 2.0 - 1.0;
+		rel = pc.invViewProj * vec4(ndc, texelFetch(depthTex, p, 0).r, 1.0);
+		imageStore(rrColor, p, vec4(untonemap(vanillaAt(vec2(p) + 0.5 + pc.jitter, size)), 1.0));
+		imageStore(rrDiffuse, p, vec4(0.5, 0.5, 0.5, 1.0)); // RR's suggested sky defaults
+		imageStore(rrSpecular, p, vec4(0.0));
+		imageStore(rrNormals, p, vec4(0.0));
+	}
+	vec4 clip = pc.viewProj * rel;
+	vec4 prev = frame.prevViewProj * vec4(rel.xyz + frame.cameraDelta.xyz * rel.w, rel.w);
+	imageStore(rrDepth, p, vec4(clip.z / clip.w));
+	imageStore(rrMotion, p, vec4((prev.xy / prev.w - clip.xy / clip.w) * 0.5 * vec2(size), 0.0, 0.0));
+	// rr_resolve.comp fills in the colour once RR has run.
+	imageStore(entityImg, p, vec4(0.0, 0.0, 0.0, hitEntity ? hitDepth : hitTranslucent ? -hitDepth : 0.0));
 }
 
 void main() {
@@ -533,26 +629,30 @@ void main() {
 		vec3 dir = normalize(mid.xyz / mid.w - origin);
 		rayQueryEXT rq;
 		vec3 c = vec3(1.0, 0.0, 1.0); // magenta: the scene has nothing here
-		TRACE(rq, pc.cameraInScene.xyz + origin, dir, 1024.0, 0xFFu, gl_RayFlagsNoneEXT)
+		TRACE_CAMERA(rq, pc.cameraInScene.xyz + origin, dir, 1024.0, 0xFFu)
 		if (HIT(rq)) c = debugColour(rq, dir, debugView);
 		imageStore(colorImg, p, vec4(c, 1.0));
 		return;
 	}
 
+	rng = pcg(uint(p.x) + pcg(uint(p.y) + pcg(pc.stochastic != 0.0 ? pc.seed : 0u)));
+	Frame frame = Frame(pc.frame);
+	bounces = int(frame.cameraDelta.w);
+	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size), uvec2(p));
+	if (frame.denoise != 0u) {
+		writeDenoiserInputs(p, size, current, frame);
+		return;
+	}
+
 	// Running average of premultiplied radiance + coverage: frame 0 restarts it. Coverage < 1 blends with
 	// vanilla's picture (sky, terrain past the RT distance), which also anti-aliases those edges.
-	rng = pcg(uint(p.x) + pcg(uint(p.y) + pcg(pc.stochastic != 0.0 ? pc.seed : 0u)));
-	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size), uvec2(p));
 	current.rgb *= current.a;
 	vec4 acc = pc.frameIndex == 0u ? current : mix(imageLoad(accumImg, p), current, 1.0 / float(pc.frameIndex + 1u));
 	imageStore(accumImg, p, acc);
-	imageStore(entityImg, p, vec4(0.0));
-	if (acc.a <= 0.0) return;
 	vec4 vanilla = imageLoad(colorImg, p);
-	vec3 traced = pow(tonemap(acc.rgb / acc.a), vec3(1.0 / 2.2));
-	imageStore(colorImg, p, vec4(mix(vanilla.rgb, traced, acc.a), vanilla.a));
+	vec3 shown = acc.a <= 0.0 ? vanilla.rgb : mix(vanilla.rgb, pow(tonemap(acc.rgb / acc.a), vec3(1.0 / 2.2)), acc.a);
 	// Vanilla draws entities over this next (for their depth); entity_composite.comp puts this colour back,
 	// on the entity (depth matches) or behind traced water / glass (negative depth: anything behind it).
-	if (hitEntity) imageStore(entityImg, p, vec4(traced, hitDepth));
-	else if (hitTranslucent) imageStore(entityImg, p, vec4(traced, -hitDepth));
+	imageStore(entityImg, p, vec4(shown, hitEntity ? hitDepth : hitTranslucent ? -hitDepth : 0.0));
+	if (acc.a > 0.0) imageStore(colorImg, p, vec4(shown, vanilla.a));
 }

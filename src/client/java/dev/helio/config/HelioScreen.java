@@ -66,7 +66,10 @@ public class HelioScreen extends OptionsSubScreen {
 			unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", CycleButton.onOffBuilder(c.accumulate)
 				.withTooltip(v -> Tooltip.create(Component.translatable("helio.accumulate.tooltip")))
 				.create(Component.translatable("helio.accumulate"), (b, v) -> c.accumulate = v)),
-			null);
+			unsupportedIf(!Helio.rayTracing || Helio.ngxCaps == null || !Helio.ngxCaps.rayReconstruction(), "no DLSS Ray Reconstruction",
+				CycleButton.onOffBuilder(c.rayReconstruction)
+					.withTooltip(v -> Tooltip.create(Component.translatable("helio.ray_reconstruction.tooltip")))
+					.create(Component.translatable("helio.ray_reconstruction"), (b, v) -> c.rayReconstruction = v)));
 	}
 
 	/** Any manual change means the settings no longer match a preset. */

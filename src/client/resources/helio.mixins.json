@@ -10,6 +10,7 @@
 		"LevelRendererMixin",
 		"MinecraftMixin",
 		"PipelineCacheMixin",
+		"PreparedRenderTypeMixin",
 		"RenderSectionMixin",
 		"RenderSetupAccessor",
 		"RenderTypeAccessor",

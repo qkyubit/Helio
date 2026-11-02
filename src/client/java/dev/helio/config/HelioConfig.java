@@ -39,6 +39,8 @@ public final class HelioConfig {
 	public DebugView debugView = DebugView.OFF;
 	/** Average frames while the picture is still: a clean reference image. Moving entities smear. */
 	public boolean accumulate = false;
+	/** DLSS Ray Reconstruction cleans up a frame of random samples (soft shadows, bounce light); off without NGX. */
+	public boolean rayReconstruction = true;
 	/**
 	 * Not in the UI; applies at startup. Bounce rays through foliage trace about 30% faster (6.4 vs 9.5 ms
 	 * in a dense forest) for about 40% more scene memory (1219 vs 869 MB). Single shadow rays don't care.

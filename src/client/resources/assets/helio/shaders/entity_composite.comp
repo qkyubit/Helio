@@ -1,23 +1,29 @@
 #version 460
 
 // After vanilla's solid features: vanilla drew entities (so translucents drawn later respect their depth),
-// lit its own way. Where vanilla's depth is the entity surface the path tracer hit, put the traced colour
-// back. Anything vanilla drew in front (particles, name tags) has a nearer depth and stays.
+// lit its own way. Where vanilla's depth is the entity surface the path tracer hit, here or in a neighbouring
+// pixel (rays are jittered: at an entity's edge this pixel's ray may have missed it while vanilla's raster
+// didn't), put the traced colour back. Anything vanilla drew in front (particles, name tags) is nearer and stays.
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(binding = 0) uniform sampler2D depthTex;
 layout(binding = 1, rgba8) uniform image2D colorImg;
-// Traced colour + NDC depth of the entity hit; negative: of the water or glass the tracer drew, behind which
-// vanilla's entities (and anything else) are already seen in the traced colour. a = 0: neither.
+// Traced colour of every pixel + NDC depth of the entity hit; negative: of the water or glass the tracer drew,
+// behind which vanilla's entities (and anything else) are already seen in the traced colour. a = 0: neither.
 layout(binding = 2, rgba32f) readonly uniform image2D entityImg;
 
 void main() {
 	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 	if (any(greaterThanEqual(p, imageSize(colorImg)))) return;
+	ivec2 size = imageSize(colorImg);
 	vec4 traced = imageLoad(entityImg, p);
-	if (traced.a == 0.0) return;
 	float depth = texelFetch(depthTex, p, 0).r; // reversed-Z: larger is nearer
-	if (traced.a < 0.0 ? depth > -traced.a * 1.003 : abs(depth - traced.a) > traced.a * 0.003) return;
+	bool restore = traced.a < 0.0 && depth <= -traced.a * 1.003;
+	for (int i = 0; i < 9 && !restore && traced.a >= 0.0; i++) {
+		float entity = imageLoad(entityImg, clamp(p + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), size - 1)).a;
+		restore = entity > 0.0 && abs(depth - entity) <= entity * 0.003;
+	}
+	if (!restore) return;
 	imageStore(colorImg, p, vec4(traced.rgb, imageLoad(colorImg, p).a));
 }
