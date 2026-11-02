@@ -323,11 +323,13 @@ Exit: stable TLAS while flying at speed; no hitching from BLAS builds.
   keep the alpha test. Micro-triangle order from NVIDIA's vk_mini_samples
   `mm_opacity/bird_curve_helper.cpp`. **A/B in a dense forest (user):** sun
   shadows 0.78 ms on vs 0.75 ms off, scene memory 1256 vs 628 MB. One coherent
-  first-hit shadow ray per pixel never paid much for alpha tests, so OMM is **off
-  by default** (`opacityMicromaps` in `helio.json`, startup only). Re-measure in
-  M3 with incoherent bounce rays through foliage; if it wins there, cut memory
-  with level 3 (16 B per triangle) and special indices for fully opaque or clear
-  triangles.
+  first-hit shadow ray per pixel never paid much for alpha tests. **Re-test in
+  M3 with reference-mode bounce rays, same forest (user):** path tracing 6.41 ms
+  on vs 9.50 ms off (about 30% faster), scene memory 1219 vs 869 MB. Incoherent
+  rays through leaves are where alpha tests hurt, and M4's real-time GI shoots
+  them every frame, so OMM is now **on by default** (`opacityMicromaps` in
+  `helio.json`, startup only). If memory gets tight (M9 budgets), drop to level 3
+  (16 B per triangle) and use special indices for fully opaque or clear triangles.
 - [x] **Debug views** (Debug View setting; primary ray per pixel, magenta = miss):
   BLAS Instances, Albedo (atlas × vertex tint, vanilla AO still baked in;
   entities grey until their textures are bound), Normals (geometric), Triangle

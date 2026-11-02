@@ -40,10 +40,10 @@ public final class HelioConfig {
 	/** Average frames while the picture is still: a clean reference image. Moving entities smear. */
 	public boolean accumulate = false;
 	/**
-	 * Not in the UI; applies at startup. Off by default: for one shadow ray per pixel they saved nothing
-	 * (0.78 vs 0.75 ms) and doubled scene memory (1256 vs 628 MB). Re-measure with M3's bounce rays.
+	 * Not in the UI; applies at startup. Bounce rays through foliage trace about 30% faster (6.4 vs 9.5 ms
+	 * in a dense forest) for about 40% more scene memory (1219 vs 869 MB). Single shadow rays don't care.
 	 */
-	public boolean opacityMicromaps = false;
+	public boolean opacityMicromaps = true;
 	/** Fetch the DLSS libraries from NVIDIA's GitHub on first launch. Off: drop them into helio/ngx/ by hand. */
 	public boolean downloadDlss = true;
 
