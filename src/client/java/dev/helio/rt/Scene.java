@@ -13,12 +13,16 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
+import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.ViewArea;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.SectionRenderDispatcher.RenderSection;
 import net.minecraft.core.SectionPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import org.lwjgl.PointerBuffer;
@@ -32,6 +36,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 import static dev.helio.vk.Memory.check;
@@ -172,9 +177,40 @@ public final class Scene {
 	public static final ThreadLocal<Integer> FLUID_EMISSION = ThreadLocal.withInitial(() -> 0);
 	/**
 	 * Water's vertices claim emission 1, which no translucent block has: the path tracer reads it as water.
-	 * Foliage does the same in the cutout layer (whose only real emission-1 block, the brewing stand, loses it).
+	 * Foliage does the same in the cutout layer (whose only real emission-1 block, the brewing stand, loses it),
+	 * and plain glass claims 2, so the tracer refracts through its clear parts. Polished metal and gem blocks
+	 * get levels past 15, which no block emits.
 	 */
-	public static final int WATER_MARK = 1, FOLIAGE_MARK = 1;
+	public static final int WATER_MARK = 1, FOLIAGE_MARK = 1, GLASS_MARK = 2, METAL_MARK = 32, GEM_MARK = 33;
+
+	/** Polished blocks, by registry name: copper until it weathers. */
+	private static final class Polished {
+		static final Set<Block> METAL = new ReferenceOpenHashSet<>(), GEM = new ReferenceOpenHashSet<>();
+		static {
+			Set<String> gems = Set.of("diamond_block", "emerald_block", "lapis_block", "amethyst_block", "budding_amethyst", "redstone_block");
+			for (Block b : BuiltInRegistries.BLOCK) {
+				String p = BuiltInRegistries.BLOCK.getKey(b).getPath();
+				if (p.equals("iron_block") || p.equals("gold_block") || p.equals("netherite_block")
+					|| p.contains("copper") && !p.contains("weathered") && !p.contains("oxidized") && !p.contains("ore") && !p.startsWith("raw")) METAL.add(b);
+				if (gems.contains(p)) GEM.add(b);
+			}
+			Helio.LOG.info("Polished blocks: {} metal, {} gem", METAL.size(), GEM.size());
+		}
+	}
+
+	/** What BlockModelLighterMixin writes into a block's vertex alpha: a material mark, else its emission level. */
+	public static int mark(BlockState state) {
+		if (isFoliage(state)) return FOLIAGE_MARK;
+		if (isGlass(state)) return GLASS_MARK;
+		int emission = state.getLightEmission();
+		if (emission > 0) return emission;
+		return Polished.METAL.contains(state.getBlock()) ? METAL_MARK : Polished.GEM.contains(state.getBlock()) ? GEM_MARK : 0;
+	}
+
+	/** Plain glass: its clear parts are cut out, so it's marked (stained glass refracts by its layer alone). */
+	public static boolean isGlass(BlockState state) {
+		return state.is(Blocks.GLASS) || state.is(Blocks.GLASS_PANE);
+	}
 
 	/** Leaves and plants: thin, so the path tracer lets light through them. */
 	public static boolean isFoliage(BlockState state) {

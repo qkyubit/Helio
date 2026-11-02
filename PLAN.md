@@ -478,12 +478,38 @@ Exit: 1440p, RR Balanced, base ≥ 60 FPS in the M3 test scenes; with FG,
 output near 180 Hz and no HUD smearing.
 
 **M4 steps** (planned 2026-11-02; Reflex and 2x FG already run from M0/M1):
-1. [ ] Ray Reconstruction at native resolution (DLAA): stochastic sampling every
-   frame (soft shadows, light RIS, 1 GI bounce) instead of the 1-spp
-   approximations; guides (diffuse/specular albedo, world normals + roughness,
-   HW depth, camera motion vectors); pixels the tracer leaves to vanilla (sky,
-   past the RT distance) go in as vanilla's colour so RR covers the whole
-   frame; a resolve pass tonemaps RR's output. Reference Accumulation stays.
+1. [x] Ray Reconstruction at native resolution (DLAA, `ngx/RayReconstruction.java`,
+   `shaders/rr_resolve.comp`): stochastic sampling every frame (soft shadows,
+   light RIS, 1 GI bounce); guides (diffuse/specular albedo, world normal +
+   roughness, HW depth, camera motion in pixels); pixels left to vanilla go in
+   as vanilla's colour sampled at the ray jitter (bilinear), and the sky keeps
+   vanilla's own pixels after RR (its hard, near-white sun flickered through
+   RR). DLSS jitter is the negated sample offset. Reference Accumulation
+   overrides RR; "Ray Reconstruction" toggle in the settings. Cost at native
+   1440p: RR ~10.5 ms, tracing 8–12 ms (step 2 cuts both).
+   Done alongside, user-checked:
+   - **Indigo:** Fabric API's renderer meshes terrain instead of vanilla's
+     BlockModelLighter, so no block hook had ever run (AO was baked in, block
+     emission and every mark missing). `IndigoBlockRendererMixin` undoes
+     Indigo's shading and writes `Scene.mark` into vertex alpha. M8: Sodium
+     replaces Indigo and needs its own hook.
+   - **Marks** (vertex alpha = 255 − mark): emission 0–15, water 1
+     (translucent), foliage 1 (cutout), plain glass 2, metal 32, gem 33.
+     "Materials" debug view shows what the shader reads.
+   - **Foliage** (leaves/plants by tag) transmits: back-lit sun at 50%, bounce
+     rays pass through.
+   - **Glass:** stained glass, ice and plain glass (translucent in 26.3,
+     `force_translucent`) refract at 1.5 with the medium tracked across
+     surfaces; shadow rays take a second translucent-only trace and multiply
+     each surface's colour (coloured light through stained glass).
+   - **Polished blocks:** metals reflect in their colour (GGX 0.2, 30%
+     diffuse), gems faintly and sharply (F0 0.08).
+   - **Entities:** edge pixels take the traced colour via neighbouring
+     pixels' entity depth (jittered rays missed edges vanilla's raster hit).
+     The first-person body is extracted and submitted with renamed render
+     types vanilla skips drawing; it casts shadows, camera rays pass through.
+   - Reflected sun/moon match vanilla's squares; first-launch freeze fixed
+     (pipeline compiles on the render thread).
 2. [ ] Internal resolution: RR Quality / Balanced / Performance, the tracer at
    render size, vanilla's colour and depth sampled into it; DLSS SR (or DLAA)
    when ray tracing is off. Quality setting in the UI.
