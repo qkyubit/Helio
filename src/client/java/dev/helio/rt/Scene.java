@@ -168,6 +168,8 @@ public final class Scene {
 
 	/** Emission level of the fluid being tesselated (FluidRenderer has no other way to tell its vertices). */
 	public static final ThreadLocal<Integer> FLUID_EMISSION = ThreadLocal.withInitial(() -> 0);
+	/** Water's vertices claim emission 1, which no translucent block has: the path tracer reads it as water. */
+	public static final int WATER_MARK = 1;
 
 	public static boolean compilingUnshaded() {
 		return unshaded && COMPILING.get();
@@ -210,6 +212,14 @@ public final class Scene {
 			if (Math.abs(SectionPos.x(n) - c.x()) <= r && Math.abs(SectionPos.z(n) - c.z()) <= r) toCompile.add(section);
 		}
 		return toCompile;
+	}
+
+	/** Inside the RT distance the path tracer draws water, glass and ice itself, so vanilla skips them. */
+	public static boolean tracesTranslucent(long node, Vec3 camera) {
+		if (!PathTracer.active()) return false;
+		int r = rtDistance();
+		return Math.abs(SectionPos.x(node) - SectionPos.blockToSectionCoord(camera.x)) <= r
+			&& Math.abs(SectionPos.z(node) - SectionPos.blockToSectionCoord(camera.z)) <= r;
 	}
 
 	private static int rtDistance() {

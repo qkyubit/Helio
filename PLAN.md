@@ -446,7 +446,23 @@ look right with accumulation on (reference) and stable with 1 spp.
    white concrete, corner darkening, cave and forest. Cost: 8.5 ms outdoors,
    29 ms in a lava/lantern cave at native 1440p (reference only). The
    SHaRC-style radiance cache moves to M4 with real-time GI under RR.
-7. [ ] Water / glass / ice: reflection + refraction.
+7. [x] Water / glass / ice: primary rays now include the translucent layer, and
+   vanilla skips translucent sections inside the RT distance
+   (`Scene.tracesTranslucent`, wrapping `SectionMesh.getSectionDraw` in
+   `extractSectionDrawGroups`); past it vanilla draws them and rays look through.
+   Each surface: Schlick Fresnel reflection (first surface only: one reflection
+   ray per pixel; sky gradient plus sun/moon glint when it escapes), its texture
+   lit like any surface (water at 30% of its alpha), the rest transmitted. Water
+   (vertex alpha marks it as "emission 1", `Scene.WATER_MARK`) refracts at 1.33
+   with total internal reflection, absorbs per block as a power of its biome
+   tint, and glows with the sky/sun reaching it; the camera underwater starts
+   in water with vanilla's fog colour as the glow. Glass and ice are thin sheets.
+   Water now gets shadows. The entity composite also restores the traced colour
+   behind traced water/glass (fish, mobs behind windows). Also fixed: water in
+   waterlogged emitters (sea pickles) no longer glows. User-checked: lake with
+   reflections and refracted sand, shoreline, ice. Known: opaque particles and
+   sign text behind traced water/glass are hidden; reflections ignore other
+   translucents; no coloured shadows through stained glass yet (M6).
 8. [ ] Hybrid preset (RT shadows + reflections only).
 
 ### M4 — DLSS integration

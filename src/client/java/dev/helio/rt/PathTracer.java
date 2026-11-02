@@ -15,6 +15,7 @@ import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.SkyRenderState;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.world.level.dimension.DimensionType.Skybox;
+import net.minecraft.world.level.material.FogType;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
@@ -60,7 +61,7 @@ public final class PathTracer {
 	private static Vec3 cameraPos = Vec3.ZERO;
 	private static final Matrix4f viewRotation = new Matrix4f();
 	private static float sunAngle, moonAngle, rainBrightness;
-	private static boolean hasSky;
+	private static boolean hasSky, underwater;
 	private static final Vector3f skyColor = new Vector3f();
 	private static final Vector4f fogColor = new Vector4f();
 	private static int seed;
@@ -86,6 +87,7 @@ public final class PathTracer {
 			skyColor.set(sky.skyColor);
 		}
 		fogColor.set(camera.fogData.color);
+		underwater = camera.fogType == FogType.WATER;
 		ranThisFrame = false;
 		dispatched = false;
 	}
@@ -263,7 +265,7 @@ public final class PathTracer {
 				.putInt(120, seed++).putFloat(124, HelioConfig.current.accumulate ? 1 : 0)
 				.putFloat(128, moon.x).putFloat(132, moon.y).putFloat(136, moon.z).putFloat(140, rainBrightness)
 				.putFloat(144, skyColor.x).putFloat(148, skyColor.y).putFloat(152, skyColor.z).putFloat(156, hasSky ? 1 : 0)
-				.putFloat(160, fogColor.x).putFloat(164, fogColor.y).putFloat(168, fogColor.z).putFloat(172, 0);
+				.putFloat(160, fogColor.x).putFloat(164, fogColor.y).putFloat(168, fogColor.z).putFloat(172, underwater ? 1 : 0);
 			new Matrix4f(levelProjection).mul(viewRotation).get(176, pc);
 			pc.putLong(240, Scene.lights);
 			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);

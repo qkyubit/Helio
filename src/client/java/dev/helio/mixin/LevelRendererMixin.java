@@ -9,9 +9,13 @@ import com.mojang.renderpearl.api.commands.RenderPass;
 import dev.helio.ngx.FrameGenSpike;
 import dev.helio.rt.Entities;
 import dev.helio.rt.PathTracer;
+import dev.helio.rt.Scene;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LevelRenderer;
+import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.ChunkSectionsToRender;
+import net.minecraft.client.renderer.chunk.SectionMesh;
+import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
 import net.minecraft.client.renderer.feature.FeatureRenderDispatcher;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
@@ -108,6 +112,14 @@ public class LevelRendererMixin {
 			helio$deferredFeatures = null;
 		}
 		PathTracer.compositeEntities();
+	}
+
+	// Inside the RT distance the path tracer draws translucent terrain itself (reflected and refracted).
+	@WrapOperation(method = "extractSectionDrawGroups", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/chunk/SectionMesh;getSectionDraw(Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;)Lnet/minecraft/client/renderer/chunk/SectionMesh$SectionDraw;"))
+	private SectionMesh.SectionDraw helio$skipTracedTranslucents(SectionMesh mesh, ChunkSectionLayer layer, Operation<SectionMesh.SectionDraw> original,
+		@Local SectionRenderDispatcher.RenderSection section) {
+		if (layer.translucent() && Scene.tracesTranslucent(section.getSectionNode(), levelRenderState.cameraRenderState.pos)) return null;
+		return original.call(mesh, layer);
 	}
 
 	// After the level frame graph: main colour + depth hold the finished world, GUI not drawn yet.

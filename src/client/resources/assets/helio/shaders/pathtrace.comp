@@ -6,9 +6,9 @@
 #extension GL_EXT_nonuniform_qualifier : require
 
 // M3 path tracer: primary ray per pixel, sun with a shadow ray, sky and block light, averaged over frames
-// while nothing changes. Runs between vanilla's opaque and translucent passes and composites into the main
-// colour where rays hit the scene.
-// Lighting is a placeholder until emissives (step 5) and bounces (6) arrive.
+// while nothing changes. Water, glass and ice reflect and let light through (water bends and absorbs it).
+// Runs between vanilla's opaque and translucent passes and composites into the main colour where rays hit
+// the scene.
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -37,8 +37,9 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Li
 struct Instance { uvec2 vertices; uint triangles; uint kind; };
 layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer InstanceInfo { Instance i[]; };
 
-const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u, MASK_DYNAMIC = 8u, MASK_OPAQUE_SCENE = MASK_SOLID | MASK_CUTOUT | MASK_DYNAMIC;
-const uint KIND_DYNAMIC = 3u;
+const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u, MASK_TRANSLUCENT = 4u, MASK_DYNAMIC = 8u;
+const uint MASK_OPAQUE_SCENE = MASK_SOLID | MASK_CUTOUT | MASK_DYNAMIC;
+const uint KIND_TRANSLUCENT = 2u, KIND_DYNAMIC = 3u;
 const uint DEBUG_INSTANCES = 1u, DEBUG_ALBEDO = 2u, DEBUG_NORMALS = 3u, DEBUG_TRIANGLE_DENSITY = 4u;
 
 const vec3 SUN = vec3(1.0, 0.95, 0.88) * 2.6;
@@ -52,6 +53,13 @@ const uint CANDIDATES = 8u;     // lights considered per shading point (RIS)
 const int MAX_BOUNCES = 3;      // reference mode; Russian roulette after the second
 const float SUN_COS = 0.99994;  // 0.6 degree disc radius: soft-shadow penumbra
 const float MOON_COS = 0.99996;
+const float GLINT = 50.0;       // sun and moon discs seen in reflections, over their direct light
+const float WATER_IOR = 1.33, GLASS_IOR = 1.5;
+const float WATER_OPACITY = 0.3;     // how much of water's texture shows on its surface; the rest is seen through
+const float WATER_ABSORPTION = 0.15; // per block, as a power of the water's (linear) tint
+const float WATER_SCATTER = 0.1;     // light the water itself sends back, over the sky and sun reaching it
+const vec3 WATER_TINT = vec3(0.046, 0.184, 0.782); // vanilla's default 0x3F76E4: absorption when the camera starts underwater
+const int MAX_LAYERS = 6;       // translucent surfaces a view ray passes before the next one counts as opaque
 
 layout(push_constant) uniform Push {
 	mat4 invViewProj;   // inverse(projection * viewRotation): NDC -> camera-relative world
@@ -65,7 +73,7 @@ layout(push_constant) uniform Push {
 	float stochastic;   // 1: sample area lights (needs accumulation or a denoiser), 0: their centre
 	vec4 moonDir;       // xyz towards the moon, w = rain brightness (1 clear .. 0 raining)
 	vec4 skyColor;      // vanilla's sky (zenith) colour, sRGB; w = 1 if the dimension has a sky
-	vec4 fogColor;      // vanilla's fog (horizon) colour, sRGB
+	vec4 fogColor;      // vanilla's fog (horizon) colour, sRGB; w = 1 if the camera is underwater
 	mat4 viewProj;      // camera-relative world -> NDC, for depths that match vanilla's
 	uvec2 lights;       // LightTable, zero without lights
 } pc;
@@ -76,6 +84,9 @@ struct Hit {
 	vec3 normal;    // geometric, facing the ray
 	vec2 light;     // vanilla block / sky light level, 0..1
 	float emission; // the block's own light level, 0..1 (sections encode it in vertex alpha)
+	vec3 tint;      // linear vertex colour (biome tint)
+	float opacity;  // texture alpha: translucent surfaces let the rest through
+	bool water;     // marked by vertex alpha (Scene.WATER_MARK)
 };
 
 uint strideOf(uint kind) {
@@ -120,7 +131,8 @@ bool cutoutHit(rayQueryEXT rq) {
 	vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, false);
 	vec2 uv = uvAt(vb, t.x, stride) * (1.0 - b.x - b.y) + uvAt(vb, t.y, stride) * b.x + uvAt(vb, t.z, stride) * b.y;
 	// ponytail: entities use vanilla's 0.1 cutoff in some render types; 0.5 is close enough for shadows.
-	return texel(vb, inst.kind, t.x, uv).a >= 0.5;
+	// Translucent surfaces (water, stained glass, ice) count wherever they aren't fully clear.
+	return texel(vb, inst.kind, t.x, uv).a >= (inst.kind == KIND_TRANSLUCENT ? 0.004 : 0.5);
 }
 
 // A macro, not a function: a ray query initialised inside a callee isn't guaranteed to be the caller's.
@@ -144,9 +156,14 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 	vec2 uv = uvAt(vb, t.x, stride) * w.x + uvAt(vb, t.y, stride) * w.y + uvAt(vb, t.z, stride) * w.z;
 	// Terrain tint is biome colour only (Helio compiles sections without vanilla's AO and face shading).
 	vec3 tint = tintAt(vb, t.x, stride).rgb * w.x + tintAt(vb, t.y, stride).rgb * w.y + tintAt(vb, t.z, stride).rgb * w.z;
-	h.albedo = pow(texel(vb, inst.kind, t.x, uv).rgb * tint, vec3(2.2));
+	vec4 tex = texel(vb, inst.kind, t.x, uv);
+	h.albedo = pow(tex.rgb * tint, vec3(2.2));
+	h.tint = pow(tint, vec3(2.2));
+	h.opacity = tex.a;
 	h.light = lightAt(vb, t.x, stride) * w.x + lightAt(vb, t.y, stride) * w.y + lightAt(vb, t.z, stride) * w.z;
-	h.emission = inst.kind == KIND_DYNAMIC ? 0.0 : round((1.0 - tintAt(vb, t.x, stride).a) * 255.0) / 15.0;
+	float level = round((1.0 - tintAt(vb, t.x, stride).a) * 255.0);
+	h.water = inst.kind == KIND_TRANSLUCENT && level == 1.0;
+	h.emission = inst.kind == KIND_DYNAMIC || h.water ? 0.0 : level / 15.0;
 	return h;
 }
 
@@ -320,44 +337,15 @@ vec3 cosineSample(vec3 n) {
 	return normalize(t * (r * cos(phi)) + cross(n, t) * (r * sin(phi)) + n * sqrt(1.0 - u));
 }
 
-// Set by radiance(): the primary ray hit an entity, at this NDC depth.
-bool hitEntity;
-float hitDepth;
-
-// Linear radiance seen through pixel position `pixel` (fractional); coverage 0 where vanilla's picture stays.
-vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
-	hitEntity = false;
-	// Primary ray, matching vanilla's projection. View bobbing translates inside the projection, so the eye
-	// isn't at the origin: unproject the near plane (reversed-Z: ndc 1) as well.
-	vec2 ndc = pixel / size * 2.0 - 1.0;
-	vec4 near = pc.invViewProj * vec4(ndc, 1.0, 1.0), mid = pc.invViewProj * vec4(ndc, 0.5, 1.0);
-	vec3 origin = near.xyz / near.w;
-	vec3 dir = normalize(mid.xyz / mid.w - origin);
-	vec3 camera = pc.cameraInScene.xyz + origin;
-
-	// Terrain and entities; vanilla draws particles, overlays and translucents over this afterwards.
-	rayQueryEXT rq;
-	TRACE(rq, camera, dir, 1024.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
-	if (!HIT(rq)) return vec4(0.0);
-	vec3 pos = camera + dir * rayQueryGetIntersectionTEXT(rq, true);
-	Hit h = shade(rq, dir);
-	if (h.kind == KIND_DYNAMIC) {
-		vec4 clip = pc.viewProj * vec4(pos - pc.cameraInScene.xyz, 1.0);
-		hitEntity = true;
-		hitDepth = clip.z / clip.w;
-	}
-
-	// Past the RT distance the terrain thins out; leave vanilla's picture there. Entities are always traced
-	// (vanilla no longer draws them).
-	vec2 d = abs(pos.xz - camera.xz);
-	if (h.kind != KIND_DYNAMIC && max(d.x, d.y) > pc.rtDistance) return vec4(0.0);
-
+// Light leaving an opaque (or textured translucent) surface back along the ray: its emission and direct
+// light, plus bounce light (approximated, or followed in reference mode).
+vec3 surfaceRadiance(Hit h, vec3 pos) {
 	vec3 radiance = h.albedo * (EMISSIVE * h.emission + directLight(h, pos));
 	if (pc.stochastic == 0.0) {
 		// ponytail: until M4's denoiser, bounce light is approximated outside reference mode: sky light scaled by
 		// vanilla's sky light level, and a dim fill from its block light level.
 		float sky = h.light.y * h.light.y;
-		return vec4(radiance + h.albedo * (skyIrradiance(h.normal) * sky + BLOCK_LIGHT * 0.15 * pow(h.light.x, 2.2)), 1.0);
+		return radiance + h.albedo * (skyIrradiance(h.normal) * sky + BLOCK_LIGHT * 0.15 * pow(h.light.x, 2.2));
 	}
 
 	// Reference mode: follow the light around. Each bounce picks up direct light where it lands; a ray that
@@ -382,7 +370,138 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 			throughput /= survive;
 		}
 	}
-	return vec4(radiance, 1.0);
+	return radiance;
+}
+
+// What a reflected or refracted ray that escapes sees: vanilla's sky (fog colour at the horizon) and the sun
+// or moon disc.
+vec3 skyRadiance(vec3 d) {
+	if (pc.skyColor.w == 0.0) return srgbToLinear(pc.fogColor.rgb) * 0.15;
+	vec3 c = mix(srgbToLinear(pc.fogColor.rgb), srgbToLinear(pc.skyColor.rgb), smoothstep(0.0, 0.5, d.y));
+	c = max(c, NIGHT_SKY * pc.moonDir.w);
+	if (pc.sunDir.y > 0.0 && dot(d, pc.sunDir.xyz) > SUN_COS) c += sunRadiance(pc.sunDir.y) * GLINT;
+	else if (pc.moonDir.y > 0.0 && dot(d, pc.moonDir.xyz) > MOON_COS) c += MOON * pc.moonDir.w * GLINT;
+	return c;
+}
+
+// The water a view ray is in: per-block absorption, and the light the water itself sends back.
+vec3 waterSigma, waterGlow;
+
+void enterWater(vec3 tint, float skyLight) {
+	waterSigma = -log(max(tint, vec3(0.01))) * WATER_ABSORPTION;
+	vec3 sun = pc.sunDir.y > 0.0 ? sunRadiance(pc.sunDir.y) * pc.sunDir.y : MOON * pc.moonDir.w * max(pc.moonDir.y, 0.0);
+	waterGlow = tint * (skyIrradiance(vec3(0.0, 1.0, 0.0)) + sun * pc.skyColor.w) * skyLight * skyLight * WATER_SCATTER;
+}
+
+// Through d blocks of water: light from behind is absorbed per channel and the water's glow fills in.
+void throughWater(float d, inout vec3 result, inout vec3 weight) {
+	vec3 t = exp(-waterSigma * d);
+	result += weight * waterGlow * (1.0 - t);
+	weight *= t;
+}
+
+// Set by radiance(): what the primary ray hit first (an entity, or water / glass / ice), at this NDC depth.
+bool hitEntity, hitTranslucent;
+float hitDepth;
+
+// Linear radiance seen through pixel position `pixel` (fractional); coverage 0 where vanilla's picture stays.
+vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
+	hitEntity = false;
+	hitTranslucent = false;
+	// Primary ray, matching vanilla's projection. View bobbing translates inside the projection, so the eye
+	// isn't at the origin: unproject the near plane (reversed-Z: ndc 1) as well.
+	vec2 ndc = pixel / size * 2.0 - 1.0;
+	vec4 near = pc.invViewProj * vec4(ndc, 1.0, 1.0), mid = pc.invViewProj * vec4(ndc, 0.5, 1.0);
+	vec3 origin = near.xyz / near.w;
+	vec3 dir = normalize(mid.xyz / mid.w - origin);
+	vec3 camera = pc.cameraInScene.xyz + origin;
+
+	// Terrain, entities and translucent terrain; vanilla draws particles and overlays over this afterwards.
+	rayQueryEXT rq;
+	TRACE(rq, camera, dir, 1024.0, MASK_OPAQUE_SCENE | MASK_TRANSLUCENT, gl_RayFlagsNoneEXT)
+	if (!HIT(rq)) return vec4(0.0);
+	float t = rayQueryGetIntersectionTEXT(rq, true);
+	vec3 pos = camera + dir * t;
+	Hit h = shade(rq, dir);
+	if (h.kind == KIND_TRANSLUCENT) {
+		// Vanilla still draws translucent sections past the RT distance (Scene.tracesTranslucent): look through.
+		ivec2 section = ivec2(floor((pos.xz - h.normal.xz * 0.01) / 16.0));
+		if (any(greaterThan(abs(section), ivec2(int(pc.rtDistance) / 16)))) {
+			TRACE(rq, camera, dir, 1024.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
+			if (!HIT(rq)) return vec4(0.0);
+			t = rayQueryGetIntersectionTEXT(rq, true);
+			pos = camera + dir * t;
+			h = shade(rq, dir);
+		}
+	}
+	if (h.kind == KIND_DYNAMIC || h.kind == KIND_TRANSLUCENT) {
+		vec4 clip = pc.viewProj * vec4(pos - pc.cameraInScene.xyz, 1.0);
+		hitEntity = h.kind == KIND_DYNAMIC;
+		hitTranslucent = h.kind == KIND_TRANSLUCENT;
+		hitDepth = clip.z / clip.w;
+	}
+
+	// Past the RT distance the terrain thins out; leave vanilla's picture there. Entities are always traced
+	// (vanilla no longer draws them).
+	vec2 d = abs(pos.xz - camera.xz);
+	if (h.kind < KIND_TRANSLUCENT && max(d.x, d.y) > pc.rtDistance) return vec4(0.0);
+
+	// Through water, glass and ice: each surface reflects (the first one only, ponytail: one reflection ray per
+	// pixel), shows its texture lit like any surface, and lets the rest through. Water bends the ray and
+	// absorbs along it; glass and ice are thin sheets.
+	vec3 result = vec3(0.0), weight = vec3(1.0);
+	bool inWater = pc.fogColor.w != 0.0, reflected = false;
+	if (inWater) {
+		waterSigma = -log(WATER_TINT) * WATER_ABSORPTION;
+		waterGlow = srgbToLinear(pc.fogColor.rgb); // vanilla's underwater fog: what deep water looks like
+	}
+	for (int layer = 0; ; layer++) {
+		if (inWater) throughWater(t, result, weight);
+		if (h.kind != KIND_TRANSLUCENT || layer == MAX_LAYERS - 1) {
+			result += weight * surfaceRadiance(h, pos);
+			break;
+		}
+
+		float ior = h.water ? WATER_IOR : GLASS_IOR, f0 = (ior - 1.0) * (ior - 1.0) / ((ior + 1.0) * (ior + 1.0));
+		vec3 through = h.water ? refract(dir, h.normal, inWater ? ior : 1.0 / ior) : dir;
+		bool total = dot(through, through) == 0.0; // total internal reflection
+		float cosine = h.water && inWater ? -dot(through, h.normal) : -dot(dir, h.normal);
+		float fresnel = total ? 1.0 : f0 + (1.0 - f0) * pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
+		if (!reflected) {
+			reflected = true;
+			vec3 r = reflect(dir, h.normal), keep = weight * fresnel;
+			rayQueryEXT rr;
+			TRACE(rr, pos + h.normal * 0.002, r, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
+			if (HIT(rr)) {
+				float tr = rayQueryGetIntersectionTEXT(rr, true);
+				if (inWater) throughWater(tr, result, keep);
+				result += keep * surfaceRadiance(shade(rr, r), pos + h.normal * 0.002 + r * tr);
+			} else {
+				result += keep * (inWater ? waterGlow : skyRadiance(r));
+			}
+		}
+		weight *= 1.0 - fresnel;
+		float opacity = h.opacity * (h.water ? WATER_OPACITY : 1.0);
+		result += weight * opacity * surfaceRadiance(h, pos);
+		weight *= 1.0 - opacity;
+		if (max(weight.r, max(weight.g, weight.b)) < 0.01) break;
+
+		if (h.water) {
+			inWater = !inWater;
+			if (inWater) enterWater(h.tint, h.light.y);
+		}
+		dir = through;
+		vec3 from = pos - h.normal * 0.002;
+		TRACE(rq, from, dir, 512.0, MASK_OPAQUE_SCENE | MASK_TRANSLUCENT, gl_RayFlagsNoneEXT)
+		if (!HIT(rq)) {
+			result += weight * (inWater ? waterGlow : skyRadiance(dir));
+			break;
+		}
+		t = rayQueryGetIntersectionTEXT(rq, true);
+		pos = from + dir * t;
+		h = shade(rq, dir);
+	}
+	return vec4(result, 1.0);
 }
 
 void main() {
@@ -416,6 +535,8 @@ void main() {
 	vec4 vanilla = imageLoad(colorImg, p);
 	vec3 traced = pow(tonemap(acc.rgb / acc.a), vec3(1.0 / 2.2));
 	imageStore(colorImg, p, vec4(mix(vanilla.rgb, traced, acc.a), vanilla.a));
-	// Vanilla draws entities over this next (for their depth); entity_composite.comp puts this colour back.
+	// Vanilla draws entities over this next (for their depth); entity_composite.comp puts this colour back,
+	// on the entity (depth matches) or behind traced water / glass (negative depth: anything behind it).
 	if (hitEntity) imageStore(entityImg, p, vec4(traced, hitDepth));
+	else if (hitTranslucent) imageStore(entityImg, p, vec4(traced, -hitDepth));
 }
