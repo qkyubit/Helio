@@ -27,6 +27,19 @@ public final class HelioConfig {
 	 */
 	public enum Lighting { PATH_TRACED, HYBRID }
 
+	/** Render size as a fraction of the window's, and NGX's PerfQualityValue for it. DLAA: native, anti-aliasing only. */
+	public enum DlssQuality {
+		DLAA(1f, 5), QUALITY(1 / 1.5f, 2), BALANCED(1 / 1.72f, 1), PERFORMANCE(0.5f, 0), ULTRA_PERFORMANCE(1 / 3f, 3);
+
+		public final float scale;
+		public final int perfQuality;
+
+		DlssQuality(float scale, int perfQuality) {
+			this.scale = scale;
+			this.perfQuality = perfQuality;
+		}
+	}
+
 	public enum DebugView { OFF, INSTANCES, ALBEDO, NORMALS, TRIANGLE_DENSITY, MATERIALS }
 
 	private static final Path FILE = FabricLoader.getInstance().getConfigDir().resolve("helio.json");
@@ -40,6 +53,8 @@ public final class HelioConfig {
 	/** Chunks around the player that rays can hit, capped by the render distance. */
 	public int rayTracingDistance = 12;
 	public Lighting lighting = Lighting.PATH_TRACED;
+	/** How much DLSS upscales the traced picture (Super Resolution, or Ray Reconstruction for path tracing). */
+	public DlssQuality dlssQuality = DlssQuality.BALANCED;
 	/** Presented frames per rendered frame: 1 = off, 2 = DLSS frame generation 2x, up to 1 + driver max for MFG. */
 	public int frameGeneration = 2;
 	public ReflexMode reflex = ReflexMode.ON;
@@ -61,11 +76,12 @@ public final class HelioConfig {
 		preset = p;
 		switch (p) {
 			case OFF -> { rayTracing = false; frameGeneration = 1; reflex = ReflexMode.ON; }
-			case PERFORMANCE -> { rayTracing = true; lighting = Lighting.HYBRID; frameGeneration = 2; reflex = ReflexMode.BOOST; }
-			// ponytail: Balanced/Quality/Ultra only differ once M4 adds upscaling modes and ray budgets.
-			case BALANCED, QUALITY, ULTRA -> { rayTracing = true; lighting = Lighting.PATH_TRACED; frameGeneration = 2; reflex = ReflexMode.ON; }
+			case PERFORMANCE -> { rayTracing = true; lighting = Lighting.HYBRID; dlssQuality = DlssQuality.PERFORMANCE; frameGeneration = 2; reflex = ReflexMode.BOOST; }
+			case BALANCED -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.BALANCED; frameGeneration = 2; reflex = ReflexMode.ON; }
+			case QUALITY -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.QUALITY; frameGeneration = 2; reflex = ReflexMode.ON; }
+			case ULTRA -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.DLAA; frameGeneration = 2; reflex = ReflexMode.ON; }
 			// Screenshots: no generated frames (they're slightly soft), no latency trade-offs needed.
-			case PHOTO -> { rayTracing = true; lighting = Lighting.PATH_TRACED; frameGeneration = 1; reflex = ReflexMode.OFF; }
+			case PHOTO -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.DLAA; frameGeneration = 1; reflex = ReflexMode.OFF; }
 			case CUSTOM -> {}
 		}
 	}

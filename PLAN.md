@@ -520,10 +520,16 @@ output near 180 Hz and no HUD smearing.
      types vanilla skips drawing; it casts shadows, camera rays pass through.
    - Reflected sun/moon match vanilla's squares; first-launch freeze fixed
      (pipeline compiles on the render thread).
-2. [ ] Internal resolution: RR Quality / Balanced / Performance, the tracer at
-   render size, vanilla's colour and depth sampled into it; DLSS SR (or DLAA)
-   under Hybrid lighting (jittered, for its aliasing) and when ray tracing is
-   off. Quality setting in the UI.
+2. [x] Internal resolution (`ngx/Dlss.java`, was RayReconstruction): the tracer
+   renders at DLAA / Quality / Balanced / Performance / Ultra Performance size
+   ("DLSS" setting, presets map to it); vanilla's colour and depth are sampled
+   at the matching window position; hit depths for the entity composite go
+   through a render-size image. RR for Path Traced, DLSS SR for Hybrid (fixes
+   its aliasing) and with RR off. Jitter: 8 phases per covered output pixel.
+   User-checked at 1440p Balanced (1488x837): Path Traced 30 -> 65 fps base
+   (tracing 5.7 ms, RR 4.5 ms), Hybrid 87 fps (2.2 ms + SR 1.5 ms), anti-
+   aliasing visible. Not done: DLSS with ray tracing off (needs Mojang's
+   render targets at render size), deferred.
 3. [ ] Entity motion vectors (previous-frame entity vertices) for RR and FG.
 4. [ ] SHaRC-style radiance cache: more bounces for about the cost of one.
 5. [ ] Reflections under RR: specular hit distance + matrices (or specular

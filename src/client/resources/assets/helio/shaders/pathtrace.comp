@@ -26,6 +26,7 @@ layout(binding = 9, rgba16f) uniform writeonly image2D rrNormals;  // world norm
 layout(binding = 10, r32f) uniform writeonly image2D rrDepth;      // NDC depth (reversed-Z), like vanilla's
 layout(binding = 11, rg16f) uniform writeonly image2D rrMotion;    // pixels from here to where it was last frame
 layout(binding = 12, r16f) uniform writeonly image2D rrHitDistance; // of the reflection ray, for reflections' motion
+layout(binding = 13, r32f) uniform writeonly image2D rrHitDepth;   // entity (+) or water / glass (-) depth, for rr_resolve.comp
 layout(set = 1, binding = 0) uniform sampler2D entityTextures[256]; // this frame's entity textures (Entities.textures)
 
 // Vertices in vanilla's BLOCK layout: position xyz, colour, UV0 uv, light levels (2 shorts); 7 floats for
@@ -46,7 +47,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Li
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Frame {
 	mat4 prevViewProj;  // last frame's viewProj (position relative to its camera -> clip)
 	vec4 cameraDelta;   // this frame's camera position - last frame's; w = bounces (stochastic only)
-	uint denoise;       // 1: write RR's inputs, RR and rr_resolve.comp finish the picture
+	uint denoise;       // 1: trace at DLSS's render size and write its inputs; DLSS and rr_resolve.comp finish
 	float lightFloor;   // least light anything gets, from vanilla's Brightness setting
 	uint hybrid;        // 1: block light from vanilla's light levels, no shadow rays for it (HelioConfig.Lighting)
 };
@@ -689,7 +690,7 @@ vec3 vanillaAt(vec2 pixel, ivec2 size) {
 	return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
 }
 
-// RR's inputs. Where the tracer leaves vanilla's picture (sky, past the RT distance) RR gets that picture as
+// DLSS's inputs, at render size (the dispatch's). Where the tracer leaves vanilla's picture (sky, past the RT distance) RR gets that picture as
 // radiance, with vanilla's depth, so RR anti-aliases and stabilises the whole frame and its edges.
 void writeDenoiserInputs(ivec2 p, ivec2 size, vec4 current, Frame frame) {
 	// Position relative to the camera, homogeneous: w = 0 for the sky (reversed-Z depth 0 is infinitely far).
@@ -703,9 +704,12 @@ void writeDenoiserInputs(ivec2 p, ivec2 size, vec4 current, Frame frame) {
 		imageStore(rrNormals, p, vec4(guideNormal, guideRoughness));
 		imageStore(rrHitDistance, p, vec4(guideHitDistance));
 	} else {
-		vec2 ndc = (vec2(p) + 0.5) / vec2(size) * 2.0 - 1.0;
-		rel = pc.invViewProj * vec4(ndc, texelFetch(depthTex, p, 0).r, 1.0);
-		imageStore(rrColor, p, vec4(untonemap(vanillaAt(vec2(p) + 0.5 + pc.jitter, size)), 1.0));
+		// Vanilla's picture is at the window's size: sample it where this render pixel's ray went.
+		ivec2 outSize = imageSize(colorImg);
+		vec2 scale = vec2(outSize) / vec2(size), ndc = (vec2(p) + 0.5) / vec2(size) * 2.0 - 1.0;
+		ivec2 under = clamp(ivec2((vec2(p) + 0.5) * scale), ivec2(0), outSize - 1);
+		rel = pc.invViewProj * vec4(ndc, texelFetch(depthTex, under, 0).r, 1.0);
+		imageStore(rrColor, p, vec4(untonemap(vanillaAt((vec2(p) + 0.5 + pc.jitter) * scale, outSize)), 1.0));
 		imageStore(rrDiffuse, p, vec4(0.5, 0.5, 0.5, 1.0)); // RR's suggested sky defaults
 		imageStore(rrSpecular, p, vec4(0.0));
 		imageStore(rrNormals, p, vec4(0.0));
@@ -715,8 +719,7 @@ void writeDenoiserInputs(ivec2 p, ivec2 size, vec4 current, Frame frame) {
 	vec4 prev = frame.prevViewProj * vec4(rel.xyz + frame.cameraDelta.xyz * rel.w, rel.w);
 	imageStore(rrDepth, p, vec4(clip.z / clip.w));
 	imageStore(rrMotion, p, vec4((prev.xy / prev.w - clip.xy / clip.w) * 0.5 * vec2(size), 0.0, 0.0));
-	// rr_resolve.comp fills in the colour once RR has run.
-	imageStore(entityImg, p, vec4(0.0, 0.0, 0.0, hitEntity ? hitDepth : hitTranslucent ? -hitDepth : 0.0));
+	imageStore(rrHitDepth, p, vec4(hitEntity ? hitDepth : hitTranslucent ? -hitDepth : 0.0));
 }
 
 void main() {
@@ -740,6 +743,8 @@ void main() {
 
 	rng = pcg(uint(p.x) + pcg(uint(p.y) + pcg(pc.stochastic != 0.0 ? pc.seed : 0u)));
 	Frame frame = Frame(pc.frame);
+	if (frame.denoise != 0u) size = imageSize(rrColor); // DLSS's render size
+	if (any(greaterThanEqual(p, size))) return;
 	bounces = int(frame.cameraDelta.w);
 	lightFloor = frame.lightFloor;
 	hybrid = frame.hybrid != 0u;

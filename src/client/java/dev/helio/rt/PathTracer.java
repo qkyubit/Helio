@@ -7,7 +7,7 @@ import com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView;
 import dev.helio.Helio;
 import dev.helio.config.HelioConfig;
 import dev.helio.mixin.VulkanCommandEncoderAccessor;
-import dev.helio.ngx.RayReconstruction;
+import dev.helio.ngx.Dlss;
 import dev.helio.vk.GpuTimers;
 import dev.helio.vk.Memory;
 import dev.helio.vk.Shaders;
@@ -45,8 +45,6 @@ import static org.lwjgl.vulkan.VK12.*;
  */
 public final class PathTracer {
 	private static final int PUSH_SIZE = 256;
-	/** Under RR: a 16-sample Halton cycle of sub-pixel offsets, as DLSS recommends at native resolution. */
-	private static final int JITTER_PHASES = 16;
 	/** Accumulation keeps adapting slowly after this many frames instead of freezing. */
 	private static final int MAX_FRAMES = 256;
 
@@ -79,7 +77,7 @@ public final class PathTracer {
 	/** Per frame in flight: the shader's Frame block (last frame's camera for motion vectors, RR switch). */
 	private static final Memory.Buf[] frameData = new Memory.Buf[RING];
 	private static final Matrix4f lastViewProj = new Matrix4f();
-	private static boolean lastDenoised;
+	private static boolean lastUpscaled, lastRr;
 	private static int jitterIndex;
 	private static Vec3 rrOrigin;
 
@@ -142,8 +140,8 @@ public final class PathTracer {
 			sampler = h.get(0);
 
 			// 0 TLAS, 2 and 5 sampled (atlas, vanilla depth), the rest storage images (see pathtrace.comp).
-			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(13, s);
-			for (int i = 0; i < 13; i++) {
+			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(14, s);
+			for (int i = 0; i < 14; i++) {
 				int type = i == 0 ? VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
 					: i == 2 || i == 5 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 				b.get(i).binding(i).descriptorType(type).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
@@ -188,8 +186,8 @@ public final class PathTracer {
 			compositeLayout = h.get(0);
 			compositePipeline = computePipeline(vk, "entity_composite.comp", compositeLayout, s);
 
-			VkDescriptorSetLayoutBinding.Buffer rb = VkDescriptorSetLayoutBinding.calloc(4, s);
-			for (int i = 0; i < 4; i++) {
+			VkDescriptorSetLayoutBinding.Buffer rb = VkDescriptorSetLayoutBinding.calloc(5, s);
+			for (int i = 0; i < 5; i++) {
 				rb.get(i).binding(i).descriptorType(i == 3 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
 					.descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
 			}
@@ -253,18 +251,23 @@ public final class PathTracer {
 		Matrix4f viewProj = new Matrix4f(levelProjection).mul(viewRotation);
 		Matrix4f invViewProj = new Matrix4f(viewProj).invert();
 		boolean accumulate = HelioConfig.current.accumulate;
-		boolean denoise = RayReconstruction.active() && HelioConfig.current.debugView == HelioConfig.DebugView.OFF;
-		if (denoise && !lastDenoised) RayReconstruction.reset();
-		lastDenoised = denoise;
+		// DLSS takes the traced picture at render size: Ray Reconstruction for path tracing, Super Resolution
+		// otherwise. Reference accumulation and debug views stay native and composite themselves.
+		boolean upscale = Dlss.available() && HelioConfig.current.debugView == HelioConfig.DebugView.OFF;
+		boolean rr = upscale && Dlss.rayReconstruction();
+		if (upscale && (!lastUpscaled || rr != lastRr)) Dlss.reset();
+		lastUpscaled = upscale;
+		lastRr = rr;
 
 		try (MemoryStack s = MemoryStack.stackPush()) {
 			ensureAccum(cmd, main.width, main.height, s);
-			RayReconstruction.ensureImages(cmd, main.width, main.height, s);
+			Dlss.ensureImages(cmd, main.width, main.height, s);
+			int width = upscale ? Dlss.renderWidth : main.width, height = upscale ? Dlss.renderHeight : main.height;
 			Vec3 cameraDelta = cameraPos.subtract(lastCameraPos);
 			updateAccumulation(invViewProj);
 			float jitterX = 0, jitterY = 0;
-			if (accumulate || denoise) {
-				int i = accumulate ? frameIndex + 1 : jitterIndex++ % JITTER_PHASES + 1;
+			if (accumulate || upscale) {
+				int i = accumulate ? frameIndex + 1 : jitterIndex++ % Dlss.jitterPhases() + 1;
 				jitterX = halton(i, 2) - 0.5f;
 				jitterY = halton(i, 3) - 0.5f;
 			}
@@ -272,14 +275,14 @@ public final class PathTracer {
 			ByteBuffer fb = MemoryUtil.memByteBuffer(frame.mapped(), 256);
 			lastViewProj.get(0, fb);
 			fb.putFloat(64, (float) cameraDelta.x).putFloat(68, (float) cameraDelta.y).putFloat(72, (float) cameraDelta.z)
-				.putFloat(76, accumulate ? 3 : 1).putInt(80, denoise ? 1 : 0)
+				.putFloat(76, accumulate ? 3 : 1).putInt(80, upscale ? 1 : 0)
 				.putFloat(84, (float) (0.02 + 0.1 * mc.options.gamma().get()))
 				.putInt(88, HelioConfig.current.lighting == HelioConfig.Lighting.HYBRID ? 1 : 0);
 			lastViewProj.set(viewProj);
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(13, s);
+			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(14, s);
 			w.get(0).sType$Default().dstBinding(0).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
 				.pNext(VkWriteDescriptorSetAccelerationStructureKHR.calloc(s).sType$Default().pAccelerationStructures(s.longs(Scene.tlas)));
 			w.get(1).sType$Default().dstBinding(1).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -293,11 +296,10 @@ public final class PathTracer {
 			VulkanGpuTextureView depth = (VulkanGpuTextureView) main.getDepthTextureView();
 			w.get(5).sType$Default().dstBinding(5).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
 				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(sampler).imageView(depth.vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
-			Memory.Img[] rr = {RayReconstruction.color, RayReconstruction.diffuse, RayReconstruction.specular,
-				RayReconstruction.normals, RayReconstruction.depth, RayReconstruction.motion, RayReconstruction.hitDistance};
-			for (int i = 0; i < rr.length; i++) {
+			Memory.Img[] inputs = {Dlss.color, Dlss.diffuse, Dlss.specular, Dlss.normals, Dlss.depth, Dlss.motion, Dlss.hitDistance, Dlss.hitDepth};
+			for (int i = 0; i < inputs.length; i++) {
 				w.get(6 + i).sType$Default().dstBinding(6 + i).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-					.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(rr[i].view()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+					.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(inputs[i].view()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
 			}
 			vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, w);
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 1, s.longs(writeEntityTextures(mc, s)), null);
@@ -311,7 +313,7 @@ public final class PathTracer {
 				.putFloat(104, Scene.rtDistanceBlocks).putInt(108, frameIndex)
 				.putFloat(112, jitterX).putFloat(116, jitterY)
 				// Sampling the sun disc is noisy at 1 sample per pixel: only with accumulation until M4's denoiser.
-				.putInt(120, seed++).putFloat(124, accumulate || denoise ? 1 : 0)
+				.putInt(120, seed++).putFloat(124, accumulate || rr ? 1 : 0)
 				.putFloat(128, moon.x).putFloat(132, moon.y).putFloat(136, moon.z).putFloat(140, rainBrightness)
 				.putFloat(144, skyColor.x).putFloat(148, skyColor.y).putFloat(152, skyColor.z).putFloat(156, hasSky ? 1 : 0)
 				.putFloat(160, fogColor.x).putFloat(164, fogColor.y).putFloat(168, fogColor.z).putFloat(172, underwater ? 1 : 0);
@@ -319,19 +321,19 @@ public final class PathTracer {
 			pc.putLong(240, Scene.lights).putLong(248, frame.address());
 			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
 
-			vkCmdDispatch(cmd, (main.width + 7) / 8, (main.height + 7) / 8, 1);
+			vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
 			GpuTimers.end(cmd, GpuTimers.Pass.PATH_TRACE);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			if (accumulate) frameIndex = Math.min(frameIndex + 1, MAX_FRAMES);
-			if (denoise) {
-				GpuTimers.begin(cmd, GpuTimers.Pass.RAY_RECONSTRUCTION);
+			if (upscale) {
+				GpuTimers.begin(cmd, GpuTimers.Pass.DLSS);
 				// DLSS's jitter is how far the projection moved the picture: the opposite of where our samples went.
 				// RR's world: camera-relative axes (as the normals), positions from a fixed origin near the player.
 				if (rrOrigin == null || rrOrigin.distanceToSqr(cameraPos) > 4096 * 4096) rrOrigin = cameraPos;
 				Matrix4f worldToView = new Matrix4f(viewRotation).translate((float) (rrOrigin.x - cameraPos.x),
 					(float) (rrOrigin.y - cameraPos.y), (float) (rrOrigin.z - cameraPos.z));
-				boolean ok = RayReconstruction.evaluate(cmd, -jitterX, -jitterY, worldToView, levelProjection);
-				GpuTimers.end(cmd, GpuTimers.Pass.RAY_RECONSTRUCTION);
+				boolean ok = Dlss.evaluate(cmd, rr, -jitterX, -jitterY, worldToView, levelProjection);
+				GpuTimers.end(cmd, GpuTimers.Pass.DLSS);
 				VulkanCommandEncoder.memoryBarrier(cmd, s);
 				if (ok) resolve(cmd, color, depth, main.width, main.height, s);
 			}
@@ -339,12 +341,13 @@ public final class PathTracer {
 		}
 	}
 
-	/** After RR: its output, tonemapped, into the main colour (rr_resolve.comp). */
+	/** After DLSS: its output, tonemapped, into the main colour (rr_resolve.comp). */
 	private static void resolve(VkCommandBuffer cmd, VulkanGpuTextureView color, VulkanGpuTextureView depth, int width, int height, MemoryStack s) {
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolvePipeline);
-		long[] views = {RayReconstruction.output.view(), color.vkImageView(), entityImg.view()};
-		VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(4, s);
-		for (int i = 0; i < 3; i++) {
+		long[] views = {Dlss.output.view(), color.vkImageView(), entityImg.view(), 0, Dlss.hitDepth.view()};
+		VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(5, s);
+		for (int i = 0; i < 5; i++) {
+			if (i == 3) continue;
 			w.get(i).sType$Default().dstBinding(i).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
 				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(views[i]).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
 		}
@@ -428,7 +431,7 @@ public final class PathTracer {
 		}
 		vkDestroyPipeline(vk, pipeline, null);
 		vkDestroyPipelineLayout(vk, pipelineLayout, null);
-		RayReconstruction.destroyImages();
+		Dlss.destroyImages();
 		for (Memory.Buf b : frameData) if (b != null) b.free();
 		vkDestroyPipeline(vk, resolvePipeline, null);
 		vkDestroyPipelineLayout(vk, resolveLayout, null);

@@ -3,6 +3,7 @@ package dev.helio.config;
 import dev.helio.Helio;
 import dev.helio.SelfCheck;
 import dev.helio.config.HelioConfig.DebugView;
+import dev.helio.config.HelioConfig.DlssQuality;
 import dev.helio.config.HelioConfig.Lighting;
 import dev.helio.config.HelioConfig.Preset;
 import dev.helio.config.HelioConfig.ReflexMode;
@@ -50,7 +51,10 @@ public class HelioScreen extends OptionsSubScreen {
 				.withValues(Lighting.values())
 				.withTooltip(l -> Tooltip.create(Component.translatable("helio.lighting." + l.name().toLowerCase() + ".tooltip")))
 				.create(Component.translatable("helio.lighting"), (b, v) -> changed(() -> c.lighting = v))),
-			null);
+			unsupportedIf(!Helio.dlss, "DLSS " + Helio.dlssStatus, CycleButton.builder((DlssQuality q) -> Component.translatable("helio.dlss_quality." + q.name().toLowerCase()), c.dlssQuality)
+				.withValues(DlssQuality.values())
+				.withTooltip(q -> Tooltip.create(Component.translatable("helio.dlss_quality.tooltip")))
+				.create(Component.translatable("helio.dlss_quality"), (b, v) -> changed(() -> c.dlssQuality = v))));
 		list.addSmall(
 			unsupportedIf(!Helio.dlss || !Helio.ngxCaps.frameGeneration(), "DLSS " + Helio.dlssStatus,
 				// ponytail: 2x only until M4 adds multi frame generation (up to 1 + ngxCaps.mfgMax()).

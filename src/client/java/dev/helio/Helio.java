@@ -9,7 +9,7 @@ import dev.helio.ngx.DlssLibraries;
 import dev.helio.ngx.FrameGenSpike;
 import dev.helio.ngx.Ngx;
 import dev.helio.ngx.NgxStartup;
-import dev.helio.ngx.RayReconstruction;
+import dev.helio.ngx.Dlss;
 import dev.helio.rt.PathTracer;
 import dev.helio.rt.Scene;
 import dev.helio.vk.GpuTimers;
@@ -154,7 +154,7 @@ public class Helio implements ClientModInitializer {
 		if (dlss) {
 			try {
 				FrameGenSpike.release();
-				RayReconstruction.release();
+				Dlss.release();
 				Ngx.shutdown(device.vkDevice().address());
 				LOG.info("NGX shut down");
 			} catch (Throwable t) {
