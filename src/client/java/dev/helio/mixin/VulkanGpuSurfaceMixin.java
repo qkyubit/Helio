@@ -59,6 +59,7 @@ public class VulkanGpuSurfaceMixin {
 
 	@Inject(method = "present", at = @At("HEAD"))
 	private void helio$presentStart(CallbackInfo ci) {
+		FrameGenSpike.awaitPacedPresent();
 		Reflex.presentStart();
 	}
 
@@ -67,10 +68,11 @@ public class VulkanGpuSurfaceMixin {
 		target = "Lorg/lwjgl/vulkan/KHRSwapchain;vkQueuePresentKHR(Lorg/lwjgl/vulkan/VkQueue;Lorg/lwjgl/vulkan/VkPresentInfoKHR;)I"))
 	private int helio$presentId(VkQueue queue, VkPresentInfoKHR info, Operation<Integer> original) {
 		long id = FrameGenSpike.presentsRealFrameItself() ? 0 : Reflex.presentId();
-		if (id == 0) return original.call(queue, info);
 		try (MemoryStack s = MemoryStack.stackPush()) {
-			info.pNext(VkPresentIdKHR.calloc(s).sType$Default().pNext(info.pNext()).swapchainCount(1).pPresentIds(s.longs(id)).address());
-			return original.call(queue, info);
+			if (id != 0) info.pNext(VkPresentIdKHR.calloc(s).sType$Default().pNext(info.pNext()).swapchainCount(1).pPresentIds(s.longs(id)).address());
+			synchronized (FrameGenSpike.QUEUE_LOCK) {
+				return original.call(queue, info);
+			}
 		}
 	}
 

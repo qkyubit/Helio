@@ -25,6 +25,7 @@ layout(binding = 8, rgba8) uniform writeonly image2D rrSpecular;   // specular a
 layout(binding = 9, rgba16f) uniform writeonly image2D rrNormals;  // world normal, roughness in w
 layout(binding = 10, r32f) uniform writeonly image2D rrDepth;      // NDC depth (reversed-Z), like vanilla's
 layout(binding = 11, rg16f) uniform writeonly image2D rrMotion;    // pixels from here to where it was last frame
+layout(binding = 12, r16f) uniform writeonly image2D rrHitDistance; // of the reflection ray, for reflections' motion
 layout(set = 1, binding = 0) uniform sampler2D entityTextures[256]; // this frame's entity textures (Entities.textures)
 
 // Vertices in vanilla's BLOCK layout: position xyz, colour, UV0 uv, light levels (2 shorts); 7 floats for
@@ -46,6 +47,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	mat4 prevViewProj;  // last frame's viewProj (position relative to its camera -> clip)
 	vec4 cameraDelta;   // this frame's camera position - last frame's; w = bounces (stochastic only)
 	uint denoise;       // 1: write RR's inputs, RR and rr_resolve.comp finish the picture
+	float lightFloor;   // least light anything gets, from vanilla's Brightness setting
 };
 // Per TLAS instance. kind: section layer (0 solid, 1 cutout, 2 translucent) or 3 = entities.
 struct Instance { uvec2 vertices; uint triangles; uint kind; };
@@ -75,6 +77,9 @@ const float WATER_OPACITY = 0.3;     // how much of water's texture shows on its
 const float WATER_ABSORPTION = 0.15; // per block, as a power of the water's (linear) tint
 const float WATER_SCATTER = 0.1;     // light the water itself sends back, over the sky and sun reaching it
 const vec3 WATER_TINT = vec3(0.046, 0.184, 0.782); // vanilla's default 0x3F76E4: absorption when the camera starts underwater
+const float SKY_FILL = 0.4;     // share of sky light added by sky level when stochastic (missing bounces)
+const float MAX_SAMPLE = 12.0;
+const float SKY_DISTANCE = 65504.0; // RR's hit distance for rays that escape (FP16 max)   // luminance cap on what RR gets: sun glints off water and metal flicker past it
 const float FOLIAGE_TRANSMISSION = 0.5; // light leaves and grass let through, over what they reflect
 // Polished blocks (Scene.METAL_MARK, Scene.GEM_MARK): metals reflect in their own colour, slightly blurred,
 // over a little diffuse; gems reflect faintly and sharply over their full colour.
@@ -408,11 +413,15 @@ vec3 cosineSample(vec3 n) {
 // Bounces followed when stochastic (Frame.cameraDelta.w: 3 for the reference, 1 under RR); Russian roulette
 // after the second.
 int bounces;
+float lightFloor; // Frame.lightFloor
 
 // Light leaving an opaque (or textured translucent) surface back along the ray: its emission and direct
 // light, plus bounce light (approximated, or followed when stochastic).
 vec3 surfaceRadiance(Hit h, vec3 pos) {
-	vec3 radiance = h.albedo * (EMISSIVE * h.emission + directLight(h, pos));
+	// A floor (vanilla's Brightness) so caves and dense foliage never go black; when stochastic, also a share of
+	// sky light by vanilla's sky level, for the bounces past the one followed (until the radiance cache, M4 step 4).
+	vec3 ambient = vec3(lightFloor) + (pc.stochastic != 0.0 ? skyIrradiance(h.normal) * h.light.y * h.light.y * SKY_FILL : vec3(0.0));
+	vec3 radiance = h.albedo * (EMISSIVE * h.emission + directLight(h, pos) + ambient);
 	if (pc.stochastic == 0.0) {
 		// ponytail: until M4's denoiser, bounce light is approximated outside reference mode: sky light scaled by
 		// vanilla's sky light level, and a dim fill from its block light level.
@@ -492,6 +501,8 @@ void throughWater(float d, inout vec3 result, inout vec3 weight) {
 	weight *= t;
 }
 
+float specularDistance; // set by specularRadiance(): how far its ray went
+
 // Microfacet normal around n, GGX distributed for alpha = roughness².
 vec3 ggxNormal(vec3 n, float alpha) {
 	float u = rand(), phi = 6.2831853 * rand();
@@ -506,8 +517,10 @@ vec3 specularRadiance(vec3 pos, vec3 n, vec3 dir, float roughness) {
 	if (dot(r, n) <= 0.0) r = reflect(dir, n);
 	rayQueryEXT rq;
 	TRACE(rq, pos + n * 0.002, r, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
+	specularDistance = SKY_DISTANCE;
 	if (!HIT(rq)) return skyRadiance(r);
-	return surfaceRadiance(shade(rq, r), pos + n * 0.002 + r * rayQueryGetIntersectionTEXT(rq, true));
+	specularDistance = rayQueryGetIntersectionTEXT(rq, true);
+	return surfaceRadiance(shade(rq, r), pos + n * 0.002 + r * specularDistance);
 }
 
 // Set by radiance(): what the primary ray hit first (an entity, or water / glass / ice), at this NDC depth.
@@ -516,7 +529,7 @@ float hitDepth;
 // And RR's guides for it: albedo of what's seen (blended through water and glass), the first surface's
 // reflectance, normal, roughness and position relative to the camera.
 vec3 guideAlbedo, guideSpecular, guideNormal, guidePos;
-float guideRoughness;
+float guideRoughness, guideHitDistance; // hit distance: of the first surface's reflection ray, for RR's reflections
 
 // Linear radiance seen through pixel position `pixel` (fractional); coverage 0 where vanilla's picture stays.
 vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
@@ -552,6 +565,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 	guideNormal = h.normal;
 	guideRoughness = h.kind == KIND_TRANSLUCENT || h.glass ? 0.0 : 1.0;
 	guideAlbedo = guideSpecular = vec3(0.0);
+	guideHitDistance = 0.0;
 	if (h.kind == KIND_DYNAMIC || h.kind == KIND_TRANSLUCENT || h.glass) {
 		vec4 clip = pc.viewProj * vec4(guidePos, 1.0);
 		hitEntity = h.kind == KIND_DYNAMIC;
@@ -587,6 +601,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 				if (layer == 0) {
 					guideSpecular = f;
 					guideRoughness = roughness;
+					guideHitDistance = specularDistance;
 				}
 			}
 			result += weight * diffuse * surfaceRadiance(h, pos);
@@ -601,12 +616,14 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		bool total = dot(through, through) == 0.0; // total internal reflection
 		float cosine = n1 > n2 ? -dot(through, h.normal) : -dot(dir, h.normal); // the larger angle's
 		float fresnel = total ? 1.0 : n1 == n2 ? 0.0 : f0 + (1.0 - f0) * pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
+		bool separate = !reflected; // this surface's reflection traced on its own (the first surface only)
 		if (!reflected) {
 			reflected = true;
 			guideSpecular = vec3(fresnel);
 			vec3 r = reflect(dir, h.normal), keep = weight * fresnel;
 			rayQueryEXT rr;
 			TRACE(rr, pos + h.normal * 0.002, r, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
+			guideHitDistance = HIT(rr) ? rayQueryGetIntersectionTEXT(rr, true) : SKY_DISTANCE;
 			if (HIT(rr)) {
 				float tr = rayQueryGetIntersectionTEXT(rr, true);
 				if (inWater && !inGlass) throughWater(tr, result, keep);
@@ -615,18 +632,27 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 				result += keep * (inWater ? waterGlow : skyRadiance(r));
 			}
 		}
-		weight *= 1.0 - fresnel;
-		float opacity = h.opacity * (h.water ? WATER_OPACITY : 1.0);
-		result += weight * opacity * surfaceRadiance(h, pos);
-		guideAlbedo += weight * opacity * h.albedo;
-		weight *= 1.0 - opacity;
-		if (max(weight.r, max(weight.g, weight.b)) < 0.01) break;
+		// Past the first surface the ray itself bounces off instead: always under total internal reflection (else
+		// glass goes black where it reflects inside), otherwise by chance when stochastic (the chance stands in for
+		// the Fresnel weight). It stays in the same medium.
+		vec3 from;
+		if (!separate && (total || pc.stochastic != 0.0 && rand() < fresnel)) {
+			dir = reflect(dir, h.normal);
+			from = pos + h.normal * 0.002;
+		} else {
+			weight *= separate || pc.stochastic == 0.0 ? 1.0 - fresnel : 1.0;
+			float opacity = h.opacity * (h.water ? WATER_OPACITY : 1.0);
+			result += weight * opacity * surfaceRadiance(h, pos);
+			guideAlbedo += weight * opacity * h.albedo;
+			weight *= 1.0 - opacity;
+			if (max(weight.r, max(weight.g, weight.b)) < 0.01) break;
 
-		if (nextWater && !inWater) enterWater(h.tint, h.light.y);
-		inWater = nextWater;
-		inGlass = nextGlass;
-		dir = through;
-		vec3 from = pos - h.normal * 0.002;
+			if (nextWater && !inWater) enterWater(h.tint, h.light.y);
+			inWater = nextWater;
+			inGlass = nextGlass;
+			dir = through;
+			from = pos - h.normal * 0.002;
+		}
 		TRACE_CAMERA(rq, from, dir, 512.0, MASK_OPAQUE_SCENE | MASK_TRANSLUCENT)
 		if (!HIT(rq)) {
 			result += weight * (inWater && !inGlass ? waterGlow : skyRadiance(dir));
@@ -664,10 +690,12 @@ void writeDenoiserInputs(ivec2 p, ivec2 size, vec4 current, Frame frame) {
 	vec4 rel;
 	if (current.a > 0.0) {
 		rel = vec4(guidePos, 1.0);
-		imageStore(rrColor, p, vec4(current.rgb, 1.0));
+		float l = luminance(current.rgb);
+		imageStore(rrColor, p, vec4(l > MAX_SAMPLE ? current.rgb * (MAX_SAMPLE / l) : current.rgb, 1.0));
 		imageStore(rrDiffuse, p, vec4(guideAlbedo, 1.0));
 		imageStore(rrSpecular, p, vec4(guideSpecular, 1.0));
 		imageStore(rrNormals, p, vec4(guideNormal, guideRoughness));
+		imageStore(rrHitDistance, p, vec4(guideHitDistance));
 	} else {
 		vec2 ndc = (vec2(p) + 0.5) / vec2(size) * 2.0 - 1.0;
 		rel = pc.invViewProj * vec4(ndc, texelFetch(depthTex, p, 0).r, 1.0);
@@ -675,6 +703,7 @@ void writeDenoiserInputs(ivec2 p, ivec2 size, vec4 current, Frame frame) {
 		imageStore(rrDiffuse, p, vec4(0.5, 0.5, 0.5, 1.0)); // RR's suggested sky defaults
 		imageStore(rrSpecular, p, vec4(0.0));
 		imageStore(rrNormals, p, vec4(0.0));
+		imageStore(rrHitDistance, p, vec4(SKY_DISTANCE));
 	}
 	vec4 clip = pc.viewProj * rel;
 	vec4 prev = frame.prevViewProj * vec4(rel.xyz + frame.cameraDelta.xyz * rel.w, rel.w);
@@ -706,6 +735,7 @@ void main() {
 	rng = pcg(uint(p.x) + pcg(uint(p.y) + pcg(pc.stochastic != 0.0 ? pc.seed : 0u)));
 	Frame frame = Frame(pc.frame);
 	bounces = int(frame.cameraDelta.w);
+	lightFloor = frame.lightFloor;
 	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size), uvec2(p));
 	if (frame.denoise != 0u) {
 		writeDenoiserInputs(p, size, current, frame);

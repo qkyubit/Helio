@@ -28,6 +28,10 @@ import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.locks.LockSupport;
 
 import static org.lwjgl.vulkan.KHRPushDescriptor.*;
 import static org.lwjgl.vulkan.KHRSwapchain.*;
@@ -116,6 +120,7 @@ public final class FrameGenSpike {
 
 	/** Mojang is about to blit {@code mainView} to its swapchain image: hand it the interpolated frame instead. */
 	public static GpuTextureView beforeBlit(VulkanCommandEncoder encoder, GpuTextureView mainView) {
+		awaitPacedPresent();
 		generating = false;
 		if (failed || !captured) {
 			reset = true; // menus / no world: history is stale
@@ -174,24 +179,38 @@ public final class FrameGenSpike {
 		return extraImage >= 0;
 	}
 
-	/** After Mojang presented the interpolated frame: present the real one. */
+	/**
+	 * Vulkan wants the queue externally synchronised: Mojang's submits, presents and idle waits and the pacer's
+	 * present all take this lock (VulkanQueueSubmissionMixin, VulkanGpuSurfaceMixin, VulkanQueueMixin).
+	 */
+	public static final Object QUEUE_LOCK = new Object();
+	private static final ExecutorService pacer = Executors.newSingleThreadExecutor(r -> {
+		Thread t = new Thread(r, "Helio FG pacer");
+		t.setDaemon(true);
+		return t;
+	});
+	private static Future<?> pacedPresent;
+	private static long lastPresentNanos;
+	private static double frameNanos;
+
+	/**
+	 * After Mojang presented the interpolated frame: present the real one half a frame later, from the pacer
+	 * thread. Back to back they'd land on consecutive refreshes and the motion would still move at the base rate.
+	 */
 	public static void afterPresent(VkQueue queue) {
 		realFrames++;
 		presents++;
+		long now = System.nanoTime();
+		if (lastPresentNanos != 0) frameNanos = frameNanos == 0 ? now - lastPresentNanos : frameNanos * 0.9 + (now - lastPresentNanos) * 0.1;
+		lastPresentNanos = now;
 		if (extraImage >= 0) {
-			try (MemoryStack s = MemoryStack.stackPush()) {
-				VkPresentInfoKHR info = VkPresentInfoKHR.calloc(s).sType$Default()
-					.pWaitSemaphores(s.longs(presentSems[extraImage])).swapchainCount(1)
-					.pSwapchains(s.longs(extraSwapchain)).pImageIndices(s.ints(extraImage));
-				long id = Reflex.presentId();
-				if (id != 0) info.pNext(VkPresentIdKHR.calloc(s).sType$Default().swapchainCount(1).pPresentIds(s.longs(id)).address());
-				int r = vkQueuePresentKHR(queue, info);
-				if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) Helio.LOG.warn("FG: real-frame present returned {}", r);
-				else presents++;
-			}
+			long sem = presentSems[extraImage], swapchain = extraSwapchain, id = Reflex.presentId();
+			int image = extraImage;
+			long due = now + (long) Math.min(frameNanos / 2, 50e6);
+			pacedPresent = pacer.submit(() -> presentReal(queue, sem, swapchain, image, id, due));
+			presents++;
 			extraImage = -1;
 		}
-		long now = System.nanoTime();
 		if (statsStart == 0) statsStart = now;
 		if (now - statsStart > 1_000_000_000L) {
 			double sec = (now - statsStart) / 1e9;
@@ -199,6 +218,32 @@ public final class FrameGenSpike {
 			presentedFps = Math.round(presents / sec);
 			statsStart = now;
 			realFrames = presents = 0;
+		}
+	}
+
+	private static void presentReal(VkQueue queue, long semaphore, long swapchain, int image, long id, long due) {
+		for (long wait; (wait = due - System.nanoTime()) > 0; ) LockSupport.parkNanos(wait);
+		try (MemoryStack s = MemoryStack.stackPush()) {
+			VkPresentInfoKHR info = VkPresentInfoKHR.calloc(s).sType$Default()
+				.pWaitSemaphores(s.longs(semaphore)).swapchainCount(1).pSwapchains(s.longs(swapchain)).pImageIndices(s.ints(image));
+			if (id != 0) info.pNext(VkPresentIdKHR.calloc(s).sType$Default().swapchainCount(1).pPresentIds(s.longs(id)).address());
+			int r;
+			synchronized (QUEUE_LOCK) {
+				r = vkQueuePresentKHR(queue, info);
+			}
+			if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) Helio.LOG.warn("FG: real-frame present returned {}", r);
+		}
+	}
+
+	/** Before Mojang presents or acquires again: last frame's paced real present has to have happened. */
+	public static void awaitPacedPresent() {
+		Future<?> f = pacedPresent;
+		if (f == null) return;
+		pacedPresent = null;
+		try {
+			f.get();
+		} catch (Exception e) {
+			Helio.LOG.warn("FG: paced present failed", e);
 		}
 	}
 
@@ -239,6 +284,7 @@ public final class FrameGenSpike {
 
 	/** Releases the DLSS-G feature. Call with the GPU idle, before the device goes away. */
 	public static void release() throws Throwable {
+		awaitPacedPresent();
 		if (feature.equals(MemorySegment.NULL)) return;
 		Ngx.releaseFeature(feature);
 		feature = MemorySegment.NULL;

@@ -29,6 +29,7 @@
 		"VulkanDeviceMixin",
 		"VulkanFeatureSetsMixin",
 		"VulkanGpuSurfaceMixin",
+		"VulkanQueueMixin",
 		"VulkanQueueSubmissionMixin"
 	],
 	"injectors": {

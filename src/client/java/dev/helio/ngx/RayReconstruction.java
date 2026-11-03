@@ -3,12 +3,14 @@ package dev.helio.ngx;
 import dev.helio.Helio;
 import dev.helio.config.HelioConfig;
 import dev.helio.vk.Memory;
+import org.joml.Matrix4f;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkImageMemoryBarrier;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 
 import static org.lwjgl.vulkan.VK12.*;
 
@@ -23,8 +25,11 @@ public final class RayReconstruction {
 	private static final int CREATE_FLAGS = 1 | 2 | 8;
 	private static final int DENOISE_MODE_DL_UNIFIED = 1, ROUGHNESS_PACKED = 1, HW_DEPTH = 1;
 
-	/** Inputs at render size: noisy linear colour, albedos, world normal + roughness, HW depth, motion in pixels. */
-	public static Memory.Img color, diffuse, specular, normals, depth, motion;
+	/**
+	 * Inputs at render size: noisy linear colour, albedos, world normal + roughness, HW depth, motion in pixels,
+	 * and the reflection ray's hit distance (with the matrices, RR works out how reflections move).
+	 */
+	public static Memory.Img color, diffuse, specular, normals, depth, motion, hitDistance;
 	/** Clean linear colour at output size. */
 	public static Memory.Img output;
 
@@ -53,6 +58,7 @@ public final class RayReconstruction {
 		normals = Memory.storageImage(width, height, VK_FORMAT_R16G16B16A16_SFLOAT);
 		depth = Memory.storageImage(width, height, VK_FORMAT_R32_SFLOAT);
 		motion = Memory.storageImage(width, height, VK_FORMAT_R16G16_SFLOAT);
+		hitDistance = Memory.storageImage(width, height, VK_FORMAT_R16_SFLOAT);
 		output = Memory.storageImage(width, height, VK_FORMAT_R16G16B16A16_SFLOAT);
 		Memory.Img[] all = images();
 		VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(all.length, s);
@@ -66,7 +72,7 @@ public final class RayReconstruction {
 	}
 
 	private static Memory.Img[] images() {
-		return new Memory.Img[]{color, diffuse, specular, normals, depth, motion, output};
+		return new Memory.Img[]{color, diffuse, specular, normals, depth, motion, hitDistance, output};
 	}
 
 	/** RR's history no longer matches the picture (RR just turned on, a teleport): start over. */
@@ -75,7 +81,7 @@ public final class RayReconstruction {
 	}
 
 	/** Records RR after the path tracer wrote its inputs (and a barrier). False if RR failed: show the noisy frame. */
-	public static boolean evaluate(VkCommandBuffer cmd, float jitterX, float jitterY) {
+	public static boolean evaluate(VkCommandBuffer cmd, float jitterX, float jitterY, Matrix4f worldToView, Matrix4f viewToClip) {
 		try {
 			int w = output.width(), h = output.height();
 			if (params.equals(MemorySegment.NULL)) params = Ngx.allocateParameters();
@@ -102,6 +108,9 @@ public final class RayReconstruction {
 				MemorySegment n = resource(a, normals, false);
 				Ngx.setPointer(p, "GBuffer.Normals", n);
 				Ngx.setPointer(p, "GBuffer.Roughness", n); // packed into the normals' alpha
+				Ngx.setPointer(p, "DLSSD.SpecularHitDistance", resource(a, hitDistance, false));
+				Ngx.setPointer(p, "WorldToViewMatrix", matrix(a, worldToView));
+				Ngx.setPointer(p, "ViewToClipMatrix", matrix(a, viewToClip));
 				Ngx.setFloat(p, "Jitter.Offset.X", jitterX);
 				Ngx.setFloat(p, "Jitter.Offset.Y", jitterY);
 				Ngx.setFloat(p, "MV.Scale.X", 1);
@@ -120,6 +129,13 @@ public final class RayReconstruction {
 			Helio.LOG.error("DLSS Ray Reconstruction failed; disabled for this session", t);
 			return false;
 		}
+	}
+
+	/** JOML's column-major memory is the row-major, row-vector layout NGX expects. */
+	private static MemorySegment matrix(Arena a, Matrix4f m) {
+		MemorySegment seg = a.allocate(64, 16);
+		MemorySegment.copy(m.get(new float[16]), 0, seg, ValueLayout.JAVA_FLOAT, 0, 16);
+		return seg;
 	}
 
 	private static MemorySegment resource(Arena a, Memory.Img img, boolean write) {

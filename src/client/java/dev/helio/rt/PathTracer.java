@@ -81,6 +81,7 @@ public final class PathTracer {
 	private static final Matrix4f lastViewProj = new Matrix4f();
 	private static boolean lastDenoised;
 	private static int jitterIndex;
+	private static Vec3 rrOrigin;
 
 	private PathTracer() {}
 
@@ -141,8 +142,8 @@ public final class PathTracer {
 			sampler = h.get(0);
 
 			// 0 TLAS, 2 and 5 sampled (atlas, vanilla depth), the rest storage images (see pathtrace.comp).
-			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(12, s);
-			for (int i = 0; i < 12; i++) {
+			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(13, s);
+			for (int i = 0; i < 13; i++) {
 				int type = i == 0 ? VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
 					: i == 2 || i == 5 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 				b.get(i).binding(i).descriptorType(type).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
@@ -271,12 +272,13 @@ public final class PathTracer {
 			ByteBuffer fb = MemoryUtil.memByteBuffer(frame.mapped(), 256);
 			lastViewProj.get(0, fb);
 			fb.putFloat(64, (float) cameraDelta.x).putFloat(68, (float) cameraDelta.y).putFloat(72, (float) cameraDelta.z)
-				.putFloat(76, accumulate ? 3 : 1).putInt(80, denoise ? 1 : 0);
+				.putFloat(76, accumulate ? 3 : 1).putInt(80, denoise ? 1 : 0)
+				.putFloat(84, (float) (0.02 + 0.1 * mc.options.gamma().get()));
 			lastViewProj.set(viewProj);
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(12, s);
+			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(13, s);
 			w.get(0).sType$Default().dstBinding(0).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
 				.pNext(VkWriteDescriptorSetAccelerationStructureKHR.calloc(s).sType$Default().pAccelerationStructures(s.longs(Scene.tlas)));
 			w.get(1).sType$Default().dstBinding(1).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -291,7 +293,7 @@ public final class PathTracer {
 			w.get(5).sType$Default().dstBinding(5).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
 				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(sampler).imageView(depth.vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
 			Memory.Img[] rr = {RayReconstruction.color, RayReconstruction.diffuse, RayReconstruction.specular,
-				RayReconstruction.normals, RayReconstruction.depth, RayReconstruction.motion};
+				RayReconstruction.normals, RayReconstruction.depth, RayReconstruction.motion, RayReconstruction.hitDistance};
 			for (int i = 0; i < rr.length; i++) {
 				w.get(6 + i).sType$Default().dstBinding(6 + i).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
 					.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(rr[i].view()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
@@ -323,7 +325,11 @@ public final class PathTracer {
 			if (denoise) {
 				GpuTimers.begin(cmd, GpuTimers.Pass.RAY_RECONSTRUCTION);
 				// DLSS's jitter is how far the projection moved the picture: the opposite of where our samples went.
-				boolean ok = RayReconstruction.evaluate(cmd, -jitterX, -jitterY);
+				// RR's world: camera-relative axes (as the normals), positions from a fixed origin near the player.
+				if (rrOrigin == null || rrOrigin.distanceToSqr(cameraPos) > 4096 * 4096) rrOrigin = cameraPos;
+				Matrix4f worldToView = new Matrix4f(viewRotation).translate((float) (rrOrigin.x - cameraPos.x),
+					(float) (rrOrigin.y - cameraPos.y), (float) (rrOrigin.z - cameraPos.z));
+				boolean ok = RayReconstruction.evaluate(cmd, -jitterX, -jitterY, worldToView, levelProjection);
 				GpuTimers.end(cmd, GpuTimers.Pass.RAY_RECONSTRUCTION);
 				VulkanCommandEncoder.memoryBarrier(cmd, s);
 				if (ok) resolve(cmd, color, depth, main.width, main.height, s);
