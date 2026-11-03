@@ -120,7 +120,6 @@ public final class FrameGenSpike {
 
 	/** Mojang is about to blit {@code mainView} to its swapchain image: hand it the interpolated frame instead. */
 	public static GpuTextureView beforeBlit(VulkanCommandEncoder encoder, GpuTextureView mainView) {
-		awaitPacedPresent();
 		generating = false;
 		if (failed || !captured) {
 			reset = true; // menus / no world: history is stale
@@ -166,6 +165,7 @@ public final class FrameGenSpike {
 			encoder.waitSemaphore(acquire, 0L, 65536L);
 			encoder.execute(cmd);
 			encoder.signalSemaphore(presentSems[image], 0L, 4096L);
+			encoder.signalSemaphore(frameDone, ++frameDoneValue, 65536L); // the pacer times the real present from here
 			extraSwapchain = swapchain;
 			extraImage = image;
 			Reflex.setPresentsPerFrame(2);
@@ -190,24 +190,25 @@ public final class FrameGenSpike {
 		return t;
 	});
 	private static Future<?> pacedPresent;
-	private static long lastPresentNanos;
+	/** Timeline semaphore: value n = frame n's GPU work (DLSS-G and both blits) is done. */
+	private static long frameDone, frameDoneValue;
+	/** Pacer thread only: when the last frame's GPU work finished, and the smoothed time between them. */
+	private static long lastDoneNanos, pacedFrames;
 	private static double frameNanos;
 
 	/**
-	 * After Mojang presented the interpolated frame: present the real one half a frame later, from the pacer
-	 * thread. Back to back they'd land on consecutive refreshes and the motion would still move at the base rate.
+	 * After Mojang presented the interpolated frame: present the real one half a frame after both are ready,
+	 * from the pacer thread. Both only become ready when the GPU finishes the frame (the CPU is well ahead when
+	 * GPU-bound), so back to back they'd land on consecutive refreshes and motion would still move at the base rate.
 	 */
 	public static void afterPresent(VkQueue queue) {
 		realFrames++;
 		presents++;
 		long now = System.nanoTime();
-		if (lastPresentNanos != 0) frameNanos = frameNanos == 0 ? now - lastPresentNanos : frameNanos * 0.9 + (now - lastPresentNanos) * 0.1;
-		lastPresentNanos = now;
 		if (extraImage >= 0) {
-			long sem = presentSems[extraImage], swapchain = extraSwapchain, id = Reflex.presentId();
+			long sem = presentSems[extraImage], swapchain = extraSwapchain, id = Reflex.presentId(), value = frameDoneValue;
 			int image = extraImage;
-			long due = now + (long) Math.min(frameNanos / 2, 50e6);
-			pacedPresent = pacer.submit(() -> presentReal(queue, sem, swapchain, image, id, due));
+			pacedPresent = pacer.submit(() -> presentReal(queue, sem, swapchain, image, id, value));
 			presents++;
 			extraImage = -1;
 		}
@@ -221,9 +222,20 @@ public final class FrameGenSpike {
 		}
 	}
 
-	private static void presentReal(VkQueue queue, long semaphore, long swapchain, int image, long id, long due) {
-		for (long wait; (wait = due - System.nanoTime()) > 0; ) LockSupport.parkNanos(wait);
+	private static void presentReal(VkQueue queue, long semaphore, long swapchain, int image, long id, long frameValue) {
 		try (MemoryStack s = MemoryStack.stackPush()) {
+			vkWaitSemaphores(device.vkDevice(), VkSemaphoreWaitInfo.calloc(s).sType$Default().semaphoreCount(1)
+				.pSemaphores(s.longs(frameDone)).pValues(s.longs(frameValue)), 1_000_000_000L);
+			long done = System.nanoTime();
+			if (lastDoneNanos != 0) {
+				long dt = Math.min(done - lastDoneNanos, 100_000_000L);
+				frameNanos = frameNanos == 0 ? dt : frameNanos * 0.9 + dt * 0.1;
+			}
+			lastDoneNanos = done;
+			long due = done + (long) (frameNanos / 2);
+			if (++pacedFrames % 600 == 0) Helio.LOG.info("FG pacing: GPU frame {} ms, real frame {} ms after it", String.format("%.1f", frameNanos / 1e6), String.format("%.1f", frameNanos / 2e6));
+			for (long wait; (wait = due - System.nanoTime()) > 0; ) LockSupport.parkNanos(wait);
+
 			VkPresentInfoKHR info = VkPresentInfoKHR.calloc(s).sType$Default()
 				.pWaitSemaphores(s.longs(semaphore)).swapchainCount(1).pSwapchains(s.longs(swapchain)).pImageIndices(s.ints(image));
 			if (id != 0) info.pNext(VkPresentIdKHR.calloc(s).sType$Default().swapchainCount(1).pPresentIds(s.longs(id)).address());
@@ -235,7 +247,31 @@ public final class FrameGenSpike {
 		}
 	}
 
-	/** Before Mojang presents or acquires again: last frame's paced real present has to have happened. */
+	/**
+	 * Mojang's present of the interpolated frame, handed to the pacer thread: queued behind last frame's paced
+	 * real present, so the order stays generated, real, generated, real without the render thread ever waiting
+	 * (waiting stalled the GPU, and the pacer's measured frame time grew with every stall).
+	 */
+	public static int presentLater(VkQueue queue, VkPresentInfoKHR info) {
+		long[] semaphores = new long[info.waitSemaphoreCount()];
+		info.pWaitSemaphores().get(0, semaphores);
+		long swapchain = info.pSwapchains().get(0);
+		int image = info.pImageIndices().get(0);
+		pacedPresent = pacer.submit(() -> {
+			try (MemoryStack s = MemoryStack.stackPush()) {
+				VkPresentInfoKHR copy = VkPresentInfoKHR.calloc(s).sType$Default().pWaitSemaphores(s.longs(semaphores))
+					.swapchainCount(1).pSwapchains(s.longs(swapchain)).pImageIndices(s.ints(image));
+				int r;
+				synchronized (QUEUE_LOCK) {
+					r = vkQueuePresentKHR(queue, copy);
+				}
+				if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) Helio.LOG.warn("FG: interpolated-frame present returned {}", r);
+			}
+		});
+		return VK_SUCCESS;
+	}
+
+	/** Before anything waits for the queue to drain (or FG shuts down): the pacer's presents go out first. */
 	public static void awaitPacedPresent() {
 		Future<?> f = pacedPresent;
 		if (f == null) return;
@@ -277,6 +313,9 @@ public final class FrameGenSpike {
 				check(vkCreateSemaphore(vk, VkSemaphoreCreateInfo.calloc(s).sType$Default(), null, h), "semaphore");
 				acquireSems[i] = h.get(0);
 			}
+			check(vkCreateSemaphore(vk, VkSemaphoreCreateInfo.calloc(s).sType$Default()
+				.pNext(VkSemaphoreTypeCreateInfo.calloc(s).sType$Default().semaphoreType(VK_SEMAPHORE_TYPE_TIMELINE)), null, h), "timeline semaphore");
+			frameDone = h.get(0);
 		}
 		params = Ngx.allocateParameters();
 		Helio.LOG.info("Frame generation spike initialised");

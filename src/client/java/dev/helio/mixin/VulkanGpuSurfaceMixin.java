@@ -16,12 +16,14 @@ import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkPresentIdKHR;
 import org.lwjgl.vulkan.VkPresentInfoKHR;
 import org.lwjgl.vulkan.VkQueue;
+import org.lwjgl.vulkan.VkSurfaceCapabilitiesKHR;
 import org.lwjgl.vulkan.VkSwapchainCreateInfoKHR;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.ModifyArg;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
@@ -57,17 +59,26 @@ public class VulkanGpuSurfaceMixin {
 		FrameGenSpike.afterBlit((VulkanCommandEncoder) encoder, swapchain, swapchainImages, swapchainWidth, swapchainHeight);
 	}
 
+	// Frame generation shows two images per frame, and its pacer keeps them queued for up to a frame while the
+	// render thread goes ahead: 3 images (Mojang's choice) run out and acquiring stalls for seconds.
+	@ModifyArg(method = "configure", at = @At(value = "INVOKE", target = "Lorg/lwjgl/vulkan/VkSwapchainCreateInfoKHR;minImageCount(I)Lorg/lwjgl/vulkan/VkSwapchainCreateInfoKHR;"))
+	private int helio$moreImages(int count, @Local VkSurfaceCapabilitiesKHR capabilities) {
+		int max = capabilities.maxImageCount(); // 0: no limit
+		return max == 0 ? Math.max(count, 8) : Math.max(count, Math.min(8, max));
+	}
+
 	@Inject(method = "present", at = @At("HEAD"))
 	private void helio$presentStart(CallbackInfo ci) {
-		FrameGenSpike.awaitPacedPresent();
 		Reflex.presentStart();
 	}
 
-	// Mojang's present carries this frame's present ID unless it is showing the interpolated frame.
+	// Mojang's present carries this frame's present ID; when it shows the interpolated frame, the pacer presents it.
 	@WrapOperation(method = "present", at = @At(value = "INVOKE",
 		target = "Lorg/lwjgl/vulkan/KHRSwapchain;vkQueuePresentKHR(Lorg/lwjgl/vulkan/VkQueue;Lorg/lwjgl/vulkan/VkPresentInfoKHR;)I"))
 	private int helio$presentId(VkQueue queue, VkPresentInfoKHR info, Operation<Integer> original) {
-		long id = FrameGenSpike.presentsRealFrameItself() ? 0 : Reflex.presentId();
+		if (FrameGenSpike.presentsRealFrameItself()) return FrameGenSpike.presentLater(queue, info); // paced with the real frame
+		FrameGenSpike.awaitPacedPresent(); // frame generation just stopped: its last presents go first
+		long id = Reflex.presentId();
 		try (MemoryStack s = MemoryStack.stackPush()) {
 			if (id != 0) info.pNext(VkPresentIdKHR.calloc(s).sType$Default().pNext(info.pNext()).swapchainCount(1).pPresentIds(s.longs(id)).address());
 			synchronized (FrameGenSpike.QUEUE_LOCK) {
