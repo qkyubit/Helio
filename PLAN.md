@@ -577,7 +577,12 @@ output near 180 Hz and no HUD smearing.
    - User-checked (180 Hz, VRR off): generated frames shown correctly; same scene no
      FG 70 fps, 2x 55 -> 112, 3x 50 -> 150, 4x 43 -> 171 (cap). DLSS-G GPU time
      3.1 / 4.5 / 6.6 ms is the drop. VRR on flickered (monitor 50-180 Hz).
-   - [ ] DLSS-G on the present queue overlapping the next frame's tracing.
+   - [x] Tried and reverted: DLSS-G on the present queue, overlapping the next frame's
+     tracing. 2x unchanged, 3x/4x worse (4x 20 fps base): that queue is in the graphics
+     family, so it time-slices with tracing instead of running alongside, and the single
+     pacer thread can't start a frame's evaluate until the last frame's presents are out.
+     M7: retry on the async compute queue (family 2, if DLSS-G accepts it), with a
+     separate thread for presents.
    - [ ] M4 exit check.
 
 ### M5 — PBR and 3D resource packs
