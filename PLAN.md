@@ -548,8 +548,14 @@ output near 180 Hz and no HUD smearing.
    light tints the ceiling).
    Done alongside: "Cave Brightness" setting (0–100%, default 25%). It scales the Brightness
    floor down where vanilla's sky light is 0, blending by sky level. User-checked.
-5. [ ] Reflections under RR: specular hit distance + matrices (or specular
-   motion vectors) for water and glass; transparency guide if particles ghost.
+5. [x] Reflections and transparency under RR: the reflection ray's hit distance plus
+   world-to-view / view-to-clip matrices let RR move reflections. Where the first water /
+   glass / ice surface is mostly seen through (transmitted share over Fresnel), RR's depth
+   and motion guides sit on what's behind it, at its distance along the unbent view ray
+   (primary surface replacement, as Portal RTX does). The surface normal stays, for the
+   reflection. Sky behind glass is put far away. No transparency guide: vanilla draws
+   particles after the tracer and DLSS, so they never pass through RR. User-checked: no
+   smearing behind water and glass.
 6. [ ] Multi frame generation 3x/4x, HUD after FG input, presets map to DLSS
    modes; M4 exit check.
 
@@ -585,6 +591,10 @@ Exit: side-by-side screenshots you're proud of; HDR verified on your monitor.
   RR hides it, ray budgets per preset.
 - VRAM budget for 16 GB (BLAS pool, atlas sizes), RAM budget for 16 GB host.
 - CPU: mesh → BLAS input off the render thread; minimise FFM calls per frame.
+- Distance-scaled ray budget: fewer rays for far terrain (e.g. bounce, block light
+  and glass/water secondary rays skipped or traced every other frame past a
+  distance, with the radiance cache standing in), since far pixels are small and
+  RR smooths them anyway.
 
 Exit: meet targets per preset and no regressions vs M4 numbers.
 
@@ -603,6 +613,10 @@ checking each has a 26.3 Fabric build on Modrinth:
 | ImmediatelyFast | immediate-mode rendering | touches the same Vulkan paths as us |
 | EntityCulling / More Culling | culling | can remove geometry RT needs (shadows/reflections) |
 | Voxy | LODs (own GPU-driven renderer) | stretch: depth-composite its LOD pass first, then LOD sections as low-detail TLAS instances so far terrain casts shadows / shows in reflections |
+
+With Voxy, LOD terrain past a distance threshold (configurable, default around
+the RT distance) stays raster: Voxy draws it, Helio composites over it by depth
+and spends no rays on it. Only LODs inside the threshold, if any, join the TLAS.
 
 Iris shader packs are out of scope: Helio is the shader.
 

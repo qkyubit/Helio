@@ -732,6 +732,12 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 	// is tracked by toggling.
 	vec3 result = vec3(0.0), weight = vec3(1.0);
 	bool inWater = pc.fogColor.w != 0.0, inGlass = false, reflected = false;
+	// Where RR's guides sit when the first surface is mostly seen through: on what's behind it, at its distance
+	// along the unbent view ray (Portal RTX's primary surface replacement), so it reprojects with its own
+	// parallax instead of the water's or glass's. The normal stays the surface's, for its reflection.
+	vec3 viewDir = dir;
+	float travelled = t;
+	bool replace = false;
 	if (inWater) {
 		waterSigma = -log(WATER_TINT) * WATER_ABSORPTION;
 		waterGlow = srgbToLinear(pc.fogColor.rgb); // vanilla's underwater fog: what deep water looks like
@@ -739,6 +745,10 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 	for (int layer = 0; ; layer++) {
 		if (inWater && !inGlass) throughWater(t, result, weight);
 		if (h.kind != KIND_TRANSLUCENT && !h.glass || layer == MAX_LAYERS - 1) {
+			if (replace) {
+				guidePos = camera + viewDir * travelled - pc.cameraInScene.xyz;
+				guideMotion = h.motion;
+			}
 			vec3 diffuse = vec3(1.0);
 			if (h.metal || h.gem) {
 				vec3 f0 = h.metal ? h.albedo : vec3(GEM_F0);
@@ -790,6 +800,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		} else {
 			weight *= separate || pc.stochastic == 0.0 ? 1.0 - fresnel : 1.0;
 			float opacity = h.opacity * (h.water ? WATER_OPACITY : 1.0);
+			if (layer == 0) replace = (1.0 - fresnel) * (1.0 - opacity) > fresnel;
 			result += weight * opacity * surfaceRadiance(h, pos);
 			guideAlbedo += weight * opacity * h.albedo;
 			weight *= 1.0 - opacity;
@@ -804,9 +815,11 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		TRACE_CAMERA(rq, from, dir, 512.0, MASK_OPAQUE_SCENE | MASK_TRANSLUCENT)
 		if (!HIT(rq)) {
 			result += weight * (inWater && !inGlass ? waterGlow : skyRadiance(dir));
+			if (replace) guidePos = viewDir * 4096.0; // sky through glass: far away, barely moving
 			break;
 		}
 		t = rayQueryGetIntersectionTEXT(rq, true);
+		travelled += t;
 		pos = from + dir * t;
 		h = shade(rq, dir);
 	}
