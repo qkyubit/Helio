@@ -36,11 +36,14 @@ import static org.lwjgl.system.MemoryUtil.*;
  * {@link Scene} turns it into one BLAS per frame; the path tracer shades it and puts its colour over
  * vanilla's own entity pixels (vanilla still draws them, so their depth is there for translucents).
  * <p>
- * Vertices are vanilla's BLOCK layout plus a texture index, {@value #STRIDE} bytes: camera-relative
- * position, colour, UV, light levels, index into {@link #textures}.
+ * Vertices are vanilla's BLOCK layout plus a texture index and a motion offset, {@value #STRIDE} bytes:
+ * camera-relative position, colour, UV, light levels, index into {@link #textures}, and where the vertex was
+ * last frame relative to last frame's camera minus where it is now (NaN if unknown: camera motion only).
+ * Vanilla emits the same draws in the same order while the same entities are in view, so a draw with last
+ * frame's texture and vertex count is matched vertex for vertex (limbs included).
  */
 public final class Entities {
-	public static final int STRIDE = 32, MAX_TEXTURES = 256;
+	public static final int STRIDE = 44, MAX_TEXTURES = 256;
 	/** Texture-index flag on the first-person body's vertices: camera rays pass through it (pathtrace.comp). */
 	private static final int BODY = 1 << 16;
 	/**
@@ -69,6 +72,11 @@ public final class Entities {
 	private static long capacity;
 	static int quads;
 
+	private record Span(Identifier texture, int first, int count) {}
+	/** This frame's captured draws, and last frame's with their vertex positions (xyz floats). */
+	private static List<Span> spans = new ArrayList<>(), lastSpans = new ArrayList<>();
+	private static long lastPositions, lastCapacity;
+
 	private Entities() {}
 
 	/** Around the level's feature prepare. */
@@ -80,8 +88,23 @@ public final class Entities {
 	}
 
 	public static void end() {
+		if (capturing) keepPositions();
 		capturing = false;
 		surfaces.clear();
+	}
+
+	/** This frame's positions become next frame's "last frame". */
+	private static void keepPositions() {
+		long needed = (long) quads * 4 * 12;
+		if (needed > lastCapacity) {
+			lastCapacity = Math.max(needed, lastCapacity * 2);
+			lastPositions = nmemRealloc(lastPositions, lastCapacity);
+		}
+		for (int v = 0; v < quads * 4; v++) memCopy(vertices + (long) v * STRIDE, lastPositions + v * 12L, 12);
+		List<Span> t = lastSpans;
+		lastSpans = spans;
+		spans = t;
+		spans.clear();
 	}
 
 	public static void tag(StagedVertexBuffer.Draw draw, RenderType type) {
@@ -130,7 +153,18 @@ public final class Entities {
 		if (!capturing) return;
 		for (StagedVertexBuffer.Draw draw : draws) {
 			Integer texture = surfaces.get(draw);
-			if (texture != null) append((StagedDrawAccessor) draw, texture);
+			if (texture == null) continue;
+			int first = quads * 4;
+			append((StagedDrawAccessor) draw, texture);
+			Span span = new Span(textures.get(texture & 0xFFFF), first, quads * 4 - first);
+			int i = spans.size();
+			spans.add(span);
+			Span last = i < lastSpans.size() ? lastSpans.get(i) : null;
+			if (last == null || !last.texture.equals(span.texture) || last.count != span.count) continue;
+			for (int v = 0; v < span.count; v++) {
+				long now = vertices + (long) (first + v) * STRIDE, then = lastPositions + (long) (last.first + v) * 12;
+				for (int c = 0; c < 3; c++) memPutFloat(now + 32 + c * 4, memGetFloat(then + c * 4) - memGetFloat(now + c * 4));
+			}
 		}
 	}
 
@@ -156,6 +190,7 @@ public final class Entities {
 				memCopy(src + uv.offset(), dst + 16, 8);
 				memPutInt(dst + 24, light != null ? memGetInt(src + light.offset()) : FULL_SKY_LIGHT);
 				memPutInt(dst + 28, texture);
+				memPutFloat(dst + 32, Float.NaN); // motion: filled in by capture() if last frame matches
 			}
 			quads += count / 4;
 		}

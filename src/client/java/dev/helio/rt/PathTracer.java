@@ -55,6 +55,7 @@ public final class PathTracer {
 	private static long sampler, setLayout, textureSetLayout, descriptorPool, pipelineLayout, pipeline;
 	private static long compositeSetLayout, compositeLayout, compositePipeline;
 	private static long resolveSetLayout, resolveLayout, resolvePipeline;
+	private static long motionSetLayout, motionLayout, motionPipeline;
 	private static boolean dispatched;
 	private static final int RING = 4;
 	/** Entity texture arrays, one per frame in flight (rewritten {@value #RING} frames later). */
@@ -197,6 +198,15 @@ public final class PathTracer {
 			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(resolveSetLayout)), null, h), "resolve layout");
 			resolveLayout = h.get(0);
 			resolvePipeline = computePipeline(vk, "rr_resolve.comp", resolveLayout, s);
+
+			VkDescriptorSetLayoutBinding.Buffer mb = VkDescriptorSetLayoutBinding.calloc(3, s);
+			for (int i = 0; i < 3; i++) mb.get(i).binding(i).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+			check(vkCreateDescriptorSetLayout(vk, VkDescriptorSetLayoutCreateInfo.calloc(s).sType$Default()
+				.flags(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR).pBindings(mb), null, h), "motion set layout");
+			motionSetLayout = h.get(0);
+			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(motionSetLayout)), null, h), "motion layout");
+			motionLayout = h.get(0);
+			motionPipeline = computePipeline(vk, "entity_motion.comp", motionLayout, s);
 			for (int i = 0; i < RING; i++) frameData[i] = Memory.buffer(256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
 		}
 		Helio.LOG.info("Path tracer initialised");
@@ -341,6 +351,26 @@ public final class PathTracer {
 		}
 	}
 
+	/**
+	 * After frame generation's camera-only motion pass: where this frame's primary rays hit an entity, its own
+	 * motion from DLSS's motion vectors instead (entity_motion.comp). Only when DLSS ran this frame.
+	 */
+	public static void entityMotion(VkCommandBuffer cmd, VulkanGpuTextureView fgMotion, int width, int height) {
+		if (!dispatched || !lastUpscaled || failed) return;
+		try (MemoryStack s = MemoryStack.stackPush()) {
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, motionPipeline);
+			long[] views = {fgMotion.vkImageView(), Dlss.motion.view(), Dlss.hitDepth.view()};
+			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(3, s);
+			for (int i = 0; i < 3; i++) {
+				w.get(i).sType$Default().dstBinding(i).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+					.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(views[i]).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+			}
+			vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, motionLayout, 0, w);
+			vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+			VulkanCommandEncoder.memoryBarrier(cmd, s);
+		}
+	}
+
 	/** After DLSS: its output, tonemapped, into the main colour (rr_resolve.comp). */
 	private static void resolve(VkCommandBuffer cmd, VulkanGpuTextureView color, VulkanGpuTextureView depth, int width, int height, MemoryStack s) {
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolvePipeline);
@@ -433,6 +463,9 @@ public final class PathTracer {
 		vkDestroyPipelineLayout(vk, pipelineLayout, null);
 		Dlss.destroyImages();
 		for (Memory.Buf b : frameData) if (b != null) b.free();
+		vkDestroyPipeline(vk, motionPipeline, null);
+		vkDestroyPipelineLayout(vk, motionLayout, null);
+		vkDestroyDescriptorSetLayout(vk, motionSetLayout, null);
 		vkDestroyPipeline(vk, resolvePipeline, null);
 		vkDestroyPipelineLayout(vk, resolveLayout, null);
 		vkDestroyDescriptorSetLayout(vk, resolveSetLayout, null);

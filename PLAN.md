@@ -530,7 +530,12 @@ output near 180 Hz and no HUD smearing.
    (tracing 5.7 ms, RR 4.5 ms), Hybrid 87 fps (2.2 ms + SR 1.5 ms), anti-
    aliasing visible. Not done: DLSS with ray tracing off (needs Mojang's
    render targets at render size), deferred.
-3. [ ] Entity motion vectors (previous-frame entity vertices) for RR and FG.
+3. [x] Entity motion vectors: entity vertices carry a motion offset (last frame's
+   camera-relative position minus now's), matched vertex for vertex when a
+   captured draw has last frame's texture and vertex count (vanilla keeps draw
+   order stable; capture runs before translucent sorting), else camera-only.
+   DLSS gets it per pixel; `entity_motion.comp` writes it into frame
+   generation's motion at entity pixels. User-checked: no trails.
 4. [ ] SHaRC-style radiance cache: more bounces for about the cost of one.
 5. [ ] Reflections under RR: specular hit distance + matrices (or specular
    motion vectors) for water and glass; transparency guide if particles ghost.

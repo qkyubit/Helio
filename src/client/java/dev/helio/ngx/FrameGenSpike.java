@@ -11,6 +11,7 @@ import dev.helio.Helio;
 import dev.helio.config.HelioConfig;
 import dev.helio.vk.GpuTimers;
 import dev.helio.mixin.VulkanCommandEncoderAccessor;
+import dev.helio.rt.PathTracer;
 import dev.helio.vk.Shaders;
 import dev.helio.vk.Reflex;
 import it.unimi.dsi.fastutil.longs.LongList;
@@ -111,6 +112,7 @@ public final class FrameGenSpike {
 			VkCommandBuffer cmd = ((VulkanCommandEncoderAccessor) encoder).helio$commandBuffer();
 			GpuTimers.begin(cmd, GpuTimers.Pass.FG_MOTION);
 			dispatchMotion(cmd);
+			PathTracer.entityMotion(cmd, motionView, width, height);
 			GpuTimers.end(cmd, GpuTimers.Pass.FG_MOTION);
 			captured = true;
 		} catch (Throwable t) {

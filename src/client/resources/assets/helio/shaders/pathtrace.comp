@@ -30,7 +30,7 @@ layout(binding = 13, r32f) uniform writeonly image2D rrHitDepth;   // entity (+)
 layout(set = 1, binding = 0) uniform sampler2D entityTextures[256]; // this frame's entity textures (Entities.textures)
 
 // Vertices in vanilla's BLOCK layout: position xyz, colour, UV0 uv, light levels (2 shorts); 7 floats for
-// sections, 8 for entities, whose 8th is the index into entityTextures.
+// sections, 11 for entities: then the index into entityTextures and a motion offset (Entities.java).
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Vertices { float v[]; };
 // Light-emitting blocks around the camera (Lights.java): a table of the sections in range, each pointing at
 // its run of lights.
@@ -120,10 +120,11 @@ struct Hit {
 	bool foliage;   // leaves and plants (Scene.FOLIAGE_MARK in the cutout layer): lets light through
 	bool glass;     // refracts: stained glass, ice and plain glass (translucent layer)
 	bool metal, gem; // polished (Scene.METAL_MARK, GEM_MARK): get a reflection ray
+	vec3 motion;    // entities: last frame's position relative to last frame's camera, minus now's; NaN if unknown
 };
 
 uint strideOf(uint kind) {
-	return kind == KIND_DYNAMIC ? 8u : 7u;
+	return kind == KIND_DYNAMIC ? 11u : 7u;
 }
 
 vec3 posAt(Vertices vb, uint vertex, uint stride) {
@@ -146,7 +147,7 @@ vec2 lightAt(Vertices vb, uint vertex, uint stride) {
 // The block atlas for sections; the entity's own texture for entities.
 vec4 texel(Vertices vb, uint kind, uint vertex, vec2 uv) {
 	if (kind != KIND_DYNAMIC) return textureLod(blockAtlas, uv, 0.0);
-	return textureLod(entityTextures[nonuniformEXT(floatBitsToUint(vb.v[vertex * 8u + 7u]) & 0xFFFFu)], uv, 0.0);
+	return textureLod(entityTextures[nonuniformEXT(floatBitsToUint(vb.v[vertex * 11u + 7u]) & 0xFFFFu)], uv, 0.0);
 }
 
 // Quads are indexed 0 1 2, 2 3 0.
@@ -165,7 +166,7 @@ bool cutoutHit(rayQueryEXT rq) {
 	Vertices vb = Vertices(inst.vertices);
 	uint stride = strideOf(inst.kind);
 	uvec3 t = triangleVertices(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false));
-	if (cameraRay && inst.kind == KIND_DYNAMIC && (floatBitsToUint(vb.v[t.x * 8u + 7u]) & 0x10000u) != 0u) return false;
+	if (cameraRay && inst.kind == KIND_DYNAMIC && (floatBitsToUint(vb.v[t.x * 11u + 7u]) & 0x10000u) != 0u) return false;
 	// Plain glass (Scene.GLASS_MARK): camera rays stop at its clear parts too, to refract there; light still passes them.
 	if (cameraRay && round((1.0 - tintAt(vb, t.x, stride).a) * 255.0) == 2.0) return true;
 	vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, false);
@@ -232,6 +233,13 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 	h.tint = pow(tint, vec3(2.2));
 	h.opacity = tex.a;
 	h.light = lightAt(vb, t.x, stride) * w.x + lightAt(vb, t.y, stride) * w.y + lightAt(vb, t.z, stride) * w.z;
+	h.motion = vec3(0.0);
+	if (inst.kind == KIND_DYNAMIC) {
+		for (int i = 0; i < 3; i++) {
+			uint vtx = t[i];
+			h.motion += vec3(vb.v[vtx * 11u + 8u], vb.v[vtx * 11u + 9u], vb.v[vtx * 11u + 10u]) * w[i];
+		}
+	}
 	float level = round((1.0 - tintAt(vb, t.x, stride).a) * 255.0);
 	h.water = inst.kind == KIND_TRANSLUCENT && level == 1.0;
 	h.foliage = inst.kind == KIND_CUTOUT && level == 1.0;
@@ -537,6 +545,7 @@ float hitDepth;
 // reflectance, normal, roughness and position relative to the camera.
 vec3 guideAlbedo, guideSpecular, guideNormal, guidePos;
 float guideRoughness, guideHitDistance; // hit distance: of the first surface's reflection ray, for RR's reflections
+vec3 guideMotion; // an entity hit's motion offset (Hit.motion)
 
 // Linear radiance seen through pixel position `pixel` (fractional); coverage 0 where vanilla's picture stays.
 vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
@@ -569,6 +578,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		}
 	}
 	guidePos = pos - pc.cameraInScene.xyz;
+	guideMotion = h.motion;
 	guideNormal = h.normal;
 	guideRoughness = h.kind == KIND_TRANSLUCENT || h.glass ? 0.0 : 1.0;
 	guideAlbedo = guideSpecular = vec3(0.0);
@@ -716,7 +726,10 @@ void writeDenoiserInputs(ivec2 p, ivec2 size, vec4 current, Frame frame) {
 		imageStore(rrHitDistance, p, vec4(SKY_DISTANCE));
 	}
 	vec4 clip = pc.viewProj * rel;
-	vec4 prev = frame.prevViewProj * vec4(rel.xyz + frame.cameraDelta.xyz * rel.w, rel.w);
+	// Where it was last frame, relative to last frame's camera: entities by their own motion where known, the
+	// rest of the world stood still while the camera moved.
+	bool moving = current.a > 0.0 && hitEntity && !isnan(guideMotion.x);
+	vec4 prev = frame.prevViewProj * (moving ? vec4(rel.xyz + guideMotion, 1.0) : vec4(rel.xyz + frame.cameraDelta.xyz * rel.w, rel.w));
 	imageStore(rrDepth, p, vec4(clip.z / clip.w));
 	imageStore(rrMotion, p, vec4((prev.xy / prev.w - clip.xy / clip.w) * 0.5 * vec2(size), 0.0, 0.0));
 	imageStore(rrHitDepth, p, vec4(hitEntity ? hitDepth : hitTranslucent ? -hitDepth : 0.0));

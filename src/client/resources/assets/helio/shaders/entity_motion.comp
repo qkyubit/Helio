@@ -1,0 +1,19 @@
+#version 460
+
+// Frame generation's motion vectors come from depth (camera motion only). Where the path tracer's primary ray
+// hit an entity, take the motion DLSS got instead, which knows how the entity itself moved.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, rg16f) uniform image2D fgMotion;                 // window size, UV delta now -> last frame
+layout(binding = 1, rg16f) readonly uniform image2D dlssMotion;      // render size, pixels now -> last frame
+layout(binding = 2, r32f) readonly uniform image2D hitDepth;         // render size, > 0 where an entity was hit
+
+void main() {
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy), size = imageSize(fgMotion);
+	if (any(greaterThanEqual(p, size))) return;
+	ivec2 render = imageSize(hitDepth);
+	ivec2 r = min(ivec2((vec2(p) + 0.5) * vec2(render) / vec2(size)), render - 1);
+	if (imageLoad(hitDepth, r).r <= 0.0) return;
+	imageStore(fgMotion, p, vec4(imageLoad(dlssMotion, r).xy / vec2(render), 0.0, 0.0));
+}
