@@ -38,7 +38,7 @@
 	"helio.dlss_quality.tooltip": "Resolution ray tracing renders at before DLSS upscales it: DLAA native, Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33% of the window in each direction. Lower is faster and softer.",
 	"helio.rt_distance.tooltip": "How far rays can hit geometry, capped by render distance. Lower builds less off-screen geometry.",
 	"helio.frame_generation": "Frame Generation",
-	"helio.frame_generation.tooltip": "DLSS Frame Generation. Inserts AI-generated frames between rendered ones. Works best with VSync on and 60+ rendered fps.",
+	"helio.frame_generation.tooltip": "DLSS Frame Generation. Inserts 1 to 3 AI-generated frames between rendered ones (3x and 4x need an RTX 50 series). Works best with 60+ rendered fps; aim for a multiple that stays at or under your refresh rate.",
 	"helio.reflex": "Reflex",
 	"helio.reflex.tooltip": "NVIDIA Reflex lowers input latency. Boost also keeps GPU clocks up.",
 	"helio.reflex.off": "Off",

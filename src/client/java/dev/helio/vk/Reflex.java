@@ -2,6 +2,7 @@ package dev.helio.vk;
 
 import dev.helio.Helio;
 import dev.helio.config.HelioConfig;
+import dev.helio.ngx.FrameGenSpike;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.*;
 
@@ -21,6 +22,9 @@ public final class Reflex {
 	private static long swapchain, timeline, frameId, lastPresentId;
 	private static boolean inFrame;
 	private static HelioConfig.ReflexMode appliedMode;
+
+	/** Render thread time in Reflex's sleep, for frame generation's pacing log (it resets it). */
+	public static volatile long sleepNanos;
 
 	private Reflex() {}
 
@@ -60,7 +64,8 @@ public final class Reflex {
 		int intervalUs = 0;
 		if (lowLatency) {
 			float refresh = refreshRate();
-			if (refresh > 0) intervalUs = (int) (1_000_000 / (refresh / presentsPerFrame) * 1.03f);
+			// 5% under with frame generation: FrameGenSpike keeps presents a refresh apart, and needs the slack.
+			if (refresh > 0) intervalUs = (int) (1_000_000 / (refresh / presentsPerFrame) * (presentsPerFrame > 1 ? 1.05f : 1.03f));
 		}
 		appliedPresentsPerFrame = presentsPerFrame;
 		appliedMode = mode;
@@ -79,7 +84,7 @@ public final class Reflex {
 		presentsPerFrame = n;
 	}
 
-	private static float refreshRate() {
+	public static float refreshRate() {
 		int display = org.lwjgl.sdl.SDLVideo.SDL_GetDisplayForWindow(net.minecraft.client.Minecraft.getInstance().getWindow().handle());
 		var mode = display == 0 ? null : org.lwjgl.sdl.SDLVideo.SDL_GetCurrentDisplayMode(display);
 		return mode == null ? 0 : mode.refresh_rate();
@@ -90,11 +95,19 @@ public final class Reflex {
 		if (!active()) return;
 		if (presentsPerFrame != appliedPresentsPerFrame || HelioConfig.current.reflex != appliedMode) applySleepMode();
 		frameId++;
-		if (appliedMode != HelioConfig.ReflexMode.OFF) {
+		if (appliedMode != HelioConfig.ReflexMode.OFF && FrameGenSpike.takesOverSwapchain()) {
+			// The driver's latency sleep goes by the game's own acquires and presents: with frame generation's pacer
+			// presenting everything it slept the game to half speed (60 -> 40 fps at 2x). The same idea by hand.
+			long start = System.nanoTime();
+			FrameGenSpike.limitFrameStart();
+			sleepNanos += System.nanoTime() - start;
+		} else if (appliedMode != HelioConfig.ReflexMode.OFF) {
 			try (MemoryStack s = MemoryStack.stackPush()) {
+				long start = System.nanoTime();
 				vkLatencySleepNV(device, swapchain, VkLatencySleepInfoNV.calloc(s).sType$Default().signalSemaphore(timeline).value(frameId));
 				vkWaitSemaphores(device, VkSemaphoreWaitInfo.calloc(s).sType$Default().semaphoreCount(1)
 					.pSemaphores(s.longs(timeline)).pValues(s.longs(frameId)), 100_000_000L);
+				sleepNanos += System.nanoTime() - start;
 			}
 		}
 		inFrame = true;

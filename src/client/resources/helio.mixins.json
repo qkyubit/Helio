@@ -23,6 +23,7 @@
 		"StagedVertexBufferMixin",
 		"TextureBindingAccessor",
 		"ViewAreaAccessor",
+		"VulkanBackendMixin",
 		"VulkanCommandEncoderAccessor",
 		"VulkanCommandEncoderMixin",
 		"VulkanConstMixin",

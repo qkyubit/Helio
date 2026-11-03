@@ -27,7 +27,6 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
-import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -39,17 +38,16 @@ import static org.lwjgl.vulkan.KHRSwapchain.*;
 import static org.lwjgl.vulkan.VK12.*;
 
 /**
- * M0 spike: DLSS Frame Generation (2x) presented by Helio itself.
+ * DLSS Frame Generation (2x, or multi frame generation 3x/4x) presented by Helio itself.
  * <p>
- * Raw NGX DLSS-G (no Streamline) only writes an interpolated image; the app presents it. Per game frame:
+ * Raw NGX DLSS-G (no Streamline) only writes interpolated images; the app presents them. Per game frame:
  * <ol>
- *   <li>After the level renders: copy depth, compute camera-only motion vectors.</li>
- *   <li>At Mojang's swapchain blit: evaluate DLSS-G (previous real frame -> this one) into {@code interp},
- *       and let Mojang's blit/present show that instead.</li>
- *   <li>Right after: acquire a second swapchain image, blit the real frame into it, present it after Mojang's.</li>
+ *   <li>After the level renders: copy depth and the HUD-less colour, compute motion vectors.</li>
+ *   <li>At Mojang's swapchain blit: evaluate DLSS-G once per generated frame (previous real frame -> this one)
+ *       into {@code interp}, and let Mojang's blit/present show the first instead.</li>
+ *   <li>Right after: acquire a swapchain image for each later generated frame and the real one, blit them in,
+ *       and present them from the pacer thread, spread evenly over the frame.</li>
  * </ol>
- * Pacing comes from FIFO (vsync): the two presents land on consecutive refreshes. Uncapped/mailbox
- * would drop the interpolated frame; real pacing (Reflex, present timing) is the next step.
  */
 public final class FrameGenSpike {
 	private static final int FEATURE_FRAME_GENERATION = 11;
@@ -61,8 +59,13 @@ public final class FrameGenSpike {
 
 	private static MemorySegment feature = MemorySegment.NULL, params = MemorySegment.NULL;
 	private static int width, height;
-	private static VulkanGpuTexture depthCopy, motion, interp;
-	private static VulkanGpuTextureView depthView, motionView, interpView;
+	private static VulkanGpuTexture depthCopy, motion, hudless;
+	private static VulkanGpuTextureView depthView, motionView, hudlessView;
+	/** One per generated frame, in display order. */
+	private static VulkanGpuTexture[] interp = new VulkanGpuTexture[0];
+	private static VulkanGpuTextureView[] interpView = new VulkanGpuTextureView[0];
+	/** Generated frames per real frame this session's feature was created for. */
+	private static int generated;
 
 	private static final Matrix4f proj = new Matrix4f(), viewProj = new Matrix4f(), prevViewProj = new Matrix4f();
 	private static final Matrix4f lastViewProj = new Matrix4f();
@@ -71,12 +74,9 @@ public final class FrameGenSpike {
 	private static float far;
 	private static boolean captured, generating, reset = true;
 
-	// Second present per frame.
-	private static final long[] acquireSems = new long[4];
-	private static int acquireIndex;
-	private static long[] presentSems = new long[0];
-	private static long semsForSwapchain, extraSwapchain;
-	private static int extraImage = -1;
+	// This frame's presents for the pacer besides Mojang's: PacedPresenter staging set and frame count (0: none).
+	private static int pendingSet, pendingCount;
+	private static long stagedSwapchain;
 
 	// Stats for the overlay, over 1 s windows.
 	private static long statsStart, realFrames, presents;
@@ -90,7 +90,7 @@ public final class FrameGenSpike {
 		try {
 			if (device == null) init(Helio.device);
 			RenderTarget main = Minecraft.getInstance().gameRenderer.mainRenderTarget();
-			ensureTargets(main.width, main.height);
+			ensureTargets(main.width, main.height, Math.min(HelioConfig.current.frameGeneration - 1, Helio.ngxCaps.mfgMax()));
 
 			proj.set(projection);
 			viewProj.set(projection).mul(viewRotation);
@@ -109,6 +109,9 @@ public final class FrameGenSpike {
 
 			VulkanCommandEncoder encoder = device.createCommandEncoder();
 			encoder.copyTextureToTexture(main.getDepthTexture(), depthCopy, 0, 0, 0, 0, 0, width, height);
+			// The picture before the hand and GUI go on: DLSS-G keeps what differs from it (the HUD) from the
+			// real frame instead of interpolating it.
+			encoder.copyTextureToTexture(main.getColorTexture(), hudless, 0, 0, 0, 0, 0, width, height);
 			VkCommandBuffer cmd = ((VulkanCommandEncoderAccessor) encoder).helio$commandBuffer();
 			GpuTimers.begin(cmd, GpuTimers.Pass.FG_MOTION);
 			dispatchMotion(cmd);
@@ -120,65 +123,106 @@ public final class FrameGenSpike {
 		}
 	}
 
-	/** Mojang is about to blit {@code mainView} to its swapchain image: hand it the interpolated frame instead. */
-	public static GpuTextureView beforeBlit(VulkanCommandEncoder encoder, GpuTextureView mainView) {
+	/** Whether frame generation presents this frame (as it did the last): Mojang then skips acquiring an image. */
+	public static boolean takesOverSwapchain() {
+		return generating && !failed;
+	}
+
+	/**
+	 * In place of Mojang's swapchain blit: generate this frame's frames and stage them with the real one for the
+	 * pacer, which acquires and presents each when it's due (PacedPresenter). False: no frame generation this frame
+	 * (menus, no world), Mojang blits and presents as usual.
+	 */
+	public static boolean takeFrame(VulkanCommandEncoder encoder, GpuTextureView mainView, long swapchain, LongList images,
+		int swapWidth, int swapHeight, long surface, int format) {
 		generating = false;
 		if (failed || !captured) {
 			reset = true; // menus / no world: history is stale
 			Reflex.setPresentsPerFrame(1);
-			return mainView;
+			return false;
 		}
 		captured = false;
-		try {
+		try (MemoryStack s = MemoryStack.stackPush()) {
+			if (!PacedPresenter.available(device, surface)) throw new IllegalStateException("no queue to present generated frames from");
 			VkCommandBuffer cmd = ((VulkanCommandEncoderAccessor) encoder).helio$commandBuffer();
 			if (feature.equals(MemorySegment.NULL)) createFeature(cmd);
 			GpuTimers.begin(cmd, GpuTimers.Pass.DLSS_G);
-			evaluate(cmd, (VulkanGpuTextureView) mainView);
+			for (int i = 0; i < generated; i++) evaluate(cmd, (VulkanGpuTextureView) mainView, i);
 			GpuTimers.end(cmd, GpuTimers.Pass.DLSS_G);
-			try (MemoryStack s = MemoryStack.stackPush()) {
-				VulkanCommandEncoder.memoryBarrier(cmd, s);
-			}
+			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			reset = false;
-			generating = true;
-			return interpView;
-		} catch (Throwable t) {
-			fail(t);
-			return mainView;
-		}
-	}
 
-	/** After Mojang's blit (of the interpolated frame): queue the real frame on a second swapchain image. */
-	public static void afterBlit(VulkanCommandEncoder encoder, long swapchain, LongList images, int swapWidth, int swapHeight) {
-		if (!generating) return;
-		try (MemoryStack s = MemoryStack.stackPush()) {
-			if (swapchain != semsForSwapchain) recreatePresentSems(images.size(), swapchain);
-			long acquire = acquireSems[acquireIndex = (acquireIndex + 1) % acquireSems.length];
-			IntBuffer index = s.mallocInt(1);
-			int r = vkAcquireNextImageKHR(device.vkDevice(), swapchain, 5_000_000_000L, acquire, VK_NULL_HANDLE, index);
-			if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
-				Helio.LOG.warn("FG: second acquire failed ({}), showing interpolated frame only", r);
-				return;
+			long frame = frameDoneValue + 1;
+			// The staging set this frame writes was last read by the pacer's copies SETS frames ago: those must be
+			// submitted (to wait for them on the GPU below). The pacer is normally well past that.
+			awaitPacer(frame - PacedPresenter.SETS);
+			int set = (int) (frame % PacedPresenter.SETS), count = generated + 1;
+			int w = Math.min(swapWidth, width), h = Math.min(swapHeight, height);
+			VkCommandBuffer stage = encoder.allocateAndBeginTransientCommandBuffer();
+			if (swapchain != stagedSwapchain || w != PacedPresenter.stagingWidth || h != PacedPresenter.stagingHeight
+				|| format != PacedPresenter.stagingFormat || count != stagedCount) {
+				awaitPacedPresent();
+				PacedPresenter.useSwapchain(swapchain, images.toLongArray());
+				PacedPresenter.ensureStaging(stage, count, w, h, format);
+				stagedSwapchain = swapchain;
+				stagedCount = count;
 			}
-			int image = index.get(0);
-			VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
-			VulkanGpuTexture real = (VulkanGpuTexture) Minecraft.getInstance().gameRenderer.mainRenderTarget().getColorTexture();
-			recordSwapchainBlit(s, cmd, real.vkImage(), images.getLong(image), Math.min(swapWidth, width), Math.min(swapHeight, height));
-			check(vkEndCommandBuffer(cmd), "end blit");
-			encoder.waitSemaphore(acquire, 0L, 65536L);
-			encoder.execute(cmd);
-			encoder.signalSemaphore(presentSems[image], 0L, 4096L);
-			encoder.signalSemaphore(frameDone, ++frameDoneValue, 65536L); // the pacer times the real present from here
-			extraSwapchain = swapchain;
-			extraImage = image;
-			Reflex.setPresentsPerFrame(2);
+			VulkanCommandEncoder.memoryBarrier(stage, s);
+			long real = ((VulkanGpuTexture) mainView.texture()).vkImage();
+			for (int i = 0; i < count; i++) PacedPresenter.recordStage(s, stage, i < generated ? interp[i].vkImage() : real, set, i);
+			VulkanCommandEncoder.memoryBarrier(stage, s);
+			check(vkEndCommandBuffer(stage), "end staging");
+			long reuse = PacedPresenter.setDone.get(set);
+			if (reuse > 0) encoder.waitSemaphore(PacedPresenter.copyDoneSemaphore(), reuse, 4096L);
+			encoder.execute(stage);
+			encoder.signalSemaphore(frameDone, ++frameDoneValue, 65536L); // the pacer times its presents from here
+			pendingSet = set;
+			pendingCount = count;
+			generating = true;
+			Reflex.setPresentsPerFrame(count);
+			return true;
 		} catch (Throwable t) {
 			fail(t);
+			return false;
 		}
 	}
 
-	/** True when Mojang's present this frame shows the interpolated image and Helio presents the real one after. */
+	/**
+	 * Start of a frame while frame generation presents (in place of Reflex's sleep): at most one frame queued ahead
+	 * of the GPU (the last must be done before the one after it starts), and no faster than the display shows
+	 * frames: refresh / presents per frame, 5% under (the pacer keeps presents a refresh apart).
+	 */
+	public static void limitFrameStart() {
+		long due = lastFrameStart + (long) (refreshNanos * (generated + 1) * 1.05);
+		for (long wait; (wait = due - System.nanoTime()) > 0 && wait < 100_000_000L; ) LockSupport.parkNanos(wait);
+		if (frameDoneValue > 1) try (MemoryStack s = MemoryStack.stackPush()) {
+			vkWaitSemaphores(device.vkDevice(), VkSemaphoreWaitInfo.calloc(s).sType$Default().semaphoreCount(1)
+				.pSemaphores(s.longs(frameDone)).pValues(s.longs(frameDoneValue - 1)), 100_000_000L);
+		}
+		lastFrameStart = System.nanoTime();
+	}
+
+	private static long lastFrameStart;
+
+	/** Whether a paced present found the swapchain suboptimal or out of date since the last call. */
+	public static boolean swapchainSuboptimal() {
+		return PacedPresenter.takeSuboptimal();
+	}
+
+	private static int stagedCount;
+
+	private static void awaitPacer(long frame) {
+		long start = System.nanoTime(), deadline = start + 1_000_000_000L;
+		while (pacedThrough < frame && System.nanoTime() < deadline) LockSupport.parkNanos(50_000);
+		pacerWaitNanos += System.nanoTime() - start;
+	}
+
+	/** Render thread time spent waiting, for the pacing log: on the pacer, on Mojang's acquire. */
+	public static volatile long pacerWaitNanos, acquireWaitNanos;
+
+	/** True when the pacer presents this frame's images (Mojang's present is skipped). */
 	public static boolean presentsRealFrameItself() {
-		return extraImage >= 0;
+		return pendingCount > 0;
 	}
 
 	/**
@@ -196,26 +240,37 @@ public final class FrameGenSpike {
 	private static long frameDone, frameDoneValue;
 	/** Pacer thread only: when the last frame's GPU work finished, and the smoothed time between them. */
 	private static long lastDoneNanos, pacedFrames;
-	private static double frameNanos;
+	/** The last frame (frameDone value) whose presents the pacer has all handed to the queue. */
+	private static volatile long pacedThrough;
+	private static double frameNanos, worstNanos;
+	/** Pacer thread only: when its last present went out. */
+	private static long lastPresentNanos, behindFrames;
+	/** The display's refresh period; 0 if unknown. Presents keep this far apart, plus a margin for wake-up jitter. */
+	private static volatile long refreshNanos;
+	private static final long MIN_GAP_MARGIN = 100_000;
 
 	/**
-	 * After Mojang presented the interpolated frame: present the real one half a frame after both are ready,
-	 * from the pacer thread. Both only become ready when the GPU finishes the frame (the CPU is well ahead when
-	 * GPU-bound), so back to back they'd land on consecutive refreshes and motion would still move at the base rate.
+	 * After Mojang presented the first generated frame: present the others and the real one from the pacer
+	 * thread, k / (generated + 1) of a frame after the GPU finished. They only become ready then (the CPU is well
+	 * ahead when GPU-bound), so back to back they'd land on consecutive refreshes and motion would still move at
+	 * the base rate.
 	 */
 	public static void afterPresent(VkQueue queue) {
 		realFrames++;
 		presents++;
 		long now = System.nanoTime();
-		if (extraImage >= 0) {
-			long sem = presentSems[extraImage], swapchain = extraSwapchain, id = Reflex.presentId(), value = frameDoneValue;
-			int image = extraImage;
-			pacedPresent = pacer.submit(() -> presentReal(queue, sem, swapchain, image, id, value));
-			presents++;
-			extraImage = -1;
+		if (pendingCount > 0) {
+			int set = pendingSet, count = pendingCount;
+			long id = Reflex.presentId(), value = frameDoneValue;
+			long gap = refreshNanos;
+			pacedPresent = pacer.submit(() -> presentPaced(queue, set, count, id, value, gap));
+			presents += count - 1;
+			pendingCount = 0;
 		}
 		if (statsStart == 0) statsStart = now;
 		if (now - statsStart > 1_000_000_000L) {
+			float hz = Reflex.refreshRate();
+			refreshNanos = hz > 0 ? (long) (1e9 / hz) : 0;
 			double sec = (now - statsStart) / 1e9;
 			renderedFps = Math.round(realFrames / sec);
 			presentedFps = Math.round(presents / sec);
@@ -224,7 +279,12 @@ public final class FrameGenSpike {
 		}
 	}
 
-	private static void presentReal(VkQueue queue, long semaphore, long swapchain, int image, long id, long frameValue) {
+	/**
+	 * A frame's presents: Mojang's (the first generated image) as the GPU finishes, then the rest k / n of a frame
+	 * later. Never closer than one refresh: without vsync the compositor shows the newest image each refresh
+	 * (mailbox), and two presents in one refresh lose the first, a visible hitch at 3x and 4x on a ~180 Hz screen.
+	 */
+	private static void presentPaced(VkQueue mainQueue, int set, int n, long id, long frameValue, long minGap) {
 		try (MemoryStack s = MemoryStack.stackPush()) {
 			vkWaitSemaphores(device.vkDevice(), VkSemaphoreWaitInfo.calloc(s).sType$Default().semaphoreCount(1)
 				.pSemaphores(s.longs(frameDone)).pValues(s.longs(frameValue)), 1_000_000_000L);
@@ -232,45 +292,45 @@ public final class FrameGenSpike {
 			if (lastDoneNanos != 0) {
 				long dt = Math.min(done - lastDoneNanos, 100_000_000L);
 				frameNanos = frameNanos == 0 ? dt : frameNanos * 0.9 + dt * 0.1;
+				worstNanos = Math.max(worstNanos, dt);
 			}
 			lastDoneNanos = done;
-			long due = done + (long) (frameNanos / 2);
-			if (++pacedFrames % 600 == 0) Helio.LOG.info("FG pacing: GPU frame {} ms, real frame {} ms after it", String.format("%.1f", frameNanos / 1e6), String.format("%.1f", frameNanos / 2e6));
-			for (long wait; (wait = due - System.nanoTime()) > 0; ) LockSupport.parkNanos(wait);
-
-			VkPresentInfoKHR info = VkPresentInfoKHR.calloc(s).sType$Default()
-				.pWaitSemaphores(s.longs(semaphore)).swapchainCount(1).pSwapchains(s.longs(swapchain)).pImageIndices(s.ints(image));
-			if (id != 0) info.pNext(VkPresentIdKHR.calloc(s).sType$Default().swapchainCount(1).pPresentIds(s.longs(id)).address());
-			int r;
-			synchronized (QUEUE_LOCK) {
-				r = vkQueuePresentKHR(queue, info);
+			long copied = 0;
+			if (++pacedFrames % 600 == 0) {
+				Helio.LOG.info("FG pacing: GPU frame {} ms (worst {} ms), {} presents {} ms apart, refresh {} ms, {} frames behind; render thread waited {} ms/frame on the pacer, {} ms/frame acquiring, {} ms/frame in Reflex's sleep",
+					String.format("%.1f", frameNanos / 1e6), String.format("%.1f", worstNanos / 1e6), n, String.format("%.1f", frameNanos / n / 1e6),
+					String.format("%.2f", minGap / 1e6), behindFrames, String.format("%.2f", pacerWaitNanos / 600e6), String.format("%.2f", acquireWaitNanos / 600e6),
+					String.format("%.2f", Reflex.sleepNanos / 600e6));
+				pacerWaitNanos = acquireWaitNanos = Reflex.sleepNanos = 0;
+				Helio.LOG.info("FG pacing: GPU ms: path trace {}, DLSS {}, FG motion {}, DLSS-G {}", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE),
+					GpuTimers.ms(GpuTimers.Pass.DLSS), GpuTimers.ms(GpuTimers.Pass.FG_MOTION), GpuTimers.ms(GpuTimers.Pass.DLSS_G));
+				worstNanos = 0;
+				behindFrames = 0;
 			}
-			if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) Helio.LOG.warn("FG: real-frame present returned {}", r);
+			// Rendering faster than n presents a refresh apart (no Reflex cap): keeping the gap would fall further
+			// behind every frame, so let the compositor drop some instead.
+			long gap = lastPresentNanos - done > frameNanos / 2 ? 0 : minGap + MIN_GAP_MARGIN;
+			if (gap == 0) behindFrames++;
+			// Copy every frame into a swapchain image now, present each when due. Reflex times the frame by when its
+			// present's semaphore signals: a copy made at the real frame's due time looked like rendering that much
+			// longer, and Reflex slept the game to match (frames took twice the GPU time: 60 -> 40 fps).
+			int[] images = new int[n];
+			for (int k = 0; k < n; k++) {
+				images[k] = PacedPresenter.prepare(set, k);
+				if (images[k] >= 0) copied = PacedPresenter.lastCopy;
+			}
+			for (int k = 0; k < n; k++) {
+				long due = Math.max(done + (long) (frameNanos * k / n), lastPresentNanos + gap);
+				for (long wait; (wait = due - System.nanoTime()) > 0; ) LockSupport.parkNanos(wait);
+				lastPresentNanos = System.nanoTime();
+				// The real frame (last) goes out on Mojang's queue with the frame's Reflex present ID: Reflex paces
+				// the game by the presents it sees there.
+				boolean real = k == n - 1;
+				if (images[k] >= 0) PacedPresenter.present(images[k], real ? id : 0, real ? mainQueue : null);
+			}
+			if (copied > 0) PacedPresenter.setDone.set(set, copied);
+			pacedThrough = frameValue;
 		}
-	}
-
-	/**
-	 * Mojang's present of the interpolated frame, handed to the pacer thread: queued behind last frame's paced
-	 * real present, so the order stays generated, real, generated, real without the render thread ever waiting
-	 * (waiting stalled the GPU, and the pacer's measured frame time grew with every stall).
-	 */
-	public static int presentLater(VkQueue queue, VkPresentInfoKHR info) {
-		long[] semaphores = new long[info.waitSemaphoreCount()];
-		info.pWaitSemaphores().get(0, semaphores);
-		long swapchain = info.pSwapchains().get(0);
-		int image = info.pImageIndices().get(0);
-		pacedPresent = pacer.submit(() -> {
-			try (MemoryStack s = MemoryStack.stackPush()) {
-				VkPresentInfoKHR copy = VkPresentInfoKHR.calloc(s).sType$Default().pWaitSemaphores(s.longs(semaphores))
-					.swapchainCount(1).pSwapchains(s.longs(swapchain)).pImageIndices(s.ints(image));
-				int r;
-				synchronized (QUEUE_LOCK) {
-					r = vkQueuePresentKHR(queue, copy);
-				}
-				if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) Helio.LOG.warn("FG: interpolated-frame present returned {}", r);
-			}
-		});
-		return VK_SUCCESS;
 	}
 
 	/** Before anything waits for the queue to drain (or FG shuts down): the pacer's presents go out first. */
@@ -311,10 +371,6 @@ public final class FrameGenSpike {
 			check(vkCreateComputePipelines(vk, VK_NULL_HANDLE, ci, null, h), "pipeline");
 			pipeline = h.get(0);
 			vkDestroyShaderModule(vk, module, null);
-			for (int i = 0; i < acquireSems.length; i++) {
-				check(vkCreateSemaphore(vk, VkSemaphoreCreateInfo.calloc(s).sType$Default(), null, h), "semaphore");
-				acquireSems[i] = h.get(0);
-			}
 			check(vkCreateSemaphore(vk, VkSemaphoreCreateInfo.calloc(s).sType$Default()
 				.pNext(VkSemaphoreTypeCreateInfo.calloc(s).sType$Default().semaphoreType(VK_SEMAPHORE_TYPE_TIMELINE)), null, h), "timeline semaphore");
 			frameDone = h.get(0);
@@ -331,12 +387,15 @@ public final class FrameGenSpike {
 		feature = MemorySegment.NULL;
 	}
 
-	private static void ensureTargets(int w, int h) throws Throwable {
-		if (w == width && h == height && interp != null) return;
-		if (interp != null) {
+	private static void ensureTargets(int w, int h, int count) throws Throwable {
+		if (w == width && h == height && count == generated) return;
+		if (depthCopy != null) {
+			awaitPacedPresent();
 			device.graphicsQueue().waitIdle();
-			for (var v : new VulkanGpuTextureView[]{depthView, motionView, interpView}) v.close();
-			for (var t : new VulkanGpuTexture[]{depthCopy, motion, interp}) t.close();
+			for (var v : new VulkanGpuTextureView[]{depthView, motionView, hudlessView}) v.close();
+			for (var t : new VulkanGpuTexture[]{depthCopy, motion, hudless}) t.close();
+			for (var v : interpView) v.close();
+			for (var t : interp) t.close();
 		}
 		if (!feature.equals(MemorySegment.NULL)) {
 			Ngx.releaseFeature(feature);
@@ -346,10 +405,17 @@ public final class FrameGenSpike {
 		height = h;
 		depthCopy = (VulkanGpuTexture) device.createTexture("Helio FG depth", 15, GpuFormat.D32_FLOAT, w, h, 1, 1);
 		motion = (VulkanGpuTexture) device.createTexture("Helio FG motion", 15, GpuFormat.RG16_FLOAT, w, h, 1, 1);
-		interp = (VulkanGpuTexture) device.createTexture("Helio FG interpolated", 15, GpuFormat.RGBA8_UNORM, w, h, 1, 1);
+		hudless = (VulkanGpuTexture) device.createTexture("Helio FG HUD-less", 15, GpuFormat.RGBA8_UNORM, w, h, 1, 1);
 		depthView = (VulkanGpuTextureView) device.createTextureView(depthCopy, 0, 1);
 		motionView = (VulkanGpuTextureView) device.createTextureView(motion, 0, 1);
-		interpView = (VulkanGpuTextureView) device.createTextureView(interp, 0, 1);
+		hudlessView = (VulkanGpuTextureView) device.createTextureView(hudless, 0, 1);
+		generated = count;
+		interp = new VulkanGpuTexture[count];
+		interpView = new VulkanGpuTextureView[count];
+		for (int i = 0; i < count; i++) {
+			interp[i] = (VulkanGpuTexture) device.createTexture("Helio FG generated " + (i + 1), 15, GpuFormat.RGBA8_UNORM, w, h, 1, 1);
+			interpView[i] = (VulkanGpuTextureView) device.createTextureView(interp[i], 0, 1);
+		}
 		reset = true;
 	}
 
@@ -359,23 +425,26 @@ public final class FrameGenSpike {
 		Ngx.setUInt(params, "Width", width);
 		Ngx.setUInt(params, "Height", height);
 		Ngx.setUInt(params, "DLSSG.BackbufferFormat", VK_FORMAT_RGBA8);
+		Ngx.setUInt(params, "DLSSG.MultiFrameCountMax", generated);
 		// NGX feature creation puts big buffers on the stack, like init.
 		MemorySegment[] out = new MemorySegment[1];
 		Helio.onBigStack(() -> out[0] = Ngx.createFeature(device.vkDevice().address(), cmd.address(), FEATURE_FRAME_GENERATION, params));
 		feature = out[0];
-		Helio.LOG.info("DLSS-G feature created for {}x{}", width, height);
+		Helio.LOG.info("DLSS-G feature created for {}x{}, {} generated frames per real frame", width, height, generated);
 	}
 
-	private static void evaluate(VkCommandBuffer cmd, VulkanGpuTextureView mainView) throws Throwable {
+	/** Generated frame {@code i} (0-based, in display order) into {@code interp[i]}. */
+	private static void evaluate(VkCommandBuffer cmd, VulkanGpuTextureView mainView, int i) throws Throwable {
 		VulkanGpuTexture main = mainView.texture();
 		try (Arena a = Arena.ofConfined()) {
 			MemorySegment p = params;
 			Ngx.setPointer(p, "DLSSG.Backbuffer", Ngx.imageResource(a, mainView.vkImageView(), main.vkImage(), VK_IMAGE_ASPECT_COLOR_BIT, VK_FORMAT_RGBA8, width, height, false));
 			Ngx.setPointer(p, "DLSSG.MVecs", Ngx.imageResource(a, motionView.vkImageView(), motion.vkImage(), VK_IMAGE_ASPECT_COLOR_BIT, VK_FORMAT_RG16F, width, height, false));
 			Ngx.setPointer(p, "DLSSG.Depth", Ngx.imageResource(a, depthView.vkImageView(), depthCopy.vkImage(), VK_IMAGE_ASPECT_DEPTH_BIT, VK_FORMAT_D32, width, height, false));
-			Ngx.setPointer(p, "DLSSG.OutputInterpolated", Ngx.imageResource(a, interpView.vkImageView(), interp.vkImage(), VK_IMAGE_ASPECT_COLOR_BIT, VK_FORMAT_RGBA8, width, height, true));
-			Ngx.setUInt(p, "DLSSG.MultiFrameCount", 1);
-			Ngx.setUInt(p, "DLSSG.MultiFrameIndex", 1);
+			Ngx.setPointer(p, "DLSSG.HUDLess", Ngx.imageResource(a, hudlessView.vkImageView(), hudless.vkImage(), VK_IMAGE_ASPECT_COLOR_BIT, VK_FORMAT_RGBA8, width, height, false));
+			Ngx.setPointer(p, "DLSSG.OutputInterpolated", Ngx.imageResource(a, interpView[i].vkImageView(), interp[i].vkImage(), VK_IMAGE_ASPECT_COLOR_BIT, VK_FORMAT_RGBA8, width, height, true));
+			Ngx.setUInt(p, "DLSSG.MultiFrameCount", generated);
+			Ngx.setUInt(p, "DLSSG.MultiFrameIndex", i + 1);
 
 			Matrix4f clipToView = new Matrix4f(proj).invert();
 			Matrix4f clipToPrev = new Matrix4f(prevViewProj)
@@ -407,7 +476,7 @@ public final class FrameGenSpike {
 			Ngx.setUInt(p, "DLSSG.Reset", reset ? 1 : 0);
 			Ngx.setUInt(p, "DLSSG.NotRenderingGameFrames", 0);
 			Ngx.setUInt(p, "DLSSG.OrthoProjection", 0);
-			for (String r : new String[]{"MVecs", "Depth", "InputBackbuffer", "OutputInterpolated"}) {
+			for (String r : new String[]{"MVecs", "Depth", "InputBackbuffer", "OutputInterpolated", "HUDLess"}) {
 				Ngx.setUInt(p, "DLSSG." + r + "SubrectBaseX", 0);
 				Ngx.setUInt(p, "DLSSG." + r + "SubrectBaseY", 0);
 				Ngx.setUInt(p, "DLSSG." + r + "SubrectWidth", width);
@@ -449,46 +518,10 @@ public final class FrameGenSpike {
 		}
 	}
 
-	/** Same as Mojang's swapchain blit (including its Y flip: the main target is stored bottom-up). */
-	private static void recordSwapchainBlit(MemoryStack s, VkCommandBuffer cmd, long src, long swapImage, int w, int h) {
-		VkImageSubresourceRange range = VkImageSubresourceRange.calloc(s).aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1);
-		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, null, null,
-			VkImageMemoryBarrier.calloc(1, s).sType$Default().dstAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT)
-				.oldLayout(VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-				.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).image(swapImage).subresourceRange(range));
-		VkImageBlit.Buffer region = VkImageBlit.calloc(1, s);
-		region.srcSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
-		region.dstSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
-		region.srcOffsets(0).set(0, 0, 0);
-		region.srcOffsets(1).set(w, h, 1);
-		region.dstOffsets(0).set(0, h, 0);
-		region.dstOffsets(1).set(w, 0, 1);
-		vkCmdBlitImage(cmd, src, VK_IMAGE_LAYOUT_GENERAL, swapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region, VK_FILTER_NEAREST);
-		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, null, null,
-			VkImageMemoryBarrier.calloc(1, s).sType$Default().srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT)
-				.oldLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).newLayout(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
-				.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).image(swapImage).subresourceRange(range));
-	}
-
-	private static void recreatePresentSems(int count, long swapchain) {
-		VkDevice vk = device.vkDevice();
-		device.graphicsQueue().waitIdle();
-		for (long sem : presentSems) vkDestroySemaphore(vk, sem, null);
-		presentSems = new long[count];
-		try (MemoryStack s = MemoryStack.stackPush()) {
-			LongBuffer h = s.mallocLong(1);
-			for (int i = 0; i < count; i++) {
-				check(vkCreateSemaphore(vk, VkSemaphoreCreateInfo.calloc(s).sType$Default(), null, h), "semaphore");
-				presentSems[i] = h.get(0);
-			}
-		}
-		semsForSwapchain = swapchain;
-	}
-
 	private static void fail(Throwable t) {
 		failed = true;
 		generating = false;
-		extraImage = -1;
+		pendingCount = 0;
 		Helio.LOG.error("Frame generation spike failed; disabled for this session", t);
 	}
 

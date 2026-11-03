@@ -557,7 +557,28 @@ output near 180 Hz and no HUD smearing.
    particles after the tracer and DLSS, so they never pass through RR. User-checked: no
    smearing behind water and glass.
 6. [ ] Multi frame generation 3x/4x, HUD after FG input, presets map to DLSS
-   modes; M4 exit check.
+   modes; M4 exit check. In progress:
+   - [x] 3x/4x (`DLSSG.MultiFrameCount` = generated, `MultiFrameIndex` 1..N, one
+     evaluate each). Setting offers Off..4x (capped by `mfgMax`); presets:
+     Performance 2x, Balanced/Quality 3x, Ultra 4x, Photo off.
+   - [x] HUD: DLSS-G gets the HUD-less picture (main colour copied after the level,
+     before hand and GUI), so the HUD comes from the real frame.
+   - [x] Presenting (`ngx/PacedPresenter.java`): while FG runs Mojang skips its
+     acquire/blit/present; the pacer acquires, copies (from per-frame staging images
+     the render thread blits on Mojang's queue) and presents every frame just in time,
+     on a queue of its own: an extra graphics-family queue (`VulkanBackendMixin`; the
+     async compute family can't present on Wayland). Fixed: 3x/4x swapchain starvation
+     and deadlock (up-front acquires), GPU stalls behind Mojang's acquire wait, frames
+     dropped by mailbox-style presents (presents kept a refresh apart), leaked images.
+     The real frame is presented on Mojang's queue with the Reflex present ID.
+   - [x] Reflex: the driver's latency sleep goes by the game's own acquires/presents
+     and slept the game to half speed under FG; while FG runs Helio limits instead
+     (one frame queued, rendered rate capped at refresh / presents, 5% under).
+   - User-checked (180 Hz, VRR off): generated frames shown correctly; same scene no
+     FG 70 fps, 2x 55 -> 112, 3x 50 -> 150, 4x 43 -> 171 (cap). DLSS-G GPU time
+     3.1 / 4.5 / 6.6 ms is the drop. VRR on flickered (monitor 50-180 Hz).
+   - [ ] DLSS-G on the present queue overlapping the next frame's tracing.
+   - [ ] M4 exit check.
 
 ### M5 — PBR and 3D resource packs
 

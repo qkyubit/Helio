@@ -79,9 +79,10 @@ public final class HelioConfig {
 		switch (p) {
 			case OFF -> { rayTracing = false; frameGeneration = 1; reflex = ReflexMode.ON; }
 			case PERFORMANCE -> { rayTracing = true; lighting = Lighting.HYBRID; dlssQuality = DlssQuality.PERFORMANCE; frameGeneration = 2; reflex = ReflexMode.BOOST; }
-			case BALANCED -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.BALANCED; frameGeneration = 2; reflex = ReflexMode.ON; }
-			case QUALITY -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.QUALITY; frameGeneration = 2; reflex = ReflexMode.ON; }
-			case ULTRA -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.DLAA; frameGeneration = 2; reflex = ReflexMode.ON; }
+			// Heavier presets render fewer frames, so they generate more (multi frame generation where offered).
+			case BALANCED -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.BALANCED; frameGeneration = 3; reflex = ReflexMode.ON; }
+			case QUALITY -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.QUALITY; frameGeneration = 3; reflex = ReflexMode.ON; }
+			case ULTRA -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.DLAA; frameGeneration = 4; reflex = ReflexMode.ON; }
 			// Screenshots: no generated frames (they're slightly soft), no latency trade-offs needed.
 			case PHOTO -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.DLAA; frameGeneration = 1; reflex = ReflexMode.OFF; }
 			case CUSTOM -> {}

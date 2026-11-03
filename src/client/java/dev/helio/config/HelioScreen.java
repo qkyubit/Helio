@@ -57,9 +57,9 @@ public class HelioScreen extends OptionsSubScreen {
 				.create(Component.translatable("helio.dlss_quality"), (b, v) -> changed(() -> c.dlssQuality = v))));
 		list.addSmall(
 			unsupportedIf(!Helio.dlss || !Helio.ngxCaps.frameGeneration(), "DLSS " + Helio.dlssStatus,
-				// ponytail: 2x only until M4 adds multi frame generation (up to 1 + ngxCaps.mfgMax()).
+				// ponytail: capped at 4x (the driver may offer up to 1 + mfgMax); more needs more than 8 swapchain images.
 				CycleButton.builder((Integer n) -> n == 1 ? Component.translatable("options.off") : Component.literal(n + "x"), c.frameGeneration)
-					.withValues(1, 2)
+					.withValues(java.util.stream.IntStream.rangeClosed(1, Helio.ngxCaps == null ? 2 : Math.min(4, 1 + Helio.ngxCaps.mfgMax())).boxed().toList())
 					.withTooltip(n -> Tooltip.create(Component.translatable("helio.frame_generation.tooltip")))
 					.create(Component.translatable("helio.frame_generation"), (b, v) -> changed(() -> c.frameGeneration = v))),
 			unsupportedIf(!Helio.reflex, "no VK_NV_low_latency2", CycleButton.builder((ReflexMode m) -> Component.translatable("helio.reflex." + m.name().toLowerCase()), c.reflex)
