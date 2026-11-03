@@ -48,6 +48,8 @@
 	"helio.accumulate": "Reference Accumulation",
 	"helio.accumulate.tooltip": "Averages frames while the camera and world are still, for a clean, anti-aliased reference picture. Moving mobs smear while it's on.",
 	"helio.ray_reconstruction": "Ray Reconstruction",
+	"helio.cave_brightness": "Cave Brightness",
+	"helio.cave_brightness.tooltip": "Least light in caves and enclosed spaces, as a share of the open-air minimum set by Brightness. Lower is darker.",
 	"helio.ray_reconstruction.tooltip": "DLSS Ray Reconstruction cleans up soft shadows and bounce light every frame. Off shows simpler lighting without noise. Reference Accumulation overrides it.",
 	"helio.debug_view": "Debug View",
 	"helio.debug_view.off": "Off",

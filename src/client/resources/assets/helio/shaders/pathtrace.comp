@@ -50,7 +50,22 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	uint denoise;       // 1: trace at DLSS's render size and write its inputs; DLSS and rr_resolve.comp finish
 	float lightFloor;   // least light anything gets, from vanilla's Brightness setting
 	uint hybrid;        // 1: block light from vanilla's light levels, no shadow rays for it (HelioConfig.Lighting)
+	uvec2 cache;        // RadianceCache, zero when off (only under Ray Reconstruction)
+	ivec3 anchor;       // the scene anchor's world block position (a section corner)
+	float caveFloor;    // share of lightFloor left where there's no sky light (HelioConfig.caveBrightness)
 };
+// Radiance cache (M4 step 4, after NVIDIA's SHaRC): a hash table of world-space cells, each the light arriving
+// at the faces in it (direct and bounced, without the face's own albedo). A bounce ray that lands in a cell
+// takes its light from there instead of tracing on: every bounce after the first for the cost of one lookup.
+// A few pixels a frame (feeding) follow longer paths and add what they find; radiance_cache.comp averages.
+struct CacheEntry {
+	uint check;  // second hash of the cell's key, 0 = free
+	uint age;    // frames since a sample last came in (radiance_cache.comp)
+	uvec3 sum;   // this frame's samples, fixed point (CACHE_FIXED)
+	uint count;
+	uvec2 value; // running average (rgb) and the samples behind it, as halves
+};
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer RadianceCache { CacheEntry e[]; };
 // Per TLAS instance. kind: section layer (0 solid, 1 cutout, 2 translucent) or 3 = entities.
 struct Instance { uvec2 vertices; uint triangles; uint kind; };
 layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer InstanceInfo { Instance i[]; };
@@ -86,7 +101,13 @@ const float FOLIAGE_TRANSMISSION = 0.5; // light leaves and grass let through, o
 // Polished blocks (Scene.METAL_MARK, Scene.GEM_MARK): metals reflect in their own colour, slightly blurred,
 // over a little diffuse; gems reflect faintly and sharply over their full colour.
 const float METAL_ROUGHNESS = 0.2, METAL_DIFFUSE = 0.3, GEM_ROUGHNESS = 0.05, GEM_F0 = 0.08;
-const int MAX_LAYERS = 6;       // translucent surfaces a view ray passes before the next one counts as opaque
+const int MAX_LAYERS = 6;
+const uint CACHE_SIZE = 1u << 21;  // entries (PathTracer.CACHE_ENTRIES)
+const uint CACHE_PROBES = 8u;      // slots a key may sit in, from its hash on
+const float CACHE_FIXED = 4096.0;  // samples' fixed-point scale (atomic sums)
+const float CACHE_MAX = 64.0;      // brightest sample kept, per channel
+const int CACHE_PATH = 3;          // bounces a feeding pixel follows
+const uint CACHE_FEED = 16u;       // one pixel in this many feeds the cache each frame       // translucent surfaces a view ray passes before the next one counts as opaque
 
 layout(push_constant) uniform Push {
 	mat4 invViewProj;   // inverse(projection * viewRotation): NDC -> camera-relative world
@@ -423,18 +444,128 @@ vec3 cosineSample(vec3 n) {
 	return normalize(t * (r * cos(phi)) + cross(n, t) * (r * sin(phi)) + n * sqrt(1.0 - u));
 }
 
+bool cacheOn, feeding; // Frame.cache set; this pixel feeds the cache (its first surface's path only)
+RadianceCache cache;
+ivec3 anchor;
+
+// A cache cell's two hashes: where it sits and a check. Cells are 1/4 block, doubling every time the distance
+// from the camera does past 8 blocks (to 16); one per face direction.
+void cacheKey(vec3 pos, vec3 n, out uint slot, out uint check) {
+	int level = clamp(int(log2(max(length(pos - pc.cameraInScene.xyz) / 8.0, 1.0))), 0, 6);
+	vec3 a = abs(n);
+	uint face = a.x > a.y && a.x > a.z ? (n.x > 0.0 ? 0u : 1u) : a.y > a.z ? (n.y > 0.0 ? 2u : 3u) : (n.z > 0.0 ? 4u : 5u);
+	// The anchor is a multiple of 16, so whole cells: (anchor * 4) >> level in cells of 0.25 * 2^level.
+	uvec3 c = uvec3(((anchor * 4) >> level) + ivec3(floor((pos + n * 0.01) * (4.0 / float(1 << level)))));
+	uint tag = uint(level) * 6u + face;
+	slot = pcg(c.x + pcg(c.y + pcg(c.z + pcg(tag))));
+	check = max(pcg(c.z + pcg(c.x + pcg(c.y + pcg(tag + 0x51ED27u)))), 1u);
+}
+
+// The cell's entry, or -1: missing (lookups), or no free slot left near its hash (inserts).
+int cacheEntry(uint slot, uint check, bool insert) {
+	uint base = slot & (CACHE_SIZE - 1u) & ~(CACHE_PROBES - 1u);
+	for (uint i = 0u; i < CACHE_PROBES; i++)
+		if (cache.e[base + i].check == check) return int(base + i);
+	if (!insert) return -1;
+	for (uint i = 0u; i < CACHE_PROBES; i++) {
+		uint previous = atomicCompSwap(cache.e[base + i].check, 0u, check);
+		if (previous == 0u || previous == check) return int(base + i);
+	}
+	return -1;
+}
+
+void cacheAdd(vec3 pos, vec3 n, vec3 irradiance) {
+	uint slot, check;
+	cacheKey(pos, n, slot, check);
+	int i = cacheEntry(slot, check, true);
+	if (i < 0 || any(isnan(irradiance))) return;
+	uvec3 fixedPoint = uvec3(min(irradiance, vec3(CACHE_MAX)) * CACHE_FIXED + 0.5);
+	atomicAdd(cache.e[i].sum.x, fixedPoint.x);
+	atomicAdd(cache.e[i].sum.y, fixedPoint.y);
+	atomicAdd(cache.e[i].sum.z, fixedPoint.z);
+	atomicAdd(cache.e[i].count, 1u);
+}
+
+bool cacheLookup(vec3 pos, vec3 n, out vec3 irradiance) {
+	uint slot, check;
+	cacheKey(pos, n, slot, check);
+	int i = cacheEntry(slot, check, false);
+	if (i < 0) return false;
+	uvec2 v = cache.e[i].value;
+	vec2 bn = unpackHalf2x16(v.y);
+	irradiance = vec3(unpackHalf2x16(v.x), bn.x);
+	return bn.y > 0.0; // averaged at least once
+}
+
+// Light reaching a bounce ray's hit: the cache's, or (not cached yet) its direct light and the sky fill.
+vec3 bounceIrradiance(Hit h, vec3 pos) {
+	vec3 e;
+	if (cacheLookup(pos, h.normal, e)) return e;
+	return directLight(h, pos) + skyIrradiance(h.normal) * h.light.y * h.light.y * SKY_FILL;
+}
+
+// Light arriving at a surface by one bounce, with the cache past it. A feeding pixel follows the path
+// CACHE_PATH bounces and adds the light that reached each surface (its direct light included) to its cell.
+vec3 cachedBounce(Hit h, vec3 pos, vec3 direct) {
+	bool feed = feeding;
+	feeding = false;
+	int steps = feed ? CACHE_PATH : 1, last = 0;
+	vec3 xs[CACHE_PATH], ns[CACHE_PATH], ds[CACHE_PATH], transfer[CACHE_PATH];
+	xs[0] = pos;
+	ns[0] = h.normal;
+	ds[0] = direct;
+	vec3 x = pos, n = h.normal, bounce = vec3(0.0);
+	bool foliage = h.foliage;
+	for (int k = 0; k < steps; k++) {
+		float w = 1.0;
+		if (foliage) { // as in surfaceRadiance
+			if (rand() * (1.0 + FOLIAGE_TRANSMISSION) < FOLIAGE_TRANSMISSION) n = -n;
+			w = 1.0 + FOLIAGE_TRANSMISSION;
+		}
+		vec3 d = cosineSample(n);
+		rayQueryEXT b;
+		TRACE(b, x + n * 0.002, d, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
+		last = k;
+		if (!HIT(b)) {
+			bounce = w * skyIrradiance(d);
+			break;
+		}
+		vec3 xb = x + n * 0.002 + d * rayQueryGetIntersectionTEXT(b, true);
+		Hit hb = shade(b, d);
+		transfer[k] = w * hb.albedo;
+		if (k == steps - 1) {
+			bounce = transfer[k] * bounceIrradiance(hb, xb);
+			break;
+		}
+		xs[k + 1] = x = xb;
+		ns[k + 1] = n = hb.normal;
+		ds[k + 1] = directLight(hb, xb);
+		foliage = hb.foliage;
+	}
+	// Back along the path: each surface's light is its direct light plus what its bounce brought.
+	for (int i = last; feed && i >= 0; i--) {
+		vec3 e = ds[i] + bounce;
+		cacheAdd(xs[i], ns[i], e);
+		if (i > 0) bounce = transfer[i - 1] * e;
+	}
+	return bounce;
+}
+
 // Bounces followed when stochastic (Frame.cameraDelta.w: 3 for the reference, 1 under RR); Russian roulette
 // after the second.
 int bounces;
-float lightFloor; // Frame.lightFloor
+float lightFloor, caveFloor; // Frame.lightFloor, Frame.caveFloor
 
 // Light leaving an opaque (or textured translucent) surface back along the ray: its emission and direct
 // light, plus bounce light (approximated, or followed when stochastic).
 vec3 surfaceRadiance(Hit h, vec3 pos) {
-	// A floor (vanilla's Brightness) so caves and dense foliage never go black; when stochastic, also a share of
-	// sky light by vanilla's sky level, for the bounces past the one followed (until the radiance cache, M4 step 4).
-	vec3 ambient = vec3(lightFloor) + (pc.stochastic != 0.0 ? skyIrradiance(h.normal) * h.light.y * h.light.y * SKY_FILL : vec3(0.0));
-	vec3 radiance = h.albedo * (EMISSIVE * h.emission + directLight(h, pos) + ambient);
+	// A floor (vanilla's Brightness, scaled down by Cave Brightness where no sky light reaches) so caves and dense
+	// foliage never go black; when stochastic, also a share of sky light by vanilla's sky level, for the bounces
+	// past the one followed (the radiance cache's job, when on).
+	vec3 ambient = vec3(lightFloor * mix(caveFloor, 1.0, h.light.y)) + (pc.stochastic != 0.0 && !cacheOn ? skyIrradiance(h.normal) * h.light.y * h.light.y * SKY_FILL : vec3(0.0));
+	vec3 direct = directLight(h, pos);
+	vec3 radiance = h.albedo * (EMISSIVE * h.emission + direct + ambient);
+	if (cacheOn) return radiance + h.albedo * cachedBounce(h, pos, direct);
 	if (pc.stochastic == 0.0) {
 		// ponytail: until M4's denoiser, bounce light is approximated outside reference mode: sky light scaled by
 		// vanilla's sky light level, and a dim fill from its block light level.
@@ -760,7 +891,14 @@ void main() {
 	if (any(greaterThanEqual(p, size))) return;
 	bounces = int(frame.cameraDelta.w);
 	lightFloor = frame.lightFloor;
+	caveFloor = frame.caveFloor;
 	hybrid = frame.hybrid != 0u;
+	cacheOn = frame.cache != uvec2(0u);
+	if (cacheOn) {
+		cache = RadianceCache(frame.cache);
+		anchor = frame.anchor;
+		feeding = pcg(rng ^ 0xA511E9B3u) % CACHE_FEED == 0u;
+	}
 	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size), uvec2(p));
 	if (frame.denoise != 0u) {
 		writeDenoiserInputs(p, size, current, frame);

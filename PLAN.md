@@ -536,7 +536,18 @@ output near 180 Hz and no HUD smearing.
    order stable; capture runs before translucent sorting), else camera-only.
    DLSS gets it per pixel; `entity_motion.comp` writes it into frame
    generation's motion at entity pixels. User-checked: no trails.
-4. [ ] SHaRC-style radiance cache: more bounces for about the cost of one.
+4. [x] Radiance cache (after NVIDIA's SHaRC; `shaders/radiance_cache.comp`): a 2M-entry
+   world-space hash grid (64 MB) of the light reaching faces, direct and bounced, without the
+   face's albedo. Cells are 1/4 block, doubling with camera distance past 8 blocks up to 16;
+   one per face direction. Under Ray Reconstruction each pixel traces one bounce and takes the
+   light where it lands from the cache (no shadow rays there); one pixel in 16 follows 3
+   bounces and adds what reached each surface to its cell. A pass after tracing averages the
+   samples (history of 128) and frees cells unfed for 64 frames. The cache empties on a level
+   change. Uncached cells fall back to direct light plus the old sky fill. Reference
+   accumulation and Hybrid are unchanged. User-checked: coloured bounce light (stained-glass
+   light tints the ceiling).
+   Done alongside: "Cave Brightness" setting (0–100%, default 25%). It scales the Brightness
+   floor down where vanilla's sky light is 0, blending by sky level. User-checked.
 5. [ ] Reflections under RR: specular hit distance + matrices (or specular
    motion vectors) for water and glass; transparency guide if particles ghost.
 6. [ ] Multi frame generation 3x/4x, HUD after FG input, presets map to DLSS

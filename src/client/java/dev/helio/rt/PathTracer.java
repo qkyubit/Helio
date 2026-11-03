@@ -56,6 +56,12 @@ public final class PathTracer {
 	private static long compositeSetLayout, compositeLayout, compositePipeline;
 	private static long resolveSetLayout, resolveLayout, resolvePipeline;
 	private static long motionSetLayout, motionLayout, motionPipeline;
+	private static long cacheLayout, cachePipeline;
+	/** Radiance cache entries (pathtrace.comp CACHE_SIZE), 32 bytes each: 64 MB. */
+	private static final int CACHE_ENTRIES = 1 << 21;
+	private static Memory.Buf radianceCache;
+	/** The level the cache's cells belong to: another world or dimension starts it empty. */
+	private static Object cacheLevel;
 	private static boolean dispatched;
 	private static final int RING = 4;
 	/** Entity texture arrays, one per frame in flight (rewritten {@value #RING} frames later). */
@@ -207,6 +213,10 @@ public final class PathTracer {
 			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(motionSetLayout)), null, h), "motion layout");
 			motionLayout = h.get(0);
 			motionPipeline = computePipeline(vk, "entity_motion.comp", motionLayout, s);
+			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default()
+				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(16)), null, h), "cache layout");
+			cacheLayout = h.get(0);
+			cachePipeline = computePipeline(vk, "radiance_cache.comp", cacheLayout, s);
 			for (int i = 0; i < RING; i++) frameData[i] = Memory.buffer(256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
 		}
 		Helio.LOG.info("Path tracer initialised");
@@ -281,13 +291,20 @@ public final class PathTracer {
 				jitterX = halton(i, 2) - 0.5f;
 				jitterY = halton(i, 3) - 0.5f;
 			}
+			// The radiance cache stands in for bounces past the first under Ray Reconstruction (reference
+			// accumulation follows its bounces in full).
+			boolean cacheOn = rr;
+			if (cacheOn) ensureCache(cmd, mc, s);
 			Memory.Buf frame = frameData[seed % RING];
 			ByteBuffer fb = MemoryUtil.memByteBuffer(frame.mapped(), 256);
 			lastViewProj.get(0, fb);
 			fb.putFloat(64, (float) cameraDelta.x).putFloat(68, (float) cameraDelta.y).putFloat(72, (float) cameraDelta.z)
 				.putFloat(76, accumulate ? 3 : 1).putInt(80, upscale ? 1 : 0)
 				.putFloat(84, (float) (0.02 + 0.1 * mc.options.gamma().get()))
-				.putInt(88, HelioConfig.current.lighting == HelioConfig.Lighting.HYBRID ? 1 : 0);
+				.putInt(88, HelioConfig.current.lighting == HelioConfig.Lighting.HYBRID ? 1 : 0)
+				.putLong(92, cacheOn ? radianceCache.address() : 0)
+				.putInt(100, Scene.anchorX).putInt(104, Scene.anchorY).putInt(108, Scene.anchorZ)
+				.putFloat(112, HelioConfig.current.caveBrightness / 100f);
 			lastViewProj.set(viewProj);
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
@@ -332,6 +349,14 @@ public final class PathTracer {
 			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
 
 			vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+			if (cacheOn) {
+				// Average this frame's samples into the cache (radiance_cache.comp).
+				VulkanCommandEncoder.memoryBarrier(cmd, s);
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cachePipeline);
+				vkCmdPushConstants(cmd, cacheLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+					s.malloc(16).putLong(0, radianceCache.address()).putInt(8, CACHE_ENTRIES));
+				vkCmdDispatch(cmd, CACHE_ENTRIES / 64, 1, 1);
+			}
 			GpuTimers.end(cmd, GpuTimers.Pass.PATH_TRACE);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			if (accumulate) frameIndex = Math.min(frameIndex + 1, MAX_FRAMES);
@@ -442,6 +467,17 @@ public final class PathTracer {
 		frameIndex = 0;
 	}
 
+	/** Creates the radiance cache on first use, empty, and empties it for a new level. */
+	private static void ensureCache(VkCommandBuffer cmd, Minecraft mc, MemoryStack s) {
+		if (radianceCache != null && cacheLevel == mc.level) return;
+		if (radianceCache == null) radianceCache = Memory.buffer((long) CACHE_ENTRIES * 32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
+		cacheLevel = mc.level;
+		vkCmdFillBuffer(cmd, radianceCache.buffer(), radianceCache.offset(), radianceCache.size(), 0);
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+			VkMemoryBarrier.calloc(1, s).sType$Default().srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT)
+				.dstAccessMask(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT), null, null);
+	}
+
 	private static float halton(int i, int base) {
 		float f = 1, r = 0;
 		for (; i > 0; i /= base) {
@@ -463,6 +499,10 @@ public final class PathTracer {
 		vkDestroyPipelineLayout(vk, pipelineLayout, null);
 		Dlss.destroyImages();
 		for (Memory.Buf b : frameData) if (b != null) b.free();
+		if (radianceCache != null) radianceCache.free();
+		radianceCache = null;
+		vkDestroyPipeline(vk, cachePipeline, null);
+		vkDestroyPipelineLayout(vk, cacheLayout, null);
 		vkDestroyPipeline(vk, motionPipeline, null);
 		vkDestroyPipelineLayout(vk, motionLayout, null);
 		vkDestroyDescriptorSetLayout(vk, motionSetLayout, null);

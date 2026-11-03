@@ -1,0 +1,49 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_EXT_scalar_block_layout : require
+
+// After pathtrace.comp: fold each radiance cache cell's new samples into its running average, and free cells
+// nothing has fed for a while. The entry layout and constants match pathtrace.comp's.
+
+layout(local_size_x = 64) in;
+
+struct CacheEntry {
+	uint check;  // second hash of the cell's key, 0 = free
+	uint age;    // frames since a sample last came in
+	uvec3 sum;   // this frame's samples, fixed point (CACHE_FIXED)
+	uint count;
+	uvec2 value; // running average (rgb) and the samples behind it, as halves
+};
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer RadianceCache { CacheEntry e[]; };
+
+layout(push_constant) uniform Push {
+	uvec2 cache;
+	uint size;
+} pc;
+
+const float CACHE_FIXED = 4096.0;
+const float MAX_SAMPLES = 128.0; // history: the average follows changes over about this many samples
+const uint MAX_AGE = 64u;
+
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= pc.size) return;
+	RadianceCache cache = RadianceCache(pc.cache);
+	if (cache.e[i].check == 0u) return;
+	uint count = cache.e[i].count;
+	if (count == 0u) {
+		if (++cache.e[i].age > MAX_AGE) {
+			cache.e[i].check = 0u;
+			cache.e[i].value = uvec2(0u);
+		}
+		return;
+	}
+	vec2 rg = unpackHalf2x16(cache.e[i].value.x), bn = unpackHalf2x16(cache.e[i].value.y);
+	float n = bn.y, total = n + float(count);
+	vec3 average = (vec3(rg, bn.x) * n + vec3(cache.e[i].sum) / CACHE_FIXED) / total;
+	cache.e[i].value = uvec2(packHalf2x16(average.rg), packHalf2x16(vec2(average.b, min(total, MAX_SAMPLES))));
+	cache.e[i].sum = uvec3(0u);
+	cache.e[i].count = 0u;
+	cache.e[i].age = 0u;
+}

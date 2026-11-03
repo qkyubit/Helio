@@ -81,6 +81,12 @@ public class HelioScreen extends OptionsSubScreen {
 				CycleButton.onOffBuilder(c.rayReconstruction)
 					.withTooltip(v -> Tooltip.create(Component.translatable("helio.ray_reconstruction.tooltip")))
 					.create(Component.translatable("helio.ray_reconstruction"), (b, v) -> c.rayReconstruction = v)));
+		list.addSmall(
+			unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", CycleButton.builder((Integer n) -> Component.literal(n + "%"), c.caveBrightness)
+				.withValues(0, 10, 25, 50, 100)
+				.withTooltip(n -> Tooltip.create(Component.translatable("helio.cave_brightness.tooltip")))
+				.create(Component.translatable("helio.cave_brightness"), (b, v) -> c.caveBrightness = v)),
+			null);
 	}
 
 	/** Any manual change means the settings no longer match a preset. */
