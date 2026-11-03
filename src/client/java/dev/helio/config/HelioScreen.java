@@ -3,6 +3,7 @@ package dev.helio.config;
 import dev.helio.Helio;
 import dev.helio.SelfCheck;
 import dev.helio.config.HelioConfig.DebugView;
+import dev.helio.config.HelioConfig.Lighting;
 import dev.helio.config.HelioConfig.Preset;
 import dev.helio.config.HelioConfig.ReflexMode;
 import net.minecraft.client.Minecraft;
@@ -44,6 +45,12 @@ public class HelioScreen extends OptionsSubScreen {
 				.withValues(4, 6, 8, 12, 16, 24, 32)
 				.withTooltip(n -> Tooltip.create(Component.translatable("helio.rt_distance.tooltip")))
 				.create(Component.translatable("helio.rt_distance"), (b, v) -> c.rayTracingDistance = v)));
+		list.addSmall(
+			unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", CycleButton.builder((Lighting l) -> Component.translatable("helio.lighting." + l.name().toLowerCase()), c.lighting)
+				.withValues(Lighting.values())
+				.withTooltip(l -> Tooltip.create(Component.translatable("helio.lighting." + l.name().toLowerCase() + ".tooltip")))
+				.create(Component.translatable("helio.lighting"), (b, v) -> changed(() -> c.lighting = v))),
+			null);
 		list.addSmall(
 			unsupportedIf(!Helio.dlss || !Helio.ngxCaps.frameGeneration(), "DLSS " + Helio.dlssStatus,
 				// ponytail: 2x only until M4 adds multi frame generation (up to 1 + ngxCaps.mfgMax()).

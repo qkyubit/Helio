@@ -48,6 +48,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	vec4 cameraDelta;   // this frame's camera position - last frame's; w = bounces (stochastic only)
 	uint denoise;       // 1: write RR's inputs, RR and rr_resolve.comp finish the picture
 	float lightFloor;   // least light anything gets, from vanilla's Brightness setting
+	uint hybrid;        // 1: block light from vanilla's light levels, no shadow rays for it (HelioConfig.Lighting)
 };
 // Per TLAS instance. kind: section layer (0 solid, 1 cutout, 2 translucent) or 3 = entities.
 struct Instance { uvec2 vertices; uint triangles; uint kind; };
@@ -103,6 +104,8 @@ layout(push_constant) uniform Push {
 	uvec2 lights;       // LightTable, zero without lights
 	uvec2 frame;        // Frame
 } pc;
+
+bool hybrid; // Frame.hybrid
 
 struct Hit {
 	uint kind;
@@ -398,7 +401,8 @@ vec3 directLight(Hit h, vec3 pos) {
 		if (nl > 0.0) direct = nl * shadowTransmittance(pos + side * 0.002, l, 512.0) * (day ? sunRadiance(l.y) : MOON * pc.moonDir.w);
 	}
 	// Vanilla's light level says whether any block light reaches here: skip sampling (and its shadow ray) if not.
-	if (h.light.x > 0.0) direct += blockLight(pos, h.normal);
+	// Hybrid lighting takes vanilla's level as the light itself, raster-style.
+	if (h.light.x > 0.0) direct += hybrid ? BLOCK_LIGHT * pow(h.light.x, 2.2) : blockLight(pos, h.normal);
 	return direct;
 }
 
@@ -426,7 +430,9 @@ vec3 surfaceRadiance(Hit h, vec3 pos) {
 		// ponytail: until M4's denoiser, bounce light is approximated outside reference mode: sky light scaled by
 		// vanilla's sky light level, and a dim fill from its block light level.
 		float sky = h.light.y * h.light.y;
-		return radiance + h.albedo * (skyIrradiance(h.normal) * sky + BLOCK_LIGHT * 0.15 * pow(h.light.x, 2.2));
+		// (Hybrid lighting already counts block light in full in directLight.)
+		vec3 fill = hybrid ? vec3(0.0) : BLOCK_LIGHT * 0.15 * pow(h.light.x, 2.2);
+		return radiance + h.albedo * (skyIrradiance(h.normal) * sky + fill);
 	}
 
 	// Stochastic: follow the light around. Each bounce picks up direct light where it lands; a ray that
@@ -736,6 +742,7 @@ void main() {
 	Frame frame = Frame(pc.frame);
 	bounces = int(frame.cameraDelta.w);
 	lightFloor = frame.lightFloor;
+	hybrid = frame.hybrid != 0u;
 	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size), uvec2(p));
 	if (frame.denoise != 0u) {
 		writeDenoiserInputs(p, size, current, frame);

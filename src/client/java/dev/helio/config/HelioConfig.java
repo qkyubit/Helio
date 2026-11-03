@@ -20,6 +20,13 @@ public final class HelioConfig {
 
 	public enum ReflexMode { OFF, ON, BOOST }
 
+	/**
+	 * PATH_TRACED: everything traced (soft shadows, block-light shadows, bounce light; cleaned up by RR).
+	 * HYBRID: ray-traced sun/moon shadows and reflections only, vanilla-style ambient and block light from
+	 * light levels; no random sampling, so no denoiser needed. Much cheaper.
+	 */
+	public enum Lighting { PATH_TRACED, HYBRID }
+
 	public enum DebugView { OFF, INSTANCES, ALBEDO, NORMALS, TRIANGLE_DENSITY, MATERIALS }
 
 	private static final Path FILE = FabricLoader.getInstance().getConfigDir().resolve("helio.json");
@@ -32,6 +39,7 @@ public final class HelioConfig {
 	public boolean rayTracing = true;
 	/** Chunks around the player that rays can hit, capped by the render distance. */
 	public int rayTracingDistance = 12;
+	public Lighting lighting = Lighting.PATH_TRACED;
 	/** Presented frames per rendered frame: 1 = off, 2 = DLSS frame generation 2x, up to 1 + driver max for MFG. */
 	public int frameGeneration = 2;
 	public ReflexMode reflex = ReflexMode.ON;
@@ -53,11 +61,11 @@ public final class HelioConfig {
 		preset = p;
 		switch (p) {
 			case OFF -> { rayTracing = false; frameGeneration = 1; reflex = ReflexMode.ON; }
-			case PERFORMANCE -> { rayTracing = true; frameGeneration = 2; reflex = ReflexMode.BOOST; }
-			// ponytail: Balanced/Quality/Ultra only differ once M3/M4 add ray budgets and upscaling modes.
-			case BALANCED, QUALITY, ULTRA -> { rayTracing = true; frameGeneration = 2; reflex = ReflexMode.ON; }
+			case PERFORMANCE -> { rayTracing = true; lighting = Lighting.HYBRID; frameGeneration = 2; reflex = ReflexMode.BOOST; }
+			// ponytail: Balanced/Quality/Ultra only differ once M4 adds upscaling modes and ray budgets.
+			case BALANCED, QUALITY, ULTRA -> { rayTracing = true; lighting = Lighting.PATH_TRACED; frameGeneration = 2; reflex = ReflexMode.ON; }
 			// Screenshots: no generated frames (they're slightly soft), no latency trade-offs needed.
-			case PHOTO -> { rayTracing = true; frameGeneration = 1; reflex = ReflexMode.OFF; }
+			case PHOTO -> { rayTracing = true; lighting = Lighting.PATH_TRACED; frameGeneration = 1; reflex = ReflexMode.OFF; }
 			case CUSTOM -> {}
 		}
 	}

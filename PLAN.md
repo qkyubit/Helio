@@ -463,7 +463,17 @@ look right with accumulation on (reference) and stable with 1 spp.
    reflections and refracted sand, shoreline, ice. Known: opaque particles and
    sign text behind traced water/glass are hidden; reflections ignore other
    translucents; no coloured shadows through stained glass yet (M6).
-8. [ ] Hybrid preset (RT shadows + reflections only).
+8. [x] Hybrid lighting (`HelioConfig.Lighting`, "Lighting" setting; the Performance
+   preset uses it): ray-traced sun/moon shadows and reflections (water, glass,
+   metal, gems; refraction kept), block and sky light from vanilla's light
+   levels, no random sampling, so no RR. User-checked: 30 -> 75 fps base
+   (Hybrid tracing 7.6–11.4 ms at native 1440p), everything else as Path
+   Traced. Known: aliased edges (no jitter, no denoiser): DLAA/SR under Hybrid
+   comes with M4 step 2.
+
+**M3 exit check:** daytime overworld, torch-lit cave and water/glass scenes
+user-checked in reference mode and under RR. Still to see: a lava-lit Nether
+scene.
 
 ### M4 — DLSS integration
 
@@ -512,7 +522,8 @@ output near 180 Hz and no HUD smearing.
      (pipeline compiles on the render thread).
 2. [ ] Internal resolution: RR Quality / Balanced / Performance, the tracer at
    render size, vanilla's colour and depth sampled into it; DLSS SR (or DLAA)
-   when ray tracing is off. Quality setting in the UI.
+   under Hybrid lighting (jittered, for its aliasing) and when ray tracing is
+   off. Quality setting in the UI.
 3. [ ] Entity motion vectors (previous-frame entity vertices) for RR and FG.
 4. [ ] SHaRC-style radiance cache: more bounces for about the cost of one.
 5. [ ] Reflections under RR: specular hit distance + matrices (or specular

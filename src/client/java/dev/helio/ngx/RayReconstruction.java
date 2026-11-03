@@ -41,7 +41,8 @@ public final class RayReconstruction {
 	/** Whether the path tracer should hand its frames to RR. */
 	public static boolean active() {
 		return !failed && Helio.dlss && Helio.ngxCaps != null && Helio.ngxCaps.rayReconstruction()
-			&& HelioConfig.current.rayReconstruction && !HelioConfig.current.accumulate;
+			&& HelioConfig.current.rayReconstruction && !HelioConfig.current.accumulate
+			&& HelioConfig.current.lighting == HelioConfig.Lighting.PATH_TRACED;
 	}
 
 	/** (Re)creates the images for a new size. They exist whenever the path tracer runs: its shader binds them. */

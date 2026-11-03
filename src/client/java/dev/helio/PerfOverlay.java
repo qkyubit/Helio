@@ -50,7 +50,7 @@ public final class PerfOverlay {
 		else {
 			lines.add("Scene " + Scene.instanceCount + " BLAS, " + Scene.tlasTriangles / 1000 + "k tris + " + Scene.dynamicTriangles / 1000 + "k entity, " + Scene.sectionCount + " sections, "
 				+ Scene.pendingCount + " queued, build " + ms(Pass.SCENE_BUILD) + ", " + (Memory.allocated.get() >> 20) + " MB");
-			lines.add("Path tracing " + ms(Pass.PATH_TRACE) + ", " + Lights.count + " lights"
+			lines.add((c.lighting == HelioConfig.Lighting.HYBRID ? "Hybrid tracing " : "Path tracing ") + ms(Pass.PATH_TRACE) + ", " + Lights.count + " lights"
 				+ (c.accumulate ? ", " + PathTracer.frameIndex + " frames accumulated" : RayReconstruction.active() ? ", RR " + ms(Pass.RAY_RECONSTRUCTION) : ""));
 		}
 		if (!Double.isNaN(GpuTimers.ms(Pass.DLSS_G)))

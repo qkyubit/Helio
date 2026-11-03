@@ -273,7 +273,8 @@ public final class PathTracer {
 			lastViewProj.get(0, fb);
 			fb.putFloat(64, (float) cameraDelta.x).putFloat(68, (float) cameraDelta.y).putFloat(72, (float) cameraDelta.z)
 				.putFloat(76, accumulate ? 3 : 1).putInt(80, denoise ? 1 : 0)
-				.putFloat(84, (float) (0.02 + 0.1 * mc.options.gamma().get()));
+				.putFloat(84, (float) (0.02 + 0.1 * mc.options.gamma().get()))
+				.putInt(88, HelioConfig.current.lighting == HelioConfig.Lighting.HYBRID ? 1 : 0);
 			lastViewProj.set(viewProj);
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
