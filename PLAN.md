@@ -700,10 +700,18 @@ in the Radiance Test instance) plus its add-ons (emission, glowing ore, mirror).
      texel per micro-triangle (levels 1-7), with a per-triangle index buffer. Checked:
      with every shader-tested cutout hit dropped, leaves still show (the hardware
      commits their opaque parts).
-   - Same spot, old -> new: SPBR 4.15 -> 4.03 ms, rotrBLOCKS 33.9 -> 32.3 ms. rotrBLOCKS'
-     cost is traversal through its dense, overlapping 3D leaf planes, not alpha tests
-     (micromaps on/off and dropping all shader alpha tests change nothing; solid leaves
-     1.9 ms). Open: profile which rays pay for it (M7).
+   - Same spot, old -> new: SPBR 4.15 -> 4.03 ms, rotrBLOCKS 33.9 -> 32.3 ms.
+   - The real rotrBLOCKS cost: in 26.3 each quad takes its layer from its texture's
+     transparency, and its 128x leaves have soft (partly transparent) edges, so they went
+     to the translucent layer. There Helio's foliage mark equals the water mark: the leaves
+     were traced as water (refracting layer after layer, shiny like water, skipped by
+     reflections as water). `SectionCompilerMixin` now sends foliage's translucent quads to
+     the cutout layer while the path tracer meshes. Frozen-lake spot: 22.5 -> 8.4 ms; SPBR
+     unchanged (7.1 ms).
+   - Reflections now show stained glass, ice and nether portals (blended over what's
+     behind them, one layer): `reflectionSeen` in pathtrace.comp. Water stays out of them:
+     translucent layers that are only water lack the new `MASK_NOT_ONLY_WATER` instance
+     bit, and the any-hit skips water in mixed ones.
    - First-person body: reflection rays skip it too (`reflectionRay`); a shiny floor
      showed the head the camera sits in.
 

@@ -60,6 +60,8 @@ import static org.lwjgl.vulkan.VK12.*;
 public final class Scene {
 	/** Instance mask per layer: solid geometry is opaque, cutout needs an alpha test, translucent is skipped by shadow rays. */
 	public static final int MASK_SOLID = 1, MASK_CUTOUT = 2, MASK_TRANSLUCENT = 4, MASK_DYNAMIC = 8;
+	/** Also on translucent layers holding more than water (stained glass, ice, nether portals): reflections see those. */
+	public static final int MASK_NOT_ONLY_WATER = 16;
 	private static final int[] LAYER_MASK = {MASK_SOLID, MASK_CUTOUT, MASK_TRANSLUCENT};
 	/** Vanilla's BLOCK format: position float3, colour 4 bytes, UV0 float2, lightmap 2 shorts. Shaders hard-code it. */
 	public static final int VERTEX_STRIDE = 28;
@@ -79,7 +81,7 @@ public final class Scene {
 	}
 
 	/** ommPlan: cutout layers with micromaps on, worked out on the compile worker (Micromaps.plan). */
-	private record Geo(int layer, Buf vertices, int quads, Blas blas, Micromaps.Plan ommPlan) {}
+	private record Geo(int layer, int mask, Buf vertices, int quads, Blas blas, Micromaps.Plan ommPlan) {}
 
 	/** layers null: remove the section. lights: Lights.collect output, null if none. */
 	private record Upload(long node, Geo[] layers, int[] lights) {}
@@ -160,7 +162,17 @@ public final class Scene {
 			memCopy(memAddress(mesh.vertexBuffer()), vertices.mapped(), bytes);
 			if (geos == null) geos = new Geo[ChunkSectionLayer.values().length];
 			Micromaps.Plan plan = Helio.omm && e.getKey() == ChunkSectionLayer.CUTOUT ? Micromaps.plan(vertices.mapped(), quads) : null;
-			geos[e.getKey().ordinal()] = new Geo(e.getKey().ordinal(), vertices, quads, new Blas(), plan);
+			int mask = LAYER_MASK[e.getKey().ordinal()];
+			if (e.getKey() == ChunkSectionLayer.TRANSLUCENT) {
+				// Vertex colour alpha is 255 - WATER_MARK on water (colour at byte 12, alpha its last byte).
+				for (int q = 0; q < quads; q++) {
+					if (memGetByte(vertices.mapped() + (long) q * 4 * VERTEX_STRIDE + 15) != (byte) (255 - WATER_MARK)) {
+						mask |= MASK_NOT_ONLY_WATER;
+						break;
+					}
+				}
+			}
+			geos[e.getKey().ordinal()] = new Geo(e.getKey().ordinal(), mask, vertices, quads, new Blas(), plan);
 		}
 		incoming.add(new Upload(node, geos, lights));
 	}
@@ -172,6 +184,8 @@ public final class Scene {
 
 	/** True on a compile worker while it runs SectionCompiler.compile. */
 	public static final ThreadLocal<Boolean> COMPILING = ThreadLocal.withInitial(() -> Boolean.FALSE);
+	/** True on a compile worker while it meshes a foliage block for the path tracer (SectionCompilerMixin). */
+	public static final ThreadLocal<Boolean> TESSELATING_FOLIAGE = ThreadLocal.withInitial(() -> Boolean.FALSE);
 	/** Sections are being compiled for the path tracer: no AO or face shading baked into vertex colours. */
 	public static volatile boolean unshaded;
 
@@ -562,7 +576,7 @@ public final class Scene {
 			float tx = (sx << 4) - anchorX, ty = (sy << 4) - anchorY, tz = (sz << 4) - anchorZ;
 			for (Geo g : e.getValue()) {
 				if (g == null) continue;
-				putInstance(buf, infoBase, n++, tx, ty, tz, LAYER_MASK[g.layer], g.blas.address, g.vertices.address(), g.quads * 2, g.layer);
+				putInstance(buf, infoBase, n++, tx, ty, tz, g.mask, g.blas.address, g.vertices.address(), g.quads * 2, g.layer);
 				triangles += g.quads * 2L;
 			}
 		}

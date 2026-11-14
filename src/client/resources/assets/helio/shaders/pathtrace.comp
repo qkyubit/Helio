@@ -83,7 +83,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) buffer RadianceCac
 struct Instance { uvec2 vertices; uint triangles; uint kind; };
 layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer InstanceInfo { Instance i[]; };
 
-const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u, MASK_TRANSLUCENT = 4u, MASK_DYNAMIC = 8u;
+const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u, MASK_TRANSLUCENT = 4u, MASK_DYNAMIC = 8u, MASK_NOT_ONLY_WATER = 16u;
 const uint MASK_OPAQUE_SCENE = MASK_SOLID | MASK_CUTOUT | MASK_DYNAMIC;
 const uint KIND_CUTOUT = 1u, KIND_TRANSLUCENT = 2u, KIND_DYNAMIC = 3u;
 const uint DEBUG_INSTANCES = 1u, DEBUG_ALBEDO = 2u, DEBUG_NORMALS = 3u, DEBUG_TRIANGLE_DENSITY = 4u, DEBUG_MATERIALS = 5u,
@@ -232,6 +232,9 @@ bool cutoutHit(rayQueryEXT rq) {
 	uint stride = strideOf(inst.kind);
 	uvec3 t = triangleVertices(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false));
 	if ((cameraRay || reflectionRay) && inst.kind == KIND_DYNAMIC && (floatBitsToUint(vb.v[t.x * 11u + 7u]) & 0x10000u) != 0u) return false;
+	// Reflections pass through water (Scene.WATER_MARK) in sections that also hold glass, ice or portals (water-only
+	// sections are masked out): a water surface far off is a mirror of its own, not a wall.
+	if (reflectionRay && inst.kind == KIND_TRANSLUCENT && round((1.0 - tintAt(vb, t.x, stride).a) * 255.0) == 1.0) return false;
 	// Plain glass (Scene.GLASS_MARK): camera rays stop at its clear parts too, to refract there; light still passes them.
 	if (cameraRay && round((1.0 - tintAt(vb, t.x, stride).a) * 255.0) == 2.0) return true;
 	vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, false);
@@ -768,7 +771,30 @@ void throughWater(float d, inout vec3 result, inout vec3 weight) {
 	weight *= t;
 }
 
-float specularDistance; // set by specularRadiance(): how far its ray went
+float reflectionDistance; // set by reflectionSeen(): how far its ray went (SKY_DISTANCE: nothing hit)
+
+// What a reflection ray from origin along r sees, or miss if nothing. Stained glass, ice and nether portals show,
+// over what lies behind them; water doesn't (cutoutHit).
+vec3 reflectionSeen(vec3 origin, vec3 r, vec3 miss) {
+	rayQueryEXT rq;
+	reflectionRay = true;
+	TRACE(rq, origin, r, 512.0, MASK_OPAQUE_SCENE | MASK_NOT_ONLY_WATER, gl_RayFlagsNoneEXT)
+	reflectionRay = false;
+	reflectionDistance = SKY_DISTANCE;
+	if (!HIT(rq)) return miss;
+	float t = rayQueryGetIntersectionTEXT(rq, true);
+	reflectionDistance = t;
+	Hit h = shade(rq, r);
+	vec3 c = surfaceRadiance(h, origin + r * t);
+	if (h.kind != KIND_TRANSLUCENT) return c;
+	// ponytail: one translucent layer; a second one behind it is skipped.
+	rayQueryEXT bq;
+	reflectionRay = true;
+	TRACE(bq, origin + r * (t + 0.002), r, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
+	reflectionRay = false;
+	vec3 behind = HIT(bq) ? surfaceRadiance(shade(bq, r), origin + r * (t + 0.002 + rayQueryGetIntersectionTEXT(bq, true))) : miss;
+	return mix(behind, c, h.opacity);
+}
 
 // Microfacet normal around n, GGX distributed for alpha = roughness².
 vec3 ggxNormal(vec3 n, float alpha) {
@@ -783,14 +809,7 @@ vec3 ggxNormal(vec3 n, float alpha) {
 vec3 specularRadiance(vec3 pos, vec3 n, vec3 shading, vec3 dir, float roughness) {
 	vec3 r = reflect(dir, pc.stochastic != 0.0 ? ggxNormal(shading, roughness * roughness) : shading);
 	if (dot(r, n) <= 0.0) r = reflect(r, n); // below the real face: mirror back above it
-	rayQueryEXT rq;
-	reflectionRay = true;
-	TRACE(rq, pos + n * 0.002, r, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
-	reflectionRay = false;
-	specularDistance = SKY_DISTANCE;
-	if (!HIT(rq)) return skyRadiance(r);
-	specularDistance = rayQueryGetIntersectionTEXT(rq, true);
-	return surfaceRadiance(shade(rq, r), pos + n * 0.002 + r * specularDistance);
+	return reflectionSeen(pos + n * 0.002, r, skyRadiance(r));
 }
 
 // Set by radiance(): what the primary ray hit first (an entity, or water / glass / ice), at this NDC depth.
@@ -882,7 +901,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 				if (layer == 0) {
 					guideSpecular = f;
 					guideRoughness = h.roughness;
-					guideHitDistance = specularDistance;
+					guideHitDistance = reflectionDistance;
 				}
 			}
 			result += weight * diffuse * surfaceRadiance(h, pos);
@@ -902,18 +921,10 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 			reflected = true;
 			guideSpecular = vec3(fresnel);
 			vec3 r = reflect(dir, h.normal), keep = weight * fresnel;
-			rayQueryEXT rr;
-			reflectionRay = true;
-			TRACE(rr, pos + h.normal * 0.002, r, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
-			reflectionRay = false;
-			guideHitDistance = HIT(rr) ? rayQueryGetIntersectionTEXT(rr, true) : SKY_DISTANCE;
-			if (HIT(rr)) {
-				float tr = rayQueryGetIntersectionTEXT(rr, true);
-				if (inWater && !inGlass) throughWater(tr, result, keep);
-				result += keep * surfaceRadiance(shade(rr, r), pos + h.normal * 0.002 + r * tr);
-			} else {
-				result += keep * (inWater ? waterGlow : skyRadiance(r));
-			}
+			vec3 seen = reflectionSeen(pos + h.normal * 0.002, r, inWater ? waterGlow : skyRadiance(r));
+			guideHitDistance = reflectionDistance;
+			if (reflectionDistance < SKY_DISTANCE && inWater && !inGlass) throughWater(reflectionDistance, result, keep);
+			result += keep * seen;
 		}
 		// Past the first surface the ray itself bounces off instead: always under total internal reflection (else
 		// glass goes black where it reflects inside), otherwise by chance when stochastic (the chance stands in for
