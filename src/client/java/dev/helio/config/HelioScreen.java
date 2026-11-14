@@ -95,7 +95,10 @@ public class HelioScreen extends OptionsSubScreen {
 				.withValues(-2f, -1.5f, -1f, -0.5f, 0f, 0.5f, 1f, 1.5f, 2f)
 				.withTooltip(v -> Tooltip.create(Component.translatable("helio.exposure.tooltip")))
 				.create(Component.translatable("helio.exposure"), (b, v) -> c.exposure = v)),
-			null);
+			unsupportedIf(!Helio.rayTracing || Helio.ngxCaps == null, "no DLSS", CycleButton.builder((Integer n) -> n == 0 ? CommonComponents.OPTION_OFF : Component.literal(n + "%"), c.bloom)
+				.withValues(0, 5, 10, 15, 20, 30, 40)
+				.withTooltip(n -> Tooltip.create(Component.translatable("helio.bloom.tooltip")))
+				.create(Component.translatable("helio.bloom"), (b, v) -> c.bloom = v)));
 	}
 
 	/** Any manual change means the settings no longer match a preset. */

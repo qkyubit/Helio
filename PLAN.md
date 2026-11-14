@@ -765,7 +765,11 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      inverts it exactly (curve by bisection). Summing with subgroupAdd after the ray queries hung the GPU
      within a minute (5 s semaphore timeout); plain atomics from the sparse grid don't (200 s soak FG off, 180 s
      FG 2x). Same daylight view: about the ACES picture's brightness, softer highlights.
-2. [ ] Bloom: from the HDR picture after RR, before the tonemap (emissive blocks, sun glints, the sun).
+2. [x] Bloom: from the HDR picture after RR, before the tonemap (emissive blocks, sun glints, the sun).
+   - Done in code: `rt/Bloom.java` + `bloom.comp`: 6-level chain from DLSS's output (half size first),
+     Jimenez's 13-tap down (Karis-weighted first pass), 3x3 tent up added level by level. `rr_resolve.comp` mixes
+     the Bloom setting's share of it (default 10%: 5% looked too faint, 15% too strong) into the radiance before exposure and AgX; sky pixels too (vanilla's pixel through
+     `untonemap`), so the vanilla sun gets a halo. Not in reference accumulation (no DLSS).
 3. [ ] Physically based sky: transmittance, multi-scattering and sky-view LUTs (Hillaire 2020) from the sun
    angle; the tracer draws the sky (vanilla's square sun and moon kept as sprites, stars), sun light comes
    through the transmittance LUT, sky light from the sky-view LUT. Rain and thunder darken it; Nether and End

@@ -50,6 +50,8 @@
 	"helio.ray_reconstruction": "Ray Reconstruction",
 	"helio.cave_brightness": "Cave Brightness",
 	"helio.normal_strength": "Normal Map Strength",
+	"helio.bloom": "Bloom",
+	"helio.bloom.tooltip": "How much bright things (the sun, glowing blocks, reflections of light) glow onto their surroundings. Needs DLSS.",
 	"helio.exposure": "Exposure",
 	"helio.exposure.tooltip": "Brightens or darkens the path-traced picture, on top of the automatic exposure that adapts to bright and dark places.",
 	"helio.normal_strength.tooltip": "How strongly resource-pack normal maps (LabPBR) bump surfaces. 100% is as the pack made them; 0% is flat.",

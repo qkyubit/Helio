@@ -68,6 +68,8 @@ public final class HelioConfig {
 	public int caveBrightness = 25;
 	/** How far resource-pack normal maps tilt surfaces, in percent of what the pack made. */
 	public int normalStrength = 300;
+	/** Share of the picture that's bloom, in percent (0 off). */
+	public int bloom = 10;
 	/** Stops added to the auto exposure (brighter above 0). */
 	public float exposure = 0;
 	/**

@@ -211,18 +211,19 @@ public final class PathTracer {
 			compositeLayout = h.get(0);
 			compositePipeline = computePipeline(vk, "entity_composite.comp", compositeLayout, s);
 
-			VkDescriptorSetLayoutBinding.Buffer rb = VkDescriptorSetLayoutBinding.calloc(5, s);
-			for (int i = 0; i < 5; i++) {
-				rb.get(i).binding(i).descriptorType(i == 3 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+			VkDescriptorSetLayoutBinding.Buffer rb = VkDescriptorSetLayoutBinding.calloc(6, s);
+			for (int i = 0; i < 6; i++) {
+				rb.get(i).binding(i).descriptorType(i == 3 || i == 5 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
 					.descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
 			}
 			check(vkCreateDescriptorSetLayout(vk, VkDescriptorSetLayoutCreateInfo.calloc(s).sType$Default()
 				.flags(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR).pBindings(rb), null, h), "resolve set layout");
 			resolveSetLayout = h.get(0);
 			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(resolveSetLayout))
-				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(4)), null, h), "resolve layout");
+				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(8)), null, h), "resolve layout");
 			resolveLayout = h.get(0);
 			resolvePipeline = computePipeline(vk, "rr_resolve.comp", resolveLayout, s);
+			Bloom.init(vk, s);
 
 			VkDescriptorSetLayoutBinding.Buffer mb = VkDescriptorSetLayoutBinding.calloc(3, s);
 			for (int i = 0; i < 3; i++) mb.get(i).binding(i).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
@@ -242,7 +243,7 @@ public final class PathTracer {
 		Helio.LOG.info("Path tracer initialised");
 	}
 
-	private static long computePipeline(VkDevice vk, String shader, long layout, MemoryStack s) throws IOException {
+	static long computePipeline(VkDevice vk, String shader, long layout, MemoryStack s) throws IOException {
 		LongBuffer h = s.mallocLong(1);
 		ByteBuffer spv = Shaders.compile(shader);
 		check(vkCreateShaderModule(vk, VkShaderModuleCreateInfo.calloc(s).sType$Default().pCode(spv), null, h), "shader module");
@@ -455,10 +456,14 @@ public final class PathTracer {
 
 	/** After DLSS: its output, tonemapped, into the main colour (rr_resolve.comp). */
 	private static void resolve(VkCommandBuffer cmd, VulkanGpuTextureView color, VulkanGpuTextureView depth, int width, int height, float exposure, MemoryStack s) {
+		float bloom = HelioConfig.current.bloom / 100f;
+		Bloom.run(cmd, Dlss.output.view(), width, height, s); // also with bloom 0: rr_resolve.comp still samples it
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolvePipeline);
-		vkCmdPushConstants(cmd, resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s.malloc(4).putFloat(0, exposure));
+		vkCmdPushConstants(cmd, resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s.malloc(8).putFloat(0, exposure).putFloat(4, bloom));
 		long[] views = {Dlss.output.view(), color.vkImageView(), entityImg.view(), 0, Dlss.hitDepth.view()};
-		VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(5, s);
+		VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(6, s);
+		w.get(5).sType$Default().dstBinding(5).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+			.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(Bloom.sampler()).imageView(Bloom.view()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
 		for (int i = 0; i < 5; i++) {
 			if (i == 3) continue;
 			w.get(i).sType$Default().dstBinding(i).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -569,6 +574,7 @@ public final class PathTracer {
 		vkDestroyPipeline(vk, resolvePipeline, null);
 		vkDestroyPipelineLayout(vk, resolveLayout, null);
 		vkDestroyDescriptorSetLayout(vk, resolveSetLayout, null);
+		Bloom.destroy(vk);
 		vkDestroyPipeline(vk, compositePipeline, null);
 		vkDestroyPipelineLayout(vk, compositeLayout, null);
 		vkDestroyDescriptorSetLayout(vk, compositeSetLayout, null);
