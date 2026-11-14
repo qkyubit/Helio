@@ -868,9 +868,17 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      ((t - 0.8) x 25, -20..25), sunrise and sunset +30, night -25, and the light's own colour: the meter now
      also sums red and blue over luminance of radiance over albedo (log2 of red/blue x 30, -40..40: torches
      warm, soul fire and moonlight cool); total -60..60. Snowy taiga by day: about -21.
-9. [ ] Handheld light (user, 2026-11-14): a light-emitting item held in either hand (torch, lantern, glowstone,
+9. [x] Handheld light (user, 2026-11-14): a light-emitting item held in either hand (torch, lantern, glowstone,
    ...) lights its surroundings like the block would, from the player's hand, with shadows; other players and
    mobs holding one too. Joins the light sampling as a moving light.
+   - Lights.heldLights: any living entity within 64 blocks holding a BlockItem whose block emits light, in
+     either arm; the 8 nearest the camera. Hand: beside the body by its yaw (0.4), 0.35 forward, 0.55 of
+     the bounding box high. Colour and level as the block's.
+   - Held lights come first in the light array (dims.w = count); blockLight samples each as its own RIS
+     bucket (1 / (d^2 + 1)) next to the 27 sections. The shadow ray stops 0.5 short of the light, past the
+     hand and item holding it, so the holder's own body still casts a shadow.
+   - Vanilla's light levels don't know of them: sampling also runs where vanilla's block light is 0 but a
+     held light is within 15 blocks. Hybrid lighting adds them unshadowed.
 10. [ ] Exit: side-by-side screenshots (vanilla / Helio) of the M3 scenes, at recorded coordinates.
 
 ### M7 — Performance pass

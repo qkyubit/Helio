@@ -313,7 +313,7 @@ public final class Scene {
 			buildPending(cmd, slot, camera, s);
 			buildDynamic(cmd, slot, s);
 			buildTlas(cmd, slot, camera, cameraPos, s);
-			lights = Lights.upload(slot, camera, rtDistance(), anchorX, anchorY, anchorZ);
+			lights = Lights.upload(slot, cameraPos, rtDistance(), anchorX, anchorY, anchorZ);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			GpuTimers.end(cmd, GpuTimers.Pass.SCENE_BUILD);
 		}

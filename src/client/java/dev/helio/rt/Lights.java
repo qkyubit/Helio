@@ -12,6 +12,12 @@ import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
 import net.minecraft.client.renderer.block.BlockAndTintGetter;
 import net.minecraft.tags.FluidTags;
+import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.HumanoidArm;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.Arrays;
@@ -26,13 +32,21 @@ import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
  * frame the path tracer gets a table of the sections around the camera (each block light reaches at most 15
  * blocks, so a point is only lit from its own section and the 26 around it) and samples from it.
  * <p>
+ * <p>
+ * Held lights (M6 step 9): a torch, lantern or other light block held by the player or any mob lights from
+ * its hand. They're recollected each frame (up to {@value #MAX_HELD}, nearest the camera first) and come first
+ * in the light array; the shader samples them as extra candidates next to the sections.
+ * <p>
  * GPU layout, per frame: header {ivec4 origin (table's min section, relative to the anchor section; w = light
- * count), ivec4 dims, uint64 address of the light array, 8 bytes padding}, then one uvec2 {first light, count} per section
- * (x fastest, then y, then z), then lights {vec4 block centre relative to the anchor + emission level,
- * vec4 linear colour}.
+ * count), ivec4 dims (w = held lights), uint64 address of the light array, 8 bytes padding}, then one uvec2
+ * {first light, count} per section (x fastest, then y, then z), then lights {vec4 block centre (held: hand)
+ * relative to the anchor + emission level, vec4 linear colour, w = 1 if held}.
  */
 public final class Lights {
 	private static final int HEADER = 48, LIGHT_SIZE = 32, RING = 4;
+	/** Held lights sampled at most (the shader's MAX_HELD), and how far from the camera they're looked for. */
+	private static final int MAX_HELD = 8;
+	private static final double HELD_RANGE = 64;
 
 	/** Light colour per block state: average of its particle texture's brightest opaque texels, linear. */
 	private static final Map<BlockState, float[]> colours = new ConcurrentHashMap<>();
@@ -116,13 +130,45 @@ public final class Lights {
 		else bySection.put(node, lights);
 	}
 
+	/**
+	 * Light blocks held in either hand by living entities near the camera, nearest first: {x, y, z (hand,
+	 * world), emission, packed sRGB colour} each.
+	 */
+	private static float[][] heldLights(Vec3 camera) {
+		Minecraft mc = Minecraft.getInstance();
+		float pt = mc.getDeltaTracker().getGameTimeDeltaPartialTick(true);
+		java.util.List<float[]> out = new java.util.ArrayList<>();
+		for (Entity e : mc.level.entitiesForRendering()) {
+			if (!(e instanceof LivingEntity living) || e.isRemoved() || e.position().distanceToSqr(camera) > HELD_RANGE * HELD_RANGE) continue;
+			for (HumanoidArm arm : HumanoidArm.values()) {
+				if (!(living.getItemHeldByArm(arm).getItem() instanceof BlockItem item)) continue;
+				BlockState state = item.getBlock().defaultBlockState();
+				int emission = state.getLightEmission();
+				if (emission == 0) continue;
+				// The hand: beside the body (by its yaw), a little in front and about chest high, where a held
+				// torch's flame is. ponytail: ignores arm swing and pose; a crouch lowers it through the bounding box.
+				Vec3 at = e.getPosition(pt);
+				double yaw = Math.toRadians(Mth.rotLerp(pt, living.yBodyRotO, living.yBodyRot));
+				double side = arm == HumanoidArm.RIGHT ? 0.4 : -0.4, forward = 0.35;
+				double sin = Math.sin(yaw), cos = Math.cos(yaw);
+				out.add(new float[]{
+					(float) (at.x - sin * forward - cos * side), (float) (at.y + e.getBbHeight() * 0.55), (float) (at.z + cos * forward - sin * side),
+					emission, colourOf(state)}); // 24-bit RGB is exact in a float
+			}
+		}
+		out.sort(java.util.Comparator.comparingDouble(l -> camera.distanceToSqr(l[0], l[1], l[2])));
+		return out.subList(0, Math.min(out.size(), MAX_HELD)).toArray(new float[0][]);
+	}
+
 	/** Uploads this frame's table; returns its device address (0: no lights). */
-	static long upload(int slot, SectionPos camera, int r, int anchorX, int anchorY, int anchorZ) {
+	static long upload(int slot, Vec3 cameraPos, int r, int anchorX, int anchorY, int anchorZ) {
 		var level = Minecraft.getInstance().level;
 		if (level == null) return 0;
+		SectionPos camera = SectionPos.of(cameraPos);
+		float[][] held = heldLights(cameraPos);
 		int minY = level.getMinSectionY(), height = level.getSectionsCount();
 		int w = 2 * r + 1, cells = w * height * w;
-		int total = 0;
+		int total = held.length;
 		for (int[] l : bySection.values()) total += l.length / 2;
 		long tableBytes = (long) cells * 8, lightsOffset = HEADER + (tableBytes + 15) / 16 * 16;
 		long bytes = lightsOffset + (long) total * LIGHT_SIZE;
@@ -134,6 +180,10 @@ public final class Lights {
 		long p = buf.mapped();
 		memSet(p + HEADER, 0, tableBytes);
 		int ox = camera.x() - r, oz = camera.z() - r, n = 0;
+		for (float[] l : held) {
+			int rgb = (int) l[4];
+			putLight(p + lightsOffset + (long) n++ * LIGHT_SIZE, l[0] - anchorX, l[1] - anchorY, l[2] - anchorZ, l[3], rgb, 1);
+		}
 		for (Long2ObjectMap.Entry<int[]> e : bySection.long2ObjectEntrySet()) {
 			long node = e.getLongKey();
 			int cx = SectionPos.x(node) - ox, cy = SectionPos.y(node) - minY, cz = SectionPos.z(node) - oz;
@@ -144,16 +194,9 @@ public final class Lights {
 			memPutInt(cell + 4, l.length / 2);
 			int bx = (SectionPos.x(node) << 4) - anchorX, by = (SectionPos.y(node) << 4) - anchorY, bz = (SectionPos.z(node) << 4) - anchorZ;
 			for (int i = 0; i < l.length; i += 2, n++) {
-				long q = p + lightsOffset + (long) n * LIGHT_SIZE;
-				int packed = l[i], rgb = l[i + 1];
-				memPutFloat(q, bx + (packed & 15) + 0.5f);
-				memPutFloat(q + 4, by + (packed >> 4 & 15) + 0.5f);
-				memPutFloat(q + 8, bz + (packed >> 8 & 15) + 0.5f);
-				memPutFloat(q + 12, packed >> 12 & 15);
-				memPutFloat(q + 16, (float) Math.pow((rgb >> 16 & 255) / 255f, 2.2));
-				memPutFloat(q + 20, (float) Math.pow((rgb >> 8 & 255) / 255f, 2.2));
-				memPutFloat(q + 24, (float) Math.pow((rgb & 255) / 255f, 2.2));
-				memPutFloat(q + 28, 0);
+				int packed = l[i];
+				putLight(p + lightsOffset + (long) n * LIGHT_SIZE, bx + (packed & 15) + 0.5f, by + (packed >> 4 & 15) + 0.5f,
+					bz + (packed >> 8 & 15) + 0.5f, packed >> 12 & 15, l[i + 1], 0);
 			}
 		}
 		memPutInt(p, -r);
@@ -163,11 +206,22 @@ public final class Lights {
 		memPutInt(p + 16, w);
 		memPutInt(p + 20, height);
 		memPutInt(p + 24, w);
-		memPutInt(p + 28, 0);
+		memPutInt(p + 28, held.length);
 		memPutLong(p + 32, buf.address() + lightsOffset);
 		memPutLong(p + 40, 0);
 		count = n;
 		return n == 0 ? 0 : buf.address();
+	}
+
+	private static void putLight(long q, float x, float y, float z, float emission, int rgb, float held) {
+		memPutFloat(q, x);
+		memPutFloat(q + 4, y);
+		memPutFloat(q + 8, z);
+		memPutFloat(q + 12, emission);
+		memPutFloat(q + 16, (float) Math.pow((rgb >> 16 & 255) / 255f, 2.2));
+		memPutFloat(q + 20, (float) Math.pow((rgb >> 8 & 255) / 255f, 2.2));
+		memPutFloat(q + 24, (float) Math.pow((rgb & 255) / 255f, 2.2));
+		memPutFloat(q + 28, held);
 	}
 
 	/** Resource packs changed: texture colours may have too. */

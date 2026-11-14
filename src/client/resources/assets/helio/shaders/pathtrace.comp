@@ -52,11 +52,11 @@ layout(set = 1, binding = 0) uniform sampler2D entityTextures[256]; // this fram
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Vertices { float v[]; };
 // Light-emitting blocks around the camera (Lights.java): a table of the sections in range, each pointing at
 // its run of lights.
-struct Light { vec4 posEmission; vec4 colour; }; // block centre relative to the anchor + emission level; linear colour
+struct Light { vec4 posEmission; vec4 colour; }; // block centre (held: hand) relative to the anchor + emission level; linear colour, w = 1 if held
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightArray { Light l[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer LightTable {
 	ivec4 origin; // min section of the table relative to the anchor's; w = light count
-	ivec4 dims;
+	ivec4 dims;   // w = held lights, first in the array (at most MAX_HELD)
 	uvec2 lights; // LightArray
 	uvec2 pad;
 	uvec2 cells[]; // first light, count; x fastest, then y, then z
@@ -121,6 +121,8 @@ const float LIGHT = 8.0;        // intensity of an emission-15 block light
 const float EMISSIVE = 4.0;     // radiance of an emission-15 block's own surface, times its texture (M6 bloom keys off it)
 const float PACK_GLOW = 0.5;    // emission of a resource pack's glowing texels on blocks that give no light (ores), as a share of EMISSIVE
 const uint CANDIDATES = 8u;     // lights considered per shading point (RIS)
+const int MAX_HELD = 8;         // held lights (torches in hand...) sampled at most (Lights.MAX_HELD)
+const float HELD_CLEAR = 0.5;   // a held light's shadow ray stops this far short of it: past the hand and item holding it
 const float SUN_COS = 0.99994;  // 0.6 degree disc radius: soft-shadow penumbra
 const float MOON_COS = 0.99996;
 const float GLINT = 50.0;       // the sun and moon discs as seen (sky, reflections), over their direct light
@@ -749,16 +751,53 @@ vec4 fog(vec3 origin, vec3 dir, float tMax) {
 	return vec4(radiance, transmittance);
 }
 
+// Whether a held light (M6 step 9) is near enough to light pos: vanilla's light levels don't know of them.
+bool nearHeld(vec3 pos) {
+	if (pc.lights == uvec2(0)) return false;
+	LightTable table = LightTable(pc.lights);
+	LightArray lights = LightArray(table.lights);
+	for (int j = 0; j < table.dims.w; j++) {
+		vec3 d = lights.l[j].posEmission.xyz - pos;
+		if (dot(d, d) < 225.0) return true;
+	}
+	return false;
+}
+
+// Hybrid lighting: held lights as they'd fall unshadowed (vanilla's levels hold only the blocks').
+vec3 heldLightUnshadowed(vec3 pos, vec3 n) {
+	if (pc.lights == uvec2(0)) return vec3(0.0);
+	LightTable table = LightTable(pc.lights);
+	LightArray lights = LightArray(table.lights);
+	vec3 sum = vec3(0.0);
+	for (int j = 0; j < table.dims.w; j++) sum += lightContribution(lights.l[j], pos, n);
+	return sum;
+}
+
 // Block lights by resampled importance sampling: CANDIDATES lights drawn from the 27 sections around pos
-// (a section in proportion to its light count over its squared distance, then a light in it uniformly), one
-// kept in proportion to its unshadowed contribution, then a single shadow ray to a point inside its block
-// (stopping where the ray enters that block, which would otherwise hide its own light).
+// (a section in proportion to its light count over its squared distance, then a light in it uniformly) and
+// the held lights (each its own bucket, by its distance), one kept in proportion to its unshadowed
+// contribution, then a single shadow ray to a point inside its block (stopping where the ray enters that
+// block, which would otherwise hide its own light; for a held light, short of the hand holding it).
 vec3 blockLight(vec3 pos, vec3 n, vec3 shading) {
 	if (pc.lights == uvec2(0)) return vec3(0.0);
 	LightTable table = LightTable(pc.lights);
+	LightArray lights = LightArray(table.lights);
 	ivec3 base = ivec3(floor(pos / 16.0));
-	uint first[27], count[27];
-	float cdf[27], total = 0.0;
+	const int BUCKETS = 27 + MAX_HELD;
+	int buckets = 27 + min(table.dims.w, MAX_HELD);
+	uint first[BUCKETS], count[BUCKETS];
+	float cdf[BUCKETS], total = 0.0;
+	for (int j = 0; j < buckets - 27; j++) {
+		vec3 d = lights.l[j].posEmission.xyz - pos;
+		float d2 = dot(d, d);
+		first[27 + j] = uint(j);
+		count[27 + j] = 1u;
+		total += d2 < 225.0 ? 1.0 / (d2 + 1.0) : 0.0;
+		cdf[27 + j] = total;
+	}
+	// Sections after the held lights in the cdf: shift theirs by the held total.
+	float heldTotal = total;
+	total = 0.0;
 	for (int i = 0; i < 27; i++) {
 		ivec3 s = base + ivec3(i % 3 - 1, (i / 3) % 3 - 1, i / 9 - 1), c = s - table.origin.xyz;
 		uvec2 cell = uvec2(0u);
@@ -771,9 +810,10 @@ vec3 blockLight(vec3 pos, vec3 n, vec3 shading) {
 		total += cell.y > 0u && d2 < 256.0 ? float(cell.y) / (d2 + 4.0) : 0.0;
 		cdf[i] = total;
 	}
+	for (int j = 27; j < buckets; j++) cdf[j] += total;
+	total += heldTotal;
 	if (total == 0.0) return vec3(0.0);
 
-	LightArray lights = LightArray(table.lights);
 	float weightSum = 0.0, chosenTarget = 0.0;
 	uint chosen = 0u;
 	vec3 chosenContribution = vec3(0.0);
@@ -781,7 +821,7 @@ vec3 blockLight(vec3 pos, vec3 n, vec3 shading) {
 	uint candidates = pc.stochastic != 0.0 ? CANDIDATES / 2u : CANDIDATES;
 	for (uint m = 0u; m < candidates; m++) {
 		float u = rand() * total, below = 0.0;
-		int i = 0, hi = 26; // the first section whose cdf passes u, by bisection
+		int i = 0, hi = buckets - 1; // the first bucket whose cdf passes u, by bisection
 		while (i < hi) {
 			int mid = (i + hi) >> 1;
 			if (cdf[mid] <= u) i = mid + 1;
@@ -802,9 +842,10 @@ vec3 blockLight(vec3 pos, vec3 n, vec3 shading) {
 	if (chosenTarget == 0.0) return vec3(0.0);
 
 	vec3 centre = lights.l[chosen].posEmission.xyz;
-	vec3 toPoint = centre + (vec3(rand(), rand(), rand()) - 0.5) * 0.8 - pos;
+	bool held = lights.l[chosen].colour.w != 0.0;
+	vec3 toPoint = centre + (vec3(rand(), rand(), rand()) - 0.5) * (held ? 0.2 : 0.8) - pos;
 	vec3 dir = normalize(toPoint);
-	float tMax = boxEntry(pos, dir, centre) - 0.01;
+	float tMax = held ? length(toPoint) - HELD_CLEAR : boxEntry(pos, dir, centre) - 0.01;
 	vec3 lit = tMax > 0.0 ? shadowTransmittance(pos + n * 0.002, dir, tMax) : vec3(1.0);
 	return lit * chosenContribution * (weightSum / (float(candidates) * chosenTarget));
 }
@@ -874,7 +915,9 @@ vec3 directLight(Hit h, vec3 pos) {
 	}
 	// Vanilla's light level says whether any block light reaches here: skip sampling (and its shadow ray) if not.
 	// Hybrid lighting takes vanilla's level as the light itself, raster-style.
-	if (h.light.x > 0.0) direct += hybrid ? BLOCK_LIGHT * pow(h.light.x, 2.2) : blockLight(pos, h.normal, h.shading);
+	// Held lights (M6 step 9) aren't in vanilla's levels: near one, sample anyway.
+	if (hybrid) direct += BLOCK_LIGHT * pow(h.light.x, 2.2) + heldLightUnshadowed(pos, h.shading);
+	else if (h.light.x > 0.0 || nearHeld(pos)) direct += blockLight(pos, h.normal, h.shading);
 	return direct;
 }
 
