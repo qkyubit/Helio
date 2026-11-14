@@ -834,8 +834,16 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      while Helio draws the sky (not in water, lava, powder snow, blindness, darkness); `edgeFade` in
      pathtrace.comp fades vanilla's terrain into Helio's sky over the last 20% of the render distance; below
      the horizon the sky continues the horizon's haze, darkening to 45% about 20 degrees down.
-6. [ ] Water: waves (normal from a procedural height or the pack's water normal map), caustics on what's
+6. [x] Water: waves (normal from a procedural height or the pack's water normal map), caustics on what's
    under it, underwater look.
+   - Done in code: `waveHeight` / `waveNormal` in pathtrace.comp: three octaves of the cloud noise's smooth
+     Worley channel sliced through game time (churns rather than slides), wide and flat (user: first try at twice
+     the frequencies and slope 0.25 read too intense), slope 0.15; water's top faces reflect
+     and refract about it (reflections pushed back above the face, refraction falling back to the flat face if
+     a wave would turn it back). Caustics: a shadow ray rising through water is scaled by how a patch of the
+     surface bunches or spreads the refracted light at its depth (inverse Jacobian of where it lands, clamped
+     0.3-4). Underwater the haze is light shafts from the surface (4 steps over 48 blocks, through the waves,
+     dimmed by the water to the eye). Cost about 0.6 ms at the lake (9.3 -> 9.9). Underwater not checked yet.
 7. [ ] Weather: rain wets surfaces (darker, smoother, by porosity) and fills puddles on flat ground.
 8. [ ] Grading: colour-grading LUT, optional film grain and vignette.
 9. [ ] Exit: side-by-side screenshots (vanilla / Helio) of the M3 scenes, at recorded coordinates.

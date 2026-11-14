@@ -273,6 +273,49 @@ bool cutoutHit(rayQueryEXT rq) {
 	cameraRay = true; TRACE(rq, origin, dir, tMax, mask, gl_RayFlagsNoneEXT) cameraRay = false;
 #define HIT(rq) (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT)
 
+float cloudTime, cloudBottom, cloudCover; // Frame (cloudTime: also the clock for waves and twinkling)
+vec3 anchorWorld;                          // the scene anchor's world position (Frame.anchor)
+
+// The water a view ray is in: per-block absorption, and the light the water itself sends back.
+vec3 waterSigma, waterGlow;
+
+// Water waves (M6 step 6): a height field of three octaves of the cloud noise's smooth Worley channel, sliced
+// through time so it churns rather than slides; its slope tilts water's surface normal for reflection and
+// refraction, and bends the sunlight that reaches under it (caustics). The surface itself stays flat.
+const float WAVE_SLOPE = 0.15;    // how far the height field's gradient tilts the normal (0.25 read too choppy)
+const float WATER_SHAFTS = 0.03;  // underwater: share of the light the water scatters towards the eye, per block
+
+float waveHeight(vec2 w, float t) {
+	// Half the frequencies first tried: wider waves and ripples.
+	return textureLod(cloudNoise, vec3(w.x * 0.015, t * 0.03, w.y * 0.015), 0.0).g
+		+ 0.45 * textureLod(cloudNoise, vec3(w.x * 0.045 + t * 0.01, t * 0.05, w.y * 0.045), 0.0).g
+		+ 0.2 * textureLod(cloudNoise, vec3(w.x * 0.12, t * 0.09, w.y * 0.12 - t * 0.015), 0.0).g;
+}
+
+// The wave's normal (pointing up) at scene position pos on a water surface.
+vec3 waveNormal(vec3 pos) {
+	vec2 w = pos.xz + anchorWorld.xz;
+	float t = cloudTime * 0.5, e = 0.15; // seconds of game time; finite-difference step, blocks
+	float h0 = waveHeight(w, t);
+	vec2 g = vec2(waveHeight(w + vec2(e, 0.0), t) - h0, waveHeight(w + vec2(0.0, e), t) - h0) / e * WAVE_SLOPE;
+	return normalize(vec3(-g.x, 1.0, -g.y));
+}
+
+// Caustics: light along l crossing the water's surface at s, refracted by the waves, lands depth blocks below
+// spread or bunched; its brightness there is the inverse of the area a patch of surface lands on.
+float caustics(vec3 s, vec3 l, float depth) {
+	if (depth < 0.2) return 1.0;
+	const float e = 0.2;
+	vec2 land[3];
+	for (int k = 0; k < 3; k++) {
+		vec3 p = s + vec3(k == 1 ? e : 0.0, 0.0, k == 2 ? e : 0.0);
+		vec3 r = refract(-l, waveNormal(p), 1.0 / WATER_IOR);
+		land[k] = p.xz + r.xz * (depth / max(-r.y, 0.05));
+	}
+	vec2 dx = land[1] - land[0], dz = land[2] - land[0];
+	return clamp(e * e / max(abs(dx.x * dz.y - dx.y * dz.x), 1e-4), 0.3, 4.0);
+}
+
 // The colour a translucent surface a shadow ray crosses lets through: stained glass filters by its
 // colour, as strongly as the texture is opaque. Water and ice nothing here; the nearest water surface crossed is
 // kept in waterT / waterTint (its linear biome tint) for the absorption on the way up to it.
@@ -313,7 +356,10 @@ vec3 shadowTransmittance(vec3 origin, vec3 dir, float tMax) {
 	vec3 waterTint = vec3(1.0);
 	while (rayQueryProceedEXT(tq)) tint *= candidateTint(tq, waterT, waterTint);
 	// As throughWater(): per block, the tint to the power WATER_ABSORPTION.
-	if (dir.y > 0.0 && waterT < tMax) tint *= pow(max(waterTint, vec3(0.01)), vec3(WATER_ABSORPTION * waterT));
+	if (dir.y > 0.0 && waterT < tMax) {
+		tint *= pow(max(waterTint, vec3(0.01)), vec3(WATER_ABSORPTION * waterT));
+		tint *= caustics(origin + dir * waterT, dir, waterT * dir.y);
+	}
 	return tint;
 }
 
@@ -503,8 +549,6 @@ vec3 skyIrradiance(vec3 n) {
 // towers narrowing upward, wispy undersides and billowing tops. Lit by the sun or moon through a march towards
 // it (Beer's law with the powder darkening on edges facing it, a forward and a back lobe, two softer octaves for
 // light scattered more than once) and the sky's light, dimmer towards the base.
-float cloudTime, cloudBottom, cloudCover; // Frame
-vec3 anchorWorld;                          // the scene anchor's world position (Frame.anchor)
 const float CLOUD_THICKNESS = 250.0;
 const float CLOUD_EXTINCTION = 0.05;       // per block, at full density
 const float CLOUD_FAR = 6000.0;            // blocks: past this the layer isn't marched
@@ -616,8 +660,26 @@ const float FOG_FAR = 160.0;
 const int FOG_STEPS = 4;              // each a shadow ray: 6 cost 1.9 ms
 float fogSkyLight = 1.0; // vanilla's sky light where the primary ray ended (1 for the sky): the haze's sky fill
 
+// Underwater, the haze is the water's own: light shafts from the surface (through its waves: caustics) over the
+// first 48 blocks, dimmed by the water between them and the eye like everything else (throughWater). Its
+// absorption and glow themselves are throughWater's.
+vec4 waterShafts(vec3 origin, vec3 dir, float tMax) {
+	bool day = pc.sunDir.y > 0.0;
+	vec3 l = day ? pc.sunDir.xyz : pc.moonDir.xyz;
+	if (l.y <= 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+	vec3 light = (day ? sunRadiance(l.y) : moonRadiance(l.y)) * henyeyGreenstein(dot(dir, l), 0.8);
+	float t1 = min(tMax, 48.0), dt = t1 / float(FOG_STEPS), t = dt * rand();
+	vec3 radiance = vec3(0.0);
+	for (int i = 0; i < FOG_STEPS; i++, t += dt) {
+		vec3 x = origin + dir * t;
+		radiance += shadowTransmittance(x, l, 512.0) * light * WATER_SHAFTS * dt * exp(-waterSigma * t);
+	}
+	return vec4(radiance, 1.0);
+}
+
 vec4 fog(vec3 origin, vec3 dir, float tMax) {
-	if (pc.skyColor.w == 0.0 || pc.fogColor.w != 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+	if (pc.skyColor.w == 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+	if (pc.fogColor.w != 0.0) return waterShafts(origin, dir, tMax);
 	float t1 = min(tMax, FOG_FAR), dt = t1 / float(FOG_STEPS), t = dt * rand();
 	bool day = pc.sunDir.y > 0.0;
 	vec3 l = day ? pc.sunDir.xyz : pc.moonDir.xyz;
@@ -1044,8 +1106,6 @@ vec3 skyRadiance(vec3 d) {
 	return c;
 }
 
-// The water a view ray is in: per-block absorption, and the light the water itself sends back.
-vec3 waterSigma, waterGlow;
 
 void enterWater(vec3 tint, float skyLight) {
 	waterSigma = -log(max(tint, vec3(0.01))) * WATER_ABSORPTION;
@@ -1205,15 +1265,18 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		bool nextWater = h.water != inWater, nextGlass = h.glass != inGlass;
 		float n1 = inGlass ? GLASS_IOR : inWater ? WATER_IOR : 1.0, n2 = nextGlass ? GLASS_IOR : nextWater ? WATER_IOR : 1.0;
 		float f0 = (n1 - n2) * (n1 - n2) / ((n1 + n2) * (n1 + n2));
-		vec3 through = refract(dir, h.normal, n1 / n2);
+		// Water's top faces take the waves' normal (on the side the ray comes from); offsets keep the real face's.
+		vec3 wn = h.water && abs(h.normal.y) > 0.5 ? waveNormal(pos) * sign(h.normal.y) : h.normal;
+		vec3 through = refract(dir, wn, n1 / n2);
 		bool total = dot(through, through) == 0.0; // total internal reflection
-		float cosine = n1 > n2 ? -dot(through, h.normal) : -dot(dir, h.normal); // the larger angle's
+		float cosine = n1 > n2 ? -dot(through, wn) : -dot(dir, wn); // the larger angle's
 		float fresnel = total ? 1.0 : n1 == n2 ? 0.0 : f0 + (1.0 - f0) * pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
 		bool separate = !reflected; // this surface's reflection traced on its own (the first surface only)
 		if (!reflected) {
 			reflected = true;
 			guideSpecular = vec3(fresnel);
-			vec3 r = reflect(dir, h.normal), keep = weight * fresnel;
+			vec3 r = reflect(dir, wn), keep = weight * fresnel;
+			if (dot(r, h.normal) <= 0.0) r = reflect(r, h.normal); // a wave tilted it under the surface: back above
 			vec3 seen = reflectionSeen(pos + h.normal * 0.002, r, inWater ? waterGlow : skyRadiance(r));
 			guideHitDistance = reflectionDistance;
 			if (reflectionDistance < SKY_DISTANCE && inWater && !inGlass) throughWater(reflectionDistance, result, keep);
@@ -1224,7 +1287,8 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		// the Fresnel weight). It stays in the same medium.
 		vec3 from;
 		if (!separate && (total || pc.stochastic != 0.0 && rand() < fresnel)) {
-			dir = reflect(dir, h.normal);
+			dir = reflect(dir, wn);
+			if (dot(dir, h.normal) <= 0.0) dir = reflect(dir, h.normal);
 			from = pos + h.normal * 0.002;
 		} else {
 			weight *= separate || pc.stochastic == 0.0 ? 1.0 - fresnel : 1.0;
@@ -1238,7 +1302,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 			if (nextWater && !inWater) enterWater(h.tint, h.light.y);
 			inWater = nextWater;
 			inGlass = nextGlass;
-			dir = through;
+			dir = dot(through, h.normal) < 0.0 ? through : refract(dir, h.normal, n1 / n2); // a wave can't turn it back
 			from = pos - h.normal * 0.002;
 		}
 		TRACE_CAMERA(rq, from, dir, 512.0, MASK_OPAQUE_SCENE | MASK_TRANSLUCENT)
