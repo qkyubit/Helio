@@ -78,7 +78,8 @@ public final class Scene {
 		Micromaps.Micromap omm;
 	}
 
-	private record Geo(int layer, Buf vertices, int quads, Blas blas) {}
+	/** ommPlan: cutout layers with micromaps on, worked out on the compile worker (Micromaps.plan). */
+	private record Geo(int layer, Buf vertices, int quads, Blas blas, Micromaps.Plan ommPlan) {}
 
 	/** layers null: remove the section. lights: Lights.collect output, null if none. */
 	private record Upload(long node, Geo[] layers, int[] lights) {}
@@ -158,7 +159,8 @@ public final class Scene {
 			Buf vertices = Memory.buffer(bytes, BUILD_INPUT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
 			memCopy(memAddress(mesh.vertexBuffer()), vertices.mapped(), bytes);
 			if (geos == null) geos = new Geo[ChunkSectionLayer.values().length];
-			geos[e.getKey().ordinal()] = new Geo(e.getKey().ordinal(), vertices, quads, new Blas());
+			Micromaps.Plan plan = Helio.omm && e.getKey() == ChunkSectionLayer.CUTOUT ? Micromaps.plan(vertices.mapped(), quads) : null;
+			geos[e.getKey().ordinal()] = new Geo(e.getKey().ordinal(), vertices, quads, new Blas(), plan);
 		}
 		incoming.add(new Upload(node, geos, lights));
 	}
@@ -385,8 +387,7 @@ public final class Scene {
 		lastBuilds = batch.size();
 		if (batch.isEmpty()) return;
 		ensureQuadIndices(maxQuads);
-		int maxCutoutTriangles = buildMicromaps(cmd, slot, batch, s);
-		long sequence = maxCutoutTriangles > 0 ? Micromaps.sequence(maxCutoutTriangles) : 0;
+		buildMicromaps(cmd, slot, batch, s);
 
 		int n = batch.size();
 		VkAccelerationStructureBuildGeometryInfoKHR.Buffer infos = VkAccelerationStructureBuildGeometryInfoKHR.calloc(n);
@@ -394,7 +395,7 @@ public final class Scene {
 		VkAccelerationStructureBuildRangeInfoKHR.Buffer ranges = VkAccelerationStructureBuildRangeInfoKHR.calloc(n);
 		PointerBuffer pRanges = memAllocPointer(n);
 		VkAccelerationStructureTrianglesOpacityMicromapEXT.Buffer ommAttach = VkAccelerationStructureTrianglesOpacityMicromapEXT.calloc(n);
-		VkMicromapUsageEXT.Buffer ommUsage = VkMicromapUsageEXT.calloc(n);
+		VkMicromapUsageEXT.Buffer ommUsage = VkMicromapUsageEXT.calloc(n * (Micromaps.MAX_LEVEL + 1));
 		LongBuffer handles = memAllocLong(n);
 		long[] scratchOffsets = new long[n];
 		try {
@@ -410,11 +411,16 @@ public final class Scene {
 				tri.vertexData().deviceAddress(g.vertices.address());
 				tri.indexData().deviceAddress(quadIndices.address());
 				if (g.blas.omm != null) {
-					ommUsage.get(i).count(g.quads * 2).subdivisionLevel(Micromaps.LEVEL).format(VK_OPACITY_MICROMAP_FORMAT_4_STATE_EXT);
+					// Triangles per subdivision level, through the triangle -> entry index.
+					int base = i * (Micromaps.MAX_LEVEL + 1), used = 0;
+					int[] perLevel = g.blas.omm.triangleLevels();
+					for (int l = 0; l < perLevel.length; l++) {
+						if (perLevel[l] > 0) ommUsage.get(base + used++).count(perLevel[l]).subdivisionLevel(l).format(VK_OPACITY_MICROMAP_FORMAT_4_STATE_EXT);
+					}
 					VkAccelerationStructureTrianglesOpacityMicromapEXT attach = ommAttach.get(i).sType$Default()
 						.indexType(VK_INDEX_TYPE_UINT32).indexStride(4).baseTriangle(0)
-						.pUsageCounts(ommUsage.slice(i, 1)).usageCountsCount(1).micromap(g.blas.omm.handle());
-					attach.indexBuffer().deviceAddress(sequence);
+						.pUsageCounts(ommUsage.slice(base, used)).usageCountsCount(used).micromap(g.blas.omm.handle());
+					attach.indexBuffer().deviceAddress(g.blas.omm.index().address());
 					tri.pNext(attach.address());
 				}
 				VkAccelerationStructureBuildGeometryInfoKHR info = infos.get(i).sType$Default()
@@ -510,27 +516,19 @@ public final class Scene {
 		asBarrier(cmd, s);
 	}
 
-	/** Micromaps for the batch's cutout layers; returns the largest one's triangle count (0: none built). */
-	private static int buildMicromaps(VkCommandBuffer cmd, int slot, List<Geo> batch, MemoryStack s) {
-		if (!Helio.omm) return 0;
-		List<Geo> cutout = batch.stream().filter(g -> g.layer == ChunkSectionLayer.CUTOUT.ordinal()).toList();
-		if (cutout.isEmpty()) return 0;
-		long[] vertices = new long[cutout.size()];
-		int[] triangles = new int[cutout.size()];
-		int max = 0;
-		for (int i = 0; i < vertices.length; i++) {
-			vertices[i] = cutout.get(i).vertices.address();
-			triangles[i] = cutout.get(i).quads * 2;
-			max = Math.max(max, triangles[i]);
-		}
+	/** Micromaps for the batch's cutout layers. */
+	private static void buildMicromaps(VkCommandBuffer cmd, int slot, List<Geo> batch, MemoryStack s) {
+		if (!Helio.omm) return;
+		List<Geo> cutout = batch.stream().filter(g -> g.ommPlan != null).toList();
+		if (cutout.isEmpty()) return;
+		Micromaps.Plan[] plans = new Micromaps.Plan[cutout.size()];
+		for (int i = 0; i < plans.length; i++) plans[i] = cutout.get(i).ommPlan;
 		try {
-			Micromaps.Micromap[] built = Micromaps.build(vk, cmd, slot, vertices, triangles, s);
+			Micromaps.Micromap[] built = Micromaps.build(vk, cmd, slot, plans, s);
 			for (int i = 0; i < built.length; i++) cutout.get(i).blas.omm = built[i];
-			return max;
 		} catch (Exception e) {
 			Helio.LOG.error("Opacity micromaps failed; cutout geometry uses the plain alpha test", e);
 			Helio.omm = false;
-			return 0;
 		}
 	}
 

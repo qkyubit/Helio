@@ -674,9 +674,38 @@ in the Radiance Test instance) plus its add-ons (emission, glowing ore, mirror).
      nether portal, sculk family, respawn anchor, firefly bush); its lava, fire and sea
      lantern maps are single frames. Water's normal map isn't used for its reflection
      and refraction yet (M6 water waves).
-7. [ ] 3D pack check: BLAS size, build time and OMM on a 3D pack.
+7. [x] 3D pack check: BLAS size, build time and OMM on a 3D pack.
+   - 3D Vanilla v1.20 (Modrinth, 26.3) over SPBR: scene 7.3M -> 76-78M triangles,
+     scene memory 0.95 -> 6.2 GB, VRAM 13.2 / 14.9 GB; path trace about the same
+     (8.99 vs 9.49 ms, different spots), incremental build 0.4 ms. The triangles are
+     visible geometry: short grass is 360 quads per plant (340 without cullface), oak
+     logs 118, some decorative blocks over 1000. Skipping blocks boxed in by solid
+     cubes barely helped (78.0M -> 75.9M) and was reverted.
+   - Scene memory has no budget; a heavier pack or a longer RT distance can run out
+     of VRAM. Moved to M7 (VRAM budget).
 8. [ ] Exit check: SPBR + one more LabPBR pack + one 3D pack; F3+T reload; performance
    against M4 numbers.
+   - rotrBLOCKS V88 [3D Foliage] 128x (Modrinth, 26.3): renders right; PBR atlases
+     16384x8192 (1096 normal, 1043 specular maps) in 0.6 s. Same spot as SPBR: path
+     trace 22.7 ms (34 fps) vs 5.1 ms (87 fps), 13.7M vs 6.6M triangles. Experiments:
+     coarse texture mips 22.7 -> 17-20 ms; cutout treated as solid 22.7 -> 1.9 ms. The
+     cost is alpha tests on rays through its 3D leaves: opacity micromaps are level 4
+     (256 micro-triangles per triangle, sized for 16x), so on 128x leaves nearly every
+     micro-triangle is mixed and falls back to the shader's alpha test.
+   - Found: opacity micromaps never took effect. Ray queries only use them when the
+     shader declares RayTracingOpacityMicromapKHR, which glslang emits only when the
+     shader references gl_RayFlagsForceOpacityMicromap2StateEXT (now `OMM_FLAGS`, a
+     no-op 0, under `HELIO_OMM`). Micromaps reworked too: one entry per unique UV
+     triangle in the layer (deduped on the compile worker), subdivided to about a
+     texel per micro-triangle (levels 1-7), with a per-triangle index buffer. Checked:
+     with every shader-tested cutout hit dropped, leaves still show (the hardware
+     commits their opaque parts).
+   - Same spot, old -> new: SPBR 4.15 -> 4.03 ms, rotrBLOCKS 33.9 -> 32.3 ms. rotrBLOCKS'
+     cost is traversal through its dense, overlapping 3D leaf planes, not alpha tests
+     (micromaps on/off and dropping all shader alpha tests change nothing; solid leaves
+     1.9 ms). Open: profile which rays pay for it (M7).
+   - First-person body: reflection rays skip it too (`reflectionRay`); a shiny floor
+     showed the head the camera sits in.
 
 Fixed along the way: weather, clouds and translucent particles vanished in front of
 traced water and glass with classic transparency. The entity composite (traced colour
@@ -701,7 +730,9 @@ Exit: side-by-side screenshots you're proud of; HDR verified on your monitor.
 - Profile with Nsight Graphics (Linux) at the M3 scenes.
 - Shader invocation reordering if exposed on this driver, half-res GI where
   RR hides it, ray budgets per preset.
-- VRAM budget for 16 GB (BLAS pool, atlas sizes), RAM budget for 16 GB host.
+- VRAM budget for 16 GB (BLAS pool, atlas sizes), RAM budget for 16 GB host. Scene
+  memory has no cap yet: 3D Vanilla took it from 0.95 to 6.2 GB (VRAM 13.2 / 14.9 GB,
+  M5 step 7). Shrink the RT distance when the scene nears its share of VRAM.
 - CPU: mesh → BLAS input off the render thread; minimise FFM calls per frame.
 - Distance-scaled ray budget: fewer rays for far terrain (e.g. bounce, block light
   and glass/water secondary rays skipped or traced every other frame past a

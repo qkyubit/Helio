@@ -71,10 +71,13 @@ public final class PbrAtlas {
 
 	/** After the block atlas uploads (render thread). */
 	public static void rebuild(TextureAtlas atlas) {
-		if (!atlas.location().equals(TextureAtlas.LOCATION_BLOCKS) || Helio.device == null) return;
-		long start = System.nanoTime();
+		if (!atlas.location().equals(TextureAtlas.LOCATION_BLOCKS)) return;
 		GpuTexture base = atlas.getTexture();
 		int w = base.getWidth(0), h = base.getHeight(0);
+		Micromaps.atlasWidth = w; // sections compiled from here on size their micromaps by it
+		Micromaps.atlasHeight = h;
+		if (Helio.device == null) return;
+		long start = System.nanoTime();
 		ResourceManager resources = Minecraft.getInstance().getResourceManager();
 		ConcurrentLinkedQueue<Anim> found = new ConcurrentLinkedQueue<>();
 		try (NativeImage n = new NativeImage(w, h, false); NativeImage sp = new NativeImage(w, h, true)) {

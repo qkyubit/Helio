@@ -24,6 +24,7 @@ public final class Shaders {
 			shaderc_compile_options_set_target_env(opts, shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_2);
 			shaderc_compile_options_set_target_spirv(opts, shaderc_spirv_version_1_4);
 			shaderc_compile_options_set_optimization_level(opts, shaderc_optimization_level_performance);
+			if (dev.helio.Helio.omm) shaderc_compile_options_add_macro_definition(opts, "HELIO_OMM", "1");
 			long result = shaderc_compile_into_spv(compiler, src, shaderc_compute_shader, name, "main", opts);
 			try {
 				if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success)

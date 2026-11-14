@@ -4,6 +4,14 @@
 #extension GL_EXT_buffer_reference_uvec2 : require
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_nonuniform_qualifier : require
+#ifdef HELIO_OMM
+#extension GL_EXT_opacity_micromap : require
+// Referencing the extension's ray flag makes the shader declare RayTracingOpacityMicromapKHR; without that
+// capability ray queries ignore opacity micromaps (Micromaps.java) and run the alpha test everywhere.
+const uint OMM_FLAGS = gl_RayFlagsForceOpacityMicromap2StateEXT & 0u;
+#else
+const uint OMM_FLAGS = 0u;
+#endif
 
 // M3 path tracer: primary ray per pixel, sun with a shadow ray, sky and block light, averaged over frames
 // while nothing changes. Water, glass and ice reflect and let light through (water bends and absorbs it).
@@ -213,6 +221,9 @@ uvec3 triangleVertices(uint prim) {
 // True while tracing what the camera sees directly: rays then pass through the player's own body in first
 // person (entity vertices flagged with Entities.BODY), which only shadows and bounce light see.
 bool cameraRay = false;
+// Reflection rays pass through the body too: the camera sits inside its head, so a shiny floor would show it
+// from inside.
+bool reflectionRay = false;
 
 // Cutout candidate: does the texel under the hit point pass vanilla's 0.5 alpha cutoff?
 bool cutoutHit(rayQueryEXT rq) {
@@ -220,7 +231,7 @@ bool cutoutHit(rayQueryEXT rq) {
 	Vertices vb = Vertices(inst.vertices);
 	uint stride = strideOf(inst.kind);
 	uvec3 t = triangleVertices(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false));
-	if (cameraRay && inst.kind == KIND_DYNAMIC && (floatBitsToUint(vb.v[t.x * 11u + 7u]) & 0x10000u) != 0u) return false;
+	if ((cameraRay || reflectionRay) && inst.kind == KIND_DYNAMIC && (floatBitsToUint(vb.v[t.x * 11u + 7u]) & 0x10000u) != 0u) return false;
 	// Plain glass (Scene.GLASS_MARK): camera rays stop at its clear parts too, to refract there; light still passes them.
 	if (cameraRay && round((1.0 - tintAt(vb, t.x, stride).a) * 255.0) == 2.0) return true;
 	vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, false);
@@ -232,7 +243,7 @@ bool cutoutHit(rayQueryEXT rq) {
 
 // A macro, not a function: a ray query initialised inside a callee isn't guaranteed to be the caller's.
 #define TRACE(rq, origin, dir, tMax, mask, flags) \
-	rayQueryInitializeEXT(rq, scene, flags, mask, origin, 0.0, dir, tMax); \
+	rayQueryInitializeEXT(rq, scene, (flags) | OMM_FLAGS, mask, origin, 0.0, dir, tMax); \
 	while (rayQueryProceedEXT(rq)) { if (cutoutHit(rq)) rayQueryConfirmIntersectionEXT(rq); }
 #define TRACE_CAMERA(rq, origin, dir, tMax, mask) \
 	cameraRay = true; TRACE(rq, origin, dir, tMax, mask, gl_RayFlagsNoneEXT) cameraRay = false;
@@ -773,7 +784,9 @@ vec3 specularRadiance(vec3 pos, vec3 n, vec3 shading, vec3 dir, float roughness)
 	vec3 r = reflect(dir, pc.stochastic != 0.0 ? ggxNormal(shading, roughness * roughness) : shading);
 	if (dot(r, n) <= 0.0) r = reflect(r, n); // below the real face: mirror back above it
 	rayQueryEXT rq;
+	reflectionRay = true;
 	TRACE(rq, pos + n * 0.002, r, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
+	reflectionRay = false;
 	specularDistance = SKY_DISTANCE;
 	if (!HIT(rq)) return skyRadiance(r);
 	specularDistance = rayQueryGetIntersectionTEXT(rq, true);
@@ -890,7 +903,9 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 			guideSpecular = vec3(fresnel);
 			vec3 r = reflect(dir, h.normal), keep = weight * fresnel;
 			rayQueryEXT rr;
+			reflectionRay = true;
 			TRACE(rr, pos + h.normal * 0.002, r, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
+			reflectionRay = false;
 			guideHitDistance = HIT(rr) ? rayQueryGetIntersectionTEXT(rr, true) : SKY_DISTANCE;
 			if (HIT(rr)) {
 				float tr = rayQueryGetIntersectionTEXT(rr, true);
