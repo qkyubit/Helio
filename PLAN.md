@@ -583,7 +583,15 @@ output near 180 Hz and no HUD smearing.
      pacer thread can't start a frame's evaluate until the last frame's presents are out.
      M7: retry on the async compute queue (family 2, if DLSS-G accepts it), with a
      separate thread for presents.
-   - [ ] M4 exit check.
+   - [ ] M4 exit check. First run (1440p, Balanced + RR, 3x): overworld 72 / 50 -> 150,
+     torch cave 50 / 40 -> 119, water + glass 95 / 57 -> 171, lava Nether 50 / 39 -> 116
+     (FG off / 3x rendered -> presented); HUD smears with FG. Fixes so far:
+     - Radiance cache fed by whole 8x8 groups (1 in 16) instead of scattered pixels: one
+       feeding pixel made its whole lockstep group wait for a 3-bounce path. Nether path
+       trace ~15 -> 6.6 ms.
+     - Block light RIS: 4 candidates when stochastic (was 8), bisection over the section
+       cdf. Nether 6.6 -> 4.2 ms. Nether now 97 fps FG off, 2x 70, 3x 57, 4x 43 (cap).
+     - Still to do: cave re-check, HUD smearing.
 
 ### M5 — PBR and 3D resource packs
 

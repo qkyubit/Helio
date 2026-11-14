@@ -85,7 +85,7 @@ public final class PathTracer {
 	private static final Memory.Buf[] frameData = new Memory.Buf[RING];
 	private static final Matrix4f lastViewProj = new Matrix4f();
 	private static boolean lastUpscaled, lastRr;
-	private static int jitterIndex;
+	private static int jitterIndex, timedFrames;
 	private static Vec3 rrOrigin;
 
 	private PathTracer() {}
@@ -358,6 +358,8 @@ public final class PathTracer {
 				vkCmdDispatch(cmd, CACHE_ENTRIES / 64, 1, 1);
 			}
 			GpuTimers.end(cmd, GpuTimers.Pass.PATH_TRACE);
+			if (++timedFrames % 600 == 0) Helio.LOG.info("GPU ms: path trace {}, DLSS {}", String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE)),
+				String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS)));
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			if (accumulate) frameIndex = Math.min(frameIndex + 1, MAX_FRAMES);
 			if (upscale) {

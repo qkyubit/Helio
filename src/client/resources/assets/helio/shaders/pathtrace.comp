@@ -107,7 +107,7 @@ const uint CACHE_PROBES = 8u;      // slots a key may sit in, from its hash on
 const float CACHE_FIXED = 4096.0;  // samples' fixed-point scale (atomic sums)
 const float CACHE_MAX = 64.0;      // brightest sample kept, per channel
 const int CACHE_PATH = 3;          // bounces a feeding pixel follows
-const uint CACHE_FEED = 16u;       // one pixel in this many feeds the cache each frame       // translucent surfaces a view ray passes before the next one counts as opaque
+const uint CACHE_FEED = 16u;       // one 8x8 group in this many feeds the cache each frame       // translucent surfaces a view ray passes before the next one counts as opaque
 
 layout(push_constant) uniform Push {
 	mat4 invViewProj;   // inverse(projection * viewRotation): NDC -> camera-relative world
@@ -363,10 +363,16 @@ vec3 blockLight(vec3 pos, vec3 n) {
 	float weightSum = 0.0, chosenTarget = 0.0;
 	uint chosen = 0u;
 	vec3 chosenContribution = vec3(0.0);
-	for (uint m = 0u; m < CANDIDATES; m++) {
+	// Fewer candidates when stochastic: the denoiser (or accumulation) absorbs the extra noise.
+	uint candidates = pc.stochastic != 0.0 ? CANDIDATES / 2u : CANDIDATES;
+	for (uint m = 0u; m < candidates; m++) {
 		float u = rand() * total, below = 0.0;
-		int i = 0;
-		while (i < 26 && cdf[i] <= u) i++;
+		int i = 0, hi = 26; // the first section whose cdf passes u, by bisection
+		while (i < hi) {
+			int mid = (i + hi) >> 1;
+			if (cdf[mid] <= u) i = mid + 1;
+			else hi = mid;
+		}
 		if (i > 0) below = cdf[i - 1];
 		uint index = first[i] + min(uint(rand() * float(count[i])), count[i] - 1u);
 		float pdf = (cdf[i] - below) / total / float(count[i]);
@@ -386,7 +392,7 @@ vec3 blockLight(vec3 pos, vec3 n) {
 	vec3 dir = normalize(toPoint);
 	float tMax = boxEntry(pos, dir, centre) - 0.01;
 	vec3 lit = tMax > 0.0 ? shadowTransmittance(pos + n * 0.002, dir, tMax) : vec3(1.0);
-	return lit * chosenContribution * (weightSum / (float(CANDIDATES) * chosenTarget));
+	return lit * chosenContribution * (weightSum / (float(candidates) * chosenTarget));
 }
 
 vec3 heat(float x) {
@@ -910,7 +916,9 @@ void main() {
 	if (cacheOn) {
 		cache = RadianceCache(frame.cache);
 		anchor = frame.anchor;
-		feeding = pcg(rng ^ 0xA511E9B3u) % CACHE_FEED == 0u;
+		// Whole 8x8 groups feed, not scattered pixels: the GPU runs 32 pixels in lockstep, and one feeding pixel
+		// among them made all wait for its longer path.
+		feeding = pcg(gl_WorkGroupID.x + pcg(gl_WorkGroupID.y + pcg(pc.seed ^ 0xA511E9B3u))) % CACHE_FEED == 0u;
 	}
 	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size), uvec2(p));
 	if (frame.denoise != 0u) {
