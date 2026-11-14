@@ -765,6 +765,9 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      inverts it exactly (curve by bisection). Summing with subgroupAdd after the ray queries hung the GPU
      within a minute (5 s semaphore timeout); plain atomics from the sparse grid don't (200 s soak FG off, 180 s
      FG 2x). Same daylight view: about the ACES picture's brightness, softer highlights.
+   - Later (user): the auto exposure lifted moonlit nights 2 stops, to dusk. Its key now scales with time and
+     dimension: overworld 15% at night up to 100% by day (`daylight`), Nether 50%, End 35%. Midnight: +2.0 EV
+     before, +0.1 after. A cave at night gets the night key too (ponytail: no indoor/outdoor test).
 2. [x] Bloom: from the HDR picture after RR, before the tonemap (emissive blocks, sun glints, the sun).
    - Done in code: `rt/Bloom.java` + `bloom.comp`: 6-level chain from DLSS's output (half size first),
      Jimenez's 13-tap down (Karis-weighted first pass), 3x3 tent up added level by level. `rr_resolve.comp` mixes

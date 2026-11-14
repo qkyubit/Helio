@@ -106,6 +106,12 @@ public final class PathTracer {
 	 * daylight lands near 1x. And how far the auto exposure may go from 1x either way (caves stay darker).
 	 */
 	private static final float EXPOSURE_KEY = 0.07f, AUTO_EV_MIN = -2, AUTO_EV_MAX = 2;
+	/**
+	 * The key's share by time and dimension: at night the overworld stays dark (the full key lifted moonlit
+	 * scenes 2 stops, to dusk), the Nether and End in between.
+	 */
+	private static final float NIGHT_KEY = 0.15f, NETHER_KEY = 0.5f, END_KEY = 0.35f;
+	private static Skybox skybox = Skybox.OVERWORLD;
 	/** Seconds the exposure takes to cover about 63% of the way to a new target. */
 	private static final float EXPOSURE_TAU = 0.8f;
 	private static Vec3 rrOrigin;
@@ -121,6 +127,7 @@ public final class PathTracer {
 		cloudBottom = level.cloudHeight;
 		cameraPos = camera.pos;
 		viewRotation.set(camera.viewRotationMatrix);
+		skybox = sky.skybox;
 		hasSky = sky.skybox == Skybox.OVERWORLD;
 		if (hasSky) {
 			sunAngle = sky.sunAngle;
@@ -336,7 +343,7 @@ public final class PathTracer {
 			if (cacheOn) ensureCache(cmd, mc, s);
 			int slot = seed % RING;
 			Memory.Buf frame = frameData[slot];
-			float exposure = adaptExposure(frame.mapped());
+			float exposure = adaptExposure(frame.mapped(), daylight);
 			vkCmdFillBuffer(cmd, meters.buffer(), meters.offset() + slot * 16L, 16, 0);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			ByteBuffer fb = MemoryUtil.memByteBuffer(frame.mapped(), 256);
@@ -465,14 +472,19 @@ public final class PathTracer {
 	 * The radiance scale for this frame: the auto exposure, adapted towards what the frame that last used this
 	 * slot measured (its GPU work is done: the ring waits for it), times the Exposure setting. Resets the meter.
 	 */
-	private static float adaptExposure(long frame) {
+	private static float adaptExposure(long frame, float daylight) {
 		int sum = MemoryUtil.memGetInt(frame + METER), count = MemoryUtil.memGetInt(frame + METER + 4);
 		long now = System.nanoTime();
 		float dt = lastExposureNanos == 0 ? 0 : Math.min((now - lastExposureNanos) / 1e9f, 0.25f);
 		lastExposureNanos = now;
 		if (count > 0) {
 			float average = sum / 16f / count; // log2 luminance
-			float target = Math.clamp((float) (Math.log(EXPOSURE_KEY) / Math.log(2)) - average, AUTO_EV_MIN, AUTO_EV_MAX);
+			float key = EXPOSURE_KEY * switch (skybox) {
+				case OVERWORLD -> NIGHT_KEY + (1 - NIGHT_KEY) * daylight;
+				case END -> END_KEY;
+				default -> NETHER_KEY;
+			};
+			float target = Math.clamp((float) (Math.log(key) / Math.log(2)) - average, AUTO_EV_MIN, AUTO_EV_MAX);
 			autoEv += (target - autoEv) * (1 - (float) Math.exp(-dt / EXPOSURE_TAU));
 			if (timedFrames % 600 == 0) Helio.LOG.info("Exposure: average log2 luminance {}, auto {} EV", String.format("%.2f", average),
 				String.format("%.2f", autoEv));
