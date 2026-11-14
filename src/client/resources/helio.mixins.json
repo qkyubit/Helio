@@ -6,6 +6,7 @@
 		"BlockModelLighterMixin",
 		"FluidRendererMixin",
 		"GameRendererMixin",
+		"HudMixin",
 		"IndigoBlockRendererMixin",
 		"LevelExtractorMixin",
 		"LevelRendererMixin",

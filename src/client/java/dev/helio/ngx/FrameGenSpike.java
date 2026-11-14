@@ -56,6 +56,7 @@ public final class FrameGenSpike {
 	private static VulkanDevice device;
 	private static boolean failed;
 	private static long sampler, setLayout, pipelineLayout, pipeline;
+	private static long hudSetLayout, hudPipelineLayout, hudPipeline;
 
 	private static MemorySegment feature = MemorySegment.NULL, params = MemorySegment.NULL;
 	private static int width, height;
@@ -157,6 +158,8 @@ public final class FrameGenSpike {
 			GpuTimers.begin(cmd, GpuTimers.Pass.DLSS_G);
 			for (int i = 0; i < generated; i++) evaluate(cmd, (VulkanGpuTextureView) mainView, i);
 			GpuTimers.end(cmd, GpuTimers.Pass.DLSS_G);
+			VulkanCommandEncoder.memoryBarrier(cmd, s);
+			for (int i = 0; i < generated; i++) keepHud(cmd, s, (VulkanGpuTextureView) mainView, i);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			reset = false;
 
@@ -385,15 +388,19 @@ public final class FrameGenSpike {
 			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(setLayout))
 				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(144)), null, h), "pipeline layout");
 			pipelineLayout = h.get(0);
-			ByteBuffer spv = Shaders.compile("camera_motion.comp");
-			check(vkCreateShaderModule(vk, VkShaderModuleCreateInfo.calloc(s).sType$Default().pCode(spv), null, h), "shader module");
-			long module = h.get(0);
-			MemoryUtil.memFree(spv);
-			VkComputePipelineCreateInfo.Buffer ci = VkComputePipelineCreateInfo.calloc(1, s).sType$Default().layout(pipelineLayout);
-			ci.stage().sType$Default().stage(VK_SHADER_STAGE_COMPUTE_BIT).module(module).pName(s.UTF8("main"));
-			check(vkCreateComputePipelines(vk, VK_NULL_HANDLE, ci, null, h), "pipeline");
-			pipeline = h.get(0);
-			vkDestroyShaderModule(vk, module, null);
+			pipeline = computePipeline(vk, s, pipelineLayout, "camera_motion.comp");
+
+			VkDescriptorSetLayoutBinding.Buffer hb = VkDescriptorSetLayoutBinding.calloc(3, s);
+			hb.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+			hb.get(1).binding(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+			hb.get(2).binding(2).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+			check(vkCreateDescriptorSetLayout(vk, VkDescriptorSetLayoutCreateInfo.calloc(s).sType$Default()
+				.flags(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR).pBindings(hb), null, h), "HUD set layout");
+			hudSetLayout = h.get(0);
+			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(hudSetLayout))
+				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(8)), null, h), "HUD pipeline layout");
+			hudPipelineLayout = h.get(0);
+			hudPipeline = computePipeline(vk, s, hudPipelineLayout, "hud_keep.comp");
 			check(vkCreateSemaphore(vk, VkSemaphoreCreateInfo.calloc(s).sType$Default()
 				.pNext(VkSemaphoreTypeCreateInfo.calloc(s).sType$Default().semaphoreType(VK_SEMAPHORE_TYPE_TIMELINE)), null, h), "timeline semaphore");
 			frameDone = h.get(0);
@@ -447,6 +454,8 @@ public final class FrameGenSpike {
 		Ngx.setUInt(params, "VisibilityNodeMask", 1);
 		Ngx.setUInt(params, "Width", width);
 		Ngx.setUInt(params, "Height", height);
+		Ngx.setUInt(params, "DLSSG.Width", width);
+		Ngx.setUInt(params, "DLSSG.Height", height);
 		Ngx.setUInt(params, "DLSSG.BackbufferFormat", VK_FORMAT_RGBA8);
 		Ngx.setUInt(params, "DLSSG.MultiFrameCountMax", generated);
 		// NGX feature creation puts big buffers on the stack, like init.
@@ -539,6 +548,34 @@ public final class FrameGenSpike {
 			vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 		}
+	}
+
+	private static long computePipeline(VkDevice vk, MemoryStack s, long layout, String shader) throws java.io.IOException {
+		LongBuffer h = s.mallocLong(1);
+		ByteBuffer spv = Shaders.compile(shader);
+		check(vkCreateShaderModule(vk, VkShaderModuleCreateInfo.calloc(s).sType$Default().pCode(spv), null, h), "shader module");
+		long module = h.get(0);
+		MemoryUtil.memFree(spv);
+		VkComputePipelineCreateInfo.Buffer ci = VkComputePipelineCreateInfo.calloc(1, s).sType$Default().layout(layout);
+		ci.stage().sType$Default().stage(VK_SHADER_STAGE_COMPUTE_BIT).module(module).pName(s.UTF8("main"));
+		check(vkCreateComputePipelines(vk, VK_NULL_HANDLE, ci, null, h), "pipeline " + shader);
+		vkDestroyShaderModule(vk, module, null);
+		return h.get(0);
+	}
+
+	/** Puts the real frame's HUD back over generated frame {@code i} (DLSS-G only estimates it, and smears it). */
+	private static void keepHud(VkCommandBuffer cmd, MemoryStack s, VulkanGpuTextureView mainView, int i) {
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hudPipeline);
+		VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(3, s);
+		w.get(0).sType$Default().dstBinding(0).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+			.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(sampler).imageView(mainView.vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+		w.get(1).sType$Default().dstBinding(1).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+			.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(sampler).imageView(hudlessView.vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+		w.get(2).sType$Default().dstBinding(2).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+			.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(interpView[i].vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+		vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, hudPipelineLayout, 0, w);
+		vkCmdPushConstants(cmd, hudPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s.ints(width, height));
+		vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
 	}
 
 	private static void fail(Throwable t) {

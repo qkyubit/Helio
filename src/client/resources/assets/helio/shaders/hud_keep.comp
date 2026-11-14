@@ -1,0 +1,31 @@
+#version 460
+
+// After DLSS-G: put the real frame's HUD (and hand) back over a generated frame. The HUD is where the real frame
+// differs from its HUD-less copy, plus 1 pixel around it, where DLSS-G may have smeared it.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D real;
+layout(binding = 1) uniform sampler2D hudless;
+layout(binding = 2, rgba8) uniform writeonly image2D generated;
+
+layout(push_constant) uniform Push {
+	ivec2 size;
+} pc;
+
+bool hud(ivec2 q) {
+	q = clamp(q, ivec2(0), pc.size - 1);
+	vec3 d = abs(texelFetch(real, q, 0).rgb - texelFetch(hudless, q, 0).rgb);
+	return max(d.r, max(d.g, d.b)) > 1.5 / 255.0;
+}
+
+void main() {
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	if (any(greaterThanEqual(p, pc.size))) return;
+	for (int y = -1; y <= 1; y++)
+		for (int x = -1; x <= 1; x++)
+			if (hud(p + ivec2(x, y))) {
+				imageStore(generated, p, texelFetch(real, p, 0));
+				return;
+			}
+}

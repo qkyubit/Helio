@@ -597,7 +597,13 @@ output near 180 Hz and no HUD smearing.
        from when the first image is ready (0.67 ms after the frame), on a top-priority
        queue. Readback check confirmed generated frames sit halfway between real ones.
        User-checked: smooth at 2x.
-     - Still to do: cave re-check, HUD smearing.
+     - HUD smearing: vanilla's vignette darkens the whole picture after the HUD-less
+       copy, so DLSS-G took the entire screen for HUD (its indicator: Hudless yes, UI
+       recomposition off; that needs a separate UI + alpha layer). Vignette skipped
+       while FG runs (`HudMixin`), and `hud_keep.comp` puts the real frame's pixels back
+       over each generated frame wherever it differs from the HUD-less copy (+1 px):
+       HUD, hand, crosshair. Mask checked on screen.
+     - Still to do: cave re-check.
 
 ### M5 — PBR and 3D resource packs
 
