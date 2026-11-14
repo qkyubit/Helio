@@ -619,6 +619,34 @@ output near 180 Hz and no HUD smearing.
 
 Exit: 2–3 popular LabPBR packs (one 3D) render correctly; reload with F3+T.
 
+**M5 steps** (planned 2026-11-14). Test pack: SPBR 22 (LabPBR, vanilla-style, 26.3;
+in the Radiance Test instance) plus its add-ons (emission, glowing ore, mirror).
+1. [x] PBR atlases: on every block-atlas upload (`TextureAtlas.upload`, so F3+T too),
+   build a normal atlas and a specular atlas the size of the block atlas. Each sprite's
+   `<name>_n.png` / `_s.png` from the resource manager, scaled to the sprite's size,
+   first frame if animated; LabPBR defaults where a pack has none (flat normal, AO 1;
+   specular "no data", so Helio's own metal/gem marks still apply). Bound to the path
+   tracer; debug views for both.
+   - Done (`rt/PbrAtlas.java`, `TextureAtlasMixin`): SPBR gives 1103 normal and 1264
+     specular maps into 2048x2048 atlases in 90 ms. Debug views (PBR Normal / Specular
+     Map) line up with the textures. Not used for shading yet.
+2. [ ] Normal maps: tangent frame per triangle from its UVs (no vertex tangents),
+   LabPBR normal (RG, Z rebuilt) bends the shading normal: lighting, bounces, RR's
+   normal guide. Geometric normal kept for ray offsets and leaks. Texture AO (B) on
+   ambient and bounce light.
+3. [ ] Specular: smoothness -> roughness, F0 (0-229 dielectric), hardcoded metals
+   230-237 (iron, gold, aluminium, chrome, copper, lead, platinum, silver: real
+   N/K), 238-254 albedo metals. One GGX reflection ray per surface below a roughness
+   cutoff, diffuse for the rest. Pack data replaces Helio's metal/gem marks.
+4. [ ] Emission (`_s` alpha): emissive texels glow and count in the block's light
+   (Lights.java samples the texture already); emissive ores etc. become light sources.
+5. [ ] Subsurface (`_s` B 65-255) on leaves and plants in place of the fixed foliage
+   transmission; porosity (B 0-64) stored for M6 rain.
+6. [ ] Animated sprites: PBR maps follow the atlas animation frames.
+7. [ ] 3D pack check: BLAS size, build time and OMM on a 3D pack.
+8. [ ] Exit check: SPBR + one more LabPBR pack + one 3D pack; F3+T reload; performance
+   against M4 numbers.
+
 ### M6 — Visuals beyond ray tracing
 
 - Physically based sky (transmittance / multi-scatter LUTs), sun/moon disc,

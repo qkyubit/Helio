@@ -1,5 +1,7 @@
 package dev.helio.rt;
 
+import com.mojang.renderpearl.api.textures.GpuTextureView;
+
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.renderpearl.backend.vulkan.VulkanCommandEncoder;
 import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
@@ -146,11 +148,11 @@ public final class PathTracer {
 				.magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_NEAREST).maxLod(0), null, h), "sampler");
 			sampler = h.get(0);
 
-			// 0 TLAS, 2 and 5 sampled (atlas, vanilla depth), the rest storage images (see pathtrace.comp).
-			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(14, s);
-			for (int i = 0; i < 14; i++) {
+			// 0 TLAS, 2, 5, 14 and 15 sampled (atlas, vanilla depth, PBR atlases), the rest storage images (see pathtrace.comp).
+			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(16, s);
+			for (int i = 0; i < 16; i++) {
 				int type = i == 0 ? VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
-					: i == 2 || i == 5 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+					: i == 2 || i == 5 || i >= 14 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 				b.get(i).binding(i).descriptorType(type).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
 			}
 			// Push descriptors: no pool, and safe to rewrite every frame while earlier frames are in flight.
@@ -265,7 +267,9 @@ public final class PathTracer {
 		Minecraft mc = Minecraft.getInstance();
 		RenderTarget main = mc.gameRenderer.mainRenderTarget();
 		VulkanGpuTextureView color = (VulkanGpuTextureView) main.getColorTextureView();
-		VulkanGpuTextureView atlas = (VulkanGpuTextureView) mc.getTextureManager().getTexture(TextureAtlas.LOCATION_BLOCKS).getTextureView();
+		TextureAtlas blocks = (TextureAtlas) mc.getTextureManager().getTexture(TextureAtlas.LOCATION_BLOCKS);
+		VulkanGpuTextureView atlas = (VulkanGpuTextureView) blocks.getTextureView();
+		if (PbrAtlas.normalView == null) PbrAtlas.rebuild(blocks); // the first upload can come before Helio's device
 		Vector3f sun = celestial(sunAngle), moon = celestial(moonAngle);
 		float daylight = smoothstep(-0.05f, 0.2f, sun.y);
 		Matrix4f viewProj = new Matrix4f(levelProjection).mul(viewRotation);
@@ -309,7 +313,7 @@ public final class PathTracer {
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(14, s);
+			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(16, s);
 			w.get(0).sType$Default().dstBinding(0).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
 				.pNext(VkWriteDescriptorSetAccelerationStructureKHR.calloc(s).sType$Default().pAccelerationStructures(s.longs(Scene.tlas)));
 			w.get(1).sType$Default().dstBinding(1).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -327,6 +331,11 @@ public final class PathTracer {
 			for (int i = 0; i < inputs.length; i++) {
 				w.get(6 + i).sType$Default().dstBinding(6 + i).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
 					.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(inputs[i].view()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+			}
+			GpuTextureView[] pbr = {PbrAtlas.normalView, PbrAtlas.specularView};
+			for (int i = 0; i < 2; i++) {
+				w.get(14 + i).sType$Default().dstBinding(14 + i).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+					.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(sampler).imageView(((VulkanGpuTextureView) pbr[i]).vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
 			}
 			vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, w);
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 1, s.longs(writeEntityTextures(mc, s)), null);

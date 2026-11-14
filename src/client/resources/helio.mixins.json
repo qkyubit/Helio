@@ -22,6 +22,8 @@
 		"SpriteContentsAccessor",
 		"StagedDrawAccessor",
 		"StagedVertexBufferMixin",
+		"TextureAtlasAccessor",
+		"TextureAtlasMixin",
 		"TextureBindingAccessor",
 		"ViewAreaAccessor",
 		"VulkanBackendMixin",

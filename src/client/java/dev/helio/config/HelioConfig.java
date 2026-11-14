@@ -40,7 +40,7 @@ public final class HelioConfig {
 		}
 	}
 
-	public enum DebugView { OFF, INSTANCES, ALBEDO, NORMALS, TRIANGLE_DENSITY, MATERIALS }
+	public enum DebugView { OFF, INSTANCES, ALBEDO, NORMALS, TRIANGLE_DENSITY, MATERIALS, PBR_NORMAL, PBR_SPECULAR }
 
 	private static final Path FILE = FabricLoader.getInstance().getConfigDir().resolve("helio.json");
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();

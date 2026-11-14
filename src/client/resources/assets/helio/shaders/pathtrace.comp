@@ -15,6 +15,10 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform accelerationStructureEXT scene;
 layout(binding = 1, rgba8) uniform image2D colorImg;
 layout(binding = 2) uniform sampler2D blockAtlas;
+// LabPBR maps laid out like the block atlas (PbrAtlas.java): _n normal XY, AO, height; _s smoothness, F0 / metal,
+// porosity / SSS, emission. Specular all zero = the pack has no map.
+layout(binding = 14) uniform sampler2D normalAtlas;
+layout(binding = 15) uniform sampler2D specularAtlas;
 layout(binding = 3, rgba32f) uniform image2D accumImg; // premultiplied radiance + coverage, averaged over frames
 layout(binding = 4, rgba32f) uniform image2D entityImg; // traced colour + NDC depth where an entity is hit (entity_composite.comp)
 layout(binding = 5) uniform sampler2D depthTex; // vanilla's depth so far: sky and terrain past the RT distance
@@ -73,7 +77,8 @@ layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer Ins
 const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u, MASK_TRANSLUCENT = 4u, MASK_DYNAMIC = 8u;
 const uint MASK_OPAQUE_SCENE = MASK_SOLID | MASK_CUTOUT | MASK_DYNAMIC;
 const uint KIND_CUTOUT = 1u, KIND_TRANSLUCENT = 2u, KIND_DYNAMIC = 3u;
-const uint DEBUG_INSTANCES = 1u, DEBUG_ALBEDO = 2u, DEBUG_NORMALS = 3u, DEBUG_TRIANGLE_DENSITY = 4u, DEBUG_MATERIALS = 5u;
+const uint DEBUG_INSTANCES = 1u, DEBUG_ALBEDO = 2u, DEBUG_NORMALS = 3u, DEBUG_TRIANGLE_DENSITY = 4u, DEBUG_MATERIALS = 5u,
+	DEBUG_PBR_NORMAL = 6u, DEBUG_PBR_SPECULAR = 7u;
 
 const vec3 SUN = vec3(1.0, 0.95, 0.88) * 2.6;
 const vec3 MOON = vec3(0.55, 0.65, 1.0) * 0.2;
@@ -142,6 +147,7 @@ struct Hit {
 	bool glass;     // refracts: stained glass, ice and plain glass (translucent layer)
 	bool metal, gem; // polished (Scene.METAL_MARK, GEM_MARK): get a reflection ray
 	vec3 motion;    // entities: last frame's position relative to last frame's camera, minus now's; NaN if unknown
+	vec4 pbrNormal, pbrSpecular; // raw LabPBR texels (entities: flat normal, no specular data)
 };
 
 uint strideOf(uint kind) {
@@ -253,6 +259,9 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 	h.albedo = pow(tex.rgb * tint, vec3(2.2));
 	h.tint = pow(tint, vec3(2.2));
 	h.opacity = tex.a;
+	bool atlas = inst.kind != KIND_DYNAMIC;
+	h.pbrNormal = atlas ? textureLod(normalAtlas, uv, 0.0) : vec4(0.5, 0.5, 1.0, 1.0);
+	h.pbrSpecular = atlas ? textureLod(specularAtlas, uv, 0.0) : vec4(0.0);
 	h.light = lightAt(vb, t.x, stride) * w.x + lightAt(vb, t.y, stride) * w.y + lightAt(vb, t.z, stride) * w.z;
 	h.motion = vec3(0.0);
 	if (inst.kind == KIND_DYNAMIC) {
@@ -413,6 +422,8 @@ vec3 debugColour(rayQueryEXT rq, vec3 dir, uint mode) {
 		return h.water ? vec3(0.1, 0.3, 1.0) : h.glass ? vec3(0.2, 1.0, 1.0) : h.foliage ? vec3(0.1, 0.9, 0.1)
 			: h.metal ? vec3(1.0, 0.85, 0.1) : h.gem ? vec3(1.0, 0.2, 1.0) : h.emission > 0.0 ? vec3(1.0, 0.2, 0.1) : grey;
 	}
+	if (mode == DEBUG_PBR_NORMAL) return h.pbrNormal.rgb;
+	if (mode == DEBUG_PBR_SPECULAR) return h.pbrSpecular.rgb;
 	return mode == DEBUG_NORMALS ? h.normal * 0.5 + 0.5 : pow(h.albedo, vec3(1.0 / 2.2));
 }
 
