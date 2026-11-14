@@ -57,6 +57,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	uvec2 cache;        // RadianceCache, zero when off (only under Ray Reconstruction)
 	ivec3 anchor;       // the scene anchor's world block position (a section corner)
 	float caveFloor;    // share of lightFloor left where there's no sky light (HelioConfig.caveBrightness)
+	float normalStrength; // how far normal maps tilt the surface, 1 = as the pack made them (HelioConfig)
 };
 // Radiance cache (M4 step 4, after NVIDIA's SHaRC): a hash table of world-space cells, each the light arriving
 // at the faces in it (direct and bounced, without the face's own albedo). A bounce ray that lands in a cell
@@ -133,11 +134,14 @@ layout(push_constant) uniform Push {
 } pc;
 
 bool hybrid; // Frame.hybrid
+float normalStrength; // Frame.normalStrength
 
 struct Hit {
 	uint kind;
 	vec3 albedo;    // linear
-	vec3 normal;    // geometric, facing the ray
+	vec3 normal;    // geometric, facing the ray: ray offsets, what's in front or behind
+	vec3 shading;   // normal-mapped (LabPBR _n), on the ray's side: how light falls on the surface
+	float ao;       // the texture's ambient occlusion (_n blue), on indirect light
 	vec2 light;     // vanilla block / sky light level, 0..1
 	float emission; // the block's own light level, 0..1 (sections encode it in vertex alpha)
 	vec3 tint;      // linear vertex colour (biome tint)
@@ -262,6 +266,25 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 	bool atlas = inst.kind != KIND_DYNAMIC;
 	h.pbrNormal = atlas ? textureLod(normalAtlas, uv, 0.0) : vec4(0.5, 0.5, 1.0, 1.0);
 	h.pbrSpecular = atlas ? textureLod(specularAtlas, uv, 0.0) : vec4(0.0);
+	h.shading = h.normal;
+	h.ao = h.pbrNormal.b;
+	// Tangent frame from the triangle's UVs (sections have no vertex tangents). LabPBR maps are DirectX-style:
+	// +Y points down the texture, along atlas V (checked against SPBR's height maps).
+	vec2 du1 = uvAt(vb, t.y, stride) - uvAt(vb, t.x, stride), du2 = uvAt(vb, t.z, stride) - uvAt(vb, t.x, stride);
+	float det = du1.x * du2.y - du2.x * du1.y;
+	if (atlas && abs(det) > 1e-12) {
+		vec3 e1 = posAt(vb, t.y, stride) - p0, e2 = posAt(vb, t.z, stride) - p0;
+		vec3 tu = (e1 * du2.y - e2 * du1.y) / det, tv = (e2 * du1.x - e1 * du2.x) / det;
+		tu = normalize(tu - h.normal * dot(tu, h.normal));
+		tv = normalize(tv - h.normal * dot(tv, h.normal));
+		vec2 xy = h.pbrNormal.rg * 2.0 - 1.0;
+		float z = sqrt(max(1.0 - dot(xy, xy), 0.0));
+		xy *= normalStrength;
+		vec3 s = normalize(tu * xy.x + tv * xy.y + h.normal * z);
+		// Never facing away from the ray: tilt it back to just past edge-on.
+		float away = dot(s, dir);
+		h.shading = away > -0.01 ? normalize(s - dir * (away + 0.01)) : s;
+	}
 	h.light = lightAt(vb, t.x, stride) * w.x + lightAt(vb, t.y, stride) * w.y + lightAt(vb, t.z, stride) * w.z;
 	h.motion = vec3(0.0);
 	if (inst.kind == KIND_DYNAMIC) {
@@ -348,7 +371,7 @@ vec3 skyIrradiance(vec3 n) {
 // (a section in proportion to its light count over its squared distance, then a light in it uniformly), one
 // kept in proportion to its unshadowed contribution, then a single shadow ray to a point inside its block
 // (stopping where the ray enters that block, which would otherwise hide its own light).
-vec3 blockLight(vec3 pos, vec3 n) {
+vec3 blockLight(vec3 pos, vec3 n, vec3 shading) {
 	if (pc.lights == uvec2(0)) return vec3(0.0);
 	LightTable table = LightTable(pc.lights);
 	ivec3 base = ivec3(floor(pos / 16.0));
@@ -385,7 +408,7 @@ vec3 blockLight(vec3 pos, vec3 n) {
 		if (i > 0) below = cdf[i - 1];
 		uint index = first[i] + min(uint(rand() * float(count[i])), count[i] - 1u);
 		float pdf = (cdf[i] - below) / total / float(count[i]);
-		vec3 f = lightContribution(lights.l[index], pos, n);
+		vec3 f = dot(n, lights.l[index].posEmission.xyz - pos) > 0.0 ? lightContribution(lights.l[index], pos, shading) : vec3(0.0);
 		float target = luminance(f), weight = target / pdf;
 		weightSum += weight;
 		if (weight > 0.0 && rand() * weightSum < weight) {
@@ -424,7 +447,7 @@ vec3 debugColour(rayQueryEXT rq, vec3 dir, uint mode) {
 	}
 	if (mode == DEBUG_PBR_NORMAL) return h.pbrNormal.rgb;
 	if (mode == DEBUG_PBR_SPECULAR) return h.pbrSpecular.rgb;
-	return mode == DEBUG_NORMALS ? h.normal * 0.5 + 0.5 : pow(h.albedo, vec3(1.0 / 2.2));
+	return mode == DEBUG_NORMALS ? h.shading * 0.5 + 0.5 : pow(h.albedo, vec3(1.0 / 2.2));
 }
 
 // Narkowicz's ACES fit.
@@ -439,7 +462,7 @@ vec3 directLight(Hit h, vec3 pos) {
 	vec3 direct = vec3(0.0);
 	if (pc.skyColor.w != 0.0 && lightDir.y > 0.0) {
 		vec3 l = pc.stochastic != 0.0 ? sampleCone(lightDir, day ? SUN_COS : MOON_COS, vec2(rand(), rand())) : lightDir;
-		float nl = dot(h.normal, l);
+		float nl = dot(h.normal, l) > 0.0 ? dot(h.shading, l) : dot(h.normal, l);
 		vec3 side = h.normal;
 		if (h.foliage && nl < 0.0) { // lit from behind: some of it comes through
 			nl *= -FOLIAGE_TRANSMISSION;
@@ -449,7 +472,7 @@ vec3 directLight(Hit h, vec3 pos) {
 	}
 	// Vanilla's light level says whether any block light reaches here: skip sampling (and its shadow ray) if not.
 	// Hybrid lighting takes vanilla's level as the light itself, raster-style.
-	if (h.light.x > 0.0) direct += hybrid ? BLOCK_LIGHT * pow(h.light.x, 2.2) : blockLight(pos, h.normal);
+	if (h.light.x > 0.0) direct += hybrid ? BLOCK_LIGHT * pow(h.light.x, 2.2) : blockLight(pos, h.normal, h.shading);
 	return direct;
 }
 
@@ -459,6 +482,15 @@ vec3 cosineSample(vec3 n) {
 	float u = rand(), phi = 6.2831853 * rand(), r = sqrt(u);
 	vec3 t = normalize(cross(abs(n.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0), n));
 	return normalize(t * (r * cos(phi)) + cross(n, t) * (r * sin(phi)) + n * sqrt(1.0 - u));
+}
+
+// A bounce direction: the surface's first bounce leaves around its normal-mapped normal (so bumps shape bounce
+// light too), mirrored back above the real face if it dips below; later ones around n. n is the side the ray
+// leaves from (foliage may have flipped it): the shading normal only applies on the side it was made for.
+// ponytail: mirroring skews the cosine lobe a little at steep bumps.
+vec3 firstBounce(bool first, vec3 n, vec3 shading) {
+	vec3 d = cosineSample(first && dot(n, shading) > 0.0 ? shading : n);
+	return dot(d, n) > 0.0 ? d : reflect(d, n);
 }
 
 bool cacheOn, feeding; // Frame.cache set; this pixel feeds the cache (its first surface's path only)
@@ -518,7 +550,7 @@ bool cacheLookup(vec3 pos, vec3 n, out vec3 irradiance) {
 vec3 bounceIrradiance(Hit h, vec3 pos) {
 	vec3 e;
 	if (cacheLookup(pos, h.normal, e)) return e;
-	return directLight(h, pos) + skyIrradiance(h.normal) * h.light.y * h.light.y * SKY_FILL;
+	return directLight(h, pos) + skyIrradiance(h.shading) * h.light.y * h.light.y * SKY_FILL * h.ao;
 }
 
 // Light arriving at a surface by one bounce, with the cache past it. A feeding pixel follows the path
@@ -539,7 +571,7 @@ vec3 cachedBounce(Hit h, vec3 pos, vec3 direct) {
 			if (rand() * (1.0 + FOLIAGE_TRANSMISSION) < FOLIAGE_TRANSMISSION) n = -n;
 			w = 1.0 + FOLIAGE_TRANSMISSION;
 		}
-		vec3 d = cosineSample(n);
+		vec3 d = firstBounce(k == 0, n, h.shading);
 		rayQueryEXT b;
 		TRACE(b, x + n * 0.002, d, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
 		last = k;
@@ -579,22 +611,22 @@ vec3 surfaceRadiance(Hit h, vec3 pos) {
 	// A floor (vanilla's Brightness, scaled down by Cave Brightness where no sky light reaches) so caves and dense
 	// foliage never go black; when stochastic, also a share of sky light by vanilla's sky level, for the bounces
 	// past the one followed (the radiance cache's job, when on).
-	vec3 ambient = vec3(lightFloor * mix(caveFloor, 1.0, h.light.y)) + (pc.stochastic != 0.0 && !cacheOn ? skyIrradiance(h.normal) * h.light.y * h.light.y * SKY_FILL : vec3(0.0));
+	vec3 ambient = (vec3(lightFloor * mix(caveFloor, 1.0, h.light.y)) + (pc.stochastic != 0.0 && !cacheOn ? skyIrradiance(h.shading) * h.light.y * h.light.y * SKY_FILL : vec3(0.0))) * h.ao;
 	vec3 direct = directLight(h, pos);
 	vec3 radiance = h.albedo * (EMISSIVE * h.emission + direct + ambient);
-	if (cacheOn) return radiance + h.albedo * cachedBounce(h, pos, direct);
+	if (cacheOn) return radiance + h.albedo * h.ao * cachedBounce(h, pos, direct);
 	if (pc.stochastic == 0.0) {
 		// ponytail: until M4's denoiser, bounce light is approximated outside reference mode: sky light scaled by
 		// vanilla's sky light level, and a dim fill from its block light level.
 		float sky = h.light.y * h.light.y;
 		// (Hybrid lighting already counts block light in full in directLight.)
 		vec3 fill = hybrid ? vec3(0.0) : BLOCK_LIGHT * 0.15 * pow(h.light.x, 2.2);
-		return radiance + h.albedo * (skyIrradiance(h.normal) * sky + fill);
+		return radiance + h.albedo * h.ao * (skyIrradiance(h.shading) * sky + fill);
 	}
 
 	// Stochastic: follow the light around. Each bounce picks up direct light where it lands; a ray that
 	// escapes brings the sky's. Emitters a bounce hits add nothing: block-light sampling already counted them.
-	vec3 throughput = h.albedo, x = pos, n = h.normal;
+	vec3 throughput = h.albedo * h.ao, x = pos, n = h.normal;
 	bool foliage = h.foliage;
 	for (int bounce = 0; bounce < bounces; bounce++) {
 		// Foliage scatters to either side: through it with probability T / (1 + T), weighted to match.
@@ -602,7 +634,7 @@ vec3 surfaceRadiance(Hit h, vec3 pos) {
 			if (rand() * (1.0 + FOLIAGE_TRANSMISSION) < FOLIAGE_TRANSMISSION) n = -n;
 			throughput *= 1.0 + FOLIAGE_TRANSMISSION;
 		}
-		vec3 d = cosineSample(n);
+		vec3 d = firstBounce(bounce == 0, n, h.shading);
 		rayQueryEXT b;
 		TRACE(b, x + n * 0.002, d, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
 		if (!HIT(b)) {
@@ -727,7 +759,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 	}
 	guidePos = pos - pc.cameraInScene.xyz;
 	guideMotion = h.motion;
-	guideNormal = h.normal;
+	guideNormal = h.shading;
 	guideRoughness = h.kind == KIND_TRANSLUCENT || h.glass ? 0.0 : 1.0;
 	guideAlbedo = guideSpecular = vec3(0.0);
 	guideHitDistance = 0.0;
@@ -922,6 +954,7 @@ void main() {
 	bounces = int(frame.cameraDelta.w);
 	lightFloor = frame.lightFloor;
 	caveFloor = frame.caveFloor;
+	normalStrength = frame.normalStrength;
 	hybrid = frame.hybrid != 0u;
 	cacheOn = frame.cache != uvec2(0u);
 	if (cacheOn) {

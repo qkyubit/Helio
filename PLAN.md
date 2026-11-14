@@ -630,10 +630,17 @@ in the Radiance Test instance) plus its add-ons (emission, glowing ore, mirror).
    - Done (`rt/PbrAtlas.java`, `TextureAtlasMixin`): SPBR gives 1103 normal and 1264
      specular maps into 2048x2048 atlases in 90 ms. Debug views (PBR Normal / Specular
      Map) line up with the textures. Not used for shading yet.
-2. [ ] Normal maps: tangent frame per triangle from its UVs (no vertex tangents),
+2. [x] Normal maps: tangent frame per triangle from its UVs (no vertex tangents),
    LabPBR normal (RG, Z rebuilt) bends the shading normal: lighting, bounces, RR's
    normal guide. Geometric normal kept for ray offsets and leaks. Texture AO (B) on
    ambient and bounce light.
+   - Done in `pathtrace.comp`: `Hit.shading` (normal-mapped, kept on the ray's side)
+     for sun, block lights (only from in front of the real face), sky fill and RR's
+     normal guide; `Hit.ao` on ambient, sky fill and bounces. LabPBR normals are
+     DirectX-style (+Y down the texture), checked against SPBR's height maps.
+     The first bounce leaves around the shading normal too (mirrored above the real
+     face). Normal Map Strength setting (default 300%: SPBR's bumps were barely
+     visible at 100%).
 3. [ ] Specular: smoothness -> roughness, F0 (0-229 dielectric), hardcoded metals
    230-237 (iron, gold, aluminium, chrome, copper, lead, platinum, silver: real
    N/K), 238-254 albedo metals. One GGX reflection ray per surface below a roughness
