@@ -131,10 +131,11 @@ public final class FrameGenSpike {
 	/**
 	 * In place of Mojang's swapchain blit: generate this frame's frames and stage them with the real one for the
 	 * pacer, which acquires and presents each when it's due (PacedPresenter). False: no frame generation this frame
-	 * (menus, no world), Mojang blits and presents as usual.
+	 * (menus, no world), Mojang blits and presents as usual. {@code mojangAcquired}: Mojang already holds a
+	 * swapchain image for this frame (it didn't know frame generation would run).
 	 */
 	public static boolean takeFrame(VulkanCommandEncoder encoder, GpuTextureView mainView, long swapchain, LongList images,
-		int swapWidth, int swapHeight, long surface, int format) {
+		int swapWidth, int swapHeight, long surface, int format, boolean mojangAcquired) {
 		generating = false;
 		if (failed || !captured) {
 			reset = true; // menus / no world: history is stale
@@ -142,6 +143,13 @@ public final class FrameGenSpike {
 			return false;
 		}
 		captured = false;
+		if (mojangAcquired) {
+			// Frame generation's first frame: Mojang presents this one with the image it holds, and skips acquiring
+			// from the next on. Taking this frame left that image acquired for good: one swapchain image lost
+			// every time frame generation started, until acquires stalled and the frame rate fell.
+			generating = true;
+			return false;
+		}
 		try (MemoryStack s = MemoryStack.stackPush()) {
 			if (!PacedPresenter.available(device, surface)) throw new IllegalStateException("no queue to present generated frames from");
 			VkCommandBuffer cmd = ((VulkanCommandEncoderAccessor) encoder).helio$commandBuffer();
@@ -242,7 +250,8 @@ public final class FrameGenSpike {
 	private static long lastDoneNanos, pacedFrames;
 	/** The last frame (frameDone value) whose presents the pacer has all handed to the queue. */
 	private static volatile long pacedThrough;
-	private static double frameNanos, worstNanos;
+	private static double frameNanos, worstNanos, copyDelayNanos;
+	private static long worstCopyDelay;
 	/** Pacer thread only: when its last present went out. */
 	private static long lastPresentNanos, behindFrames;
 	/** The display's refresh period; 0 if unknown. Presents keep this far apart, plus a margin for wake-up jitter. */
@@ -286,6 +295,18 @@ public final class FrameGenSpike {
 	 */
 	private static void presentPaced(VkQueue mainQueue, int set, int n, long id, long frameValue, long minGap) {
 		try (MemoryStack s = MemoryStack.stackPush()) {
+			// Ahead of the frame: a swapchain image for each of its frames and the copy into it, queued on the GPU to
+			// run the moment the frame is staged. (Copying them all up front also matters to Reflex: it times the
+			// frame by when its present's semaphore signals, and a copy made at the real frame's due time looked like
+			// rendering that much longer.)
+			int[] images = new int[n];
+			long copied = 0, firstCopy = 0;
+			for (int k = 0; k < n; k++) {
+				images[k] = PacedPresenter.prepare(set, k, frameDone, frameValue);
+				if (images[k] < 0) continue;
+				copied = PacedPresenter.lastCopy;
+				if (firstCopy == 0) firstCopy = copied;
+			}
 			vkWaitSemaphores(device.vkDevice(), VkSemaphoreWaitInfo.calloc(s).sType$Default().semaphoreCount(1)
 				.pSemaphores(s.longs(frameDone)).pValues(s.longs(frameValue)), 1_000_000_000L);
 			long done = System.nanoTime();
@@ -295,32 +316,34 @@ public final class FrameGenSpike {
 				worstNanos = Math.max(worstNanos, dt);
 			}
 			lastDoneNanos = done;
-			long copied = 0;
+			// Presents are timed from when the first image is ready to show, not from when the frame finished: the
+			// copies share the GPU with the next frame's rendering and can run milliseconds late. Timed from the
+			// frame, the first generated image came out late and the next present replaced it before the screen
+			// refreshed: generated frames were presented but rarely seen.
+			if (firstCopy > 0) PacedPresenter.awaitCopy(firstCopy);
+			long ready = System.nanoTime();
+			copyDelayNanos = copyDelayNanos * 0.95 + (ready - done) * 0.05;
+			worstCopyDelay = Math.max(worstCopyDelay, ready - done);
 			if (++pacedFrames % 600 == 0) {
 				Helio.LOG.info("FG pacing: GPU frame {} ms (worst {} ms), {} presents {} ms apart, refresh {} ms, {} frames behind; render thread waited {} ms/frame on the pacer, {} ms/frame acquiring, {} ms/frame in Reflex's sleep",
 					String.format("%.1f", frameNanos / 1e6), String.format("%.1f", worstNanos / 1e6), n, String.format("%.1f", frameNanos / n / 1e6),
 					String.format("%.2f", minGap / 1e6), behindFrames, String.format("%.2f", pacerWaitNanos / 600e6), String.format("%.2f", acquireWaitNanos / 600e6),
 					String.format("%.2f", Reflex.sleepNanos / 600e6));
 				pacerWaitNanos = acquireWaitNanos = Reflex.sleepNanos = 0;
-				Helio.LOG.info("FG pacing: GPU ms: path trace {}, DLSS {}, FG motion {}, DLSS-G {}", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE),
-					GpuTimers.ms(GpuTimers.Pass.DLSS), GpuTimers.ms(GpuTimers.Pass.FG_MOTION), GpuTimers.ms(GpuTimers.Pass.DLSS_G));
+				Helio.LOG.info("FG pacing: GPU ms: path trace {}, DLSS {}, FG motion {}, DLSS-G {}; first image ready {} ms after the frame (worst {} ms)",
+					String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE)), String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS)),
+					String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.FG_MOTION)), String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS_G)),
+					String.format("%.2f", copyDelayNanos / 1e6), String.format("%.2f", worstCopyDelay / 1e6));
+				worstCopyDelay = 0;
 				worstNanos = 0;
 				behindFrames = 0;
 			}
 			// Rendering faster than n presents a refresh apart (no Reflex cap): keeping the gap would fall further
 			// behind every frame, so let the compositor drop some instead.
-			long gap = lastPresentNanos - done > frameNanos / 2 ? 0 : minGap + MIN_GAP_MARGIN;
+			long gap = lastPresentNanos - ready > frameNanos / 2 ? 0 : minGap + MIN_GAP_MARGIN;
 			if (gap == 0) behindFrames++;
-			// Copy every frame into a swapchain image now, present each when due. Reflex times the frame by when its
-			// present's semaphore signals: a copy made at the real frame's due time looked like rendering that much
-			// longer, and Reflex slept the game to match (frames took twice the GPU time: 60 -> 40 fps).
-			int[] images = new int[n];
 			for (int k = 0; k < n; k++) {
-				images[k] = PacedPresenter.prepare(set, k);
-				if (images[k] >= 0) copied = PacedPresenter.lastCopy;
-			}
-			for (int k = 0; k < n; k++) {
-				long due = Math.max(done + (long) (frameNanos * k / n), lastPresentNanos + gap);
+				long due = Math.max(ready + (long) (frameNanos * k / n), lastPresentNanos + gap);
 				for (long wait; (wait = due - System.nanoTime()) > 0; ) LockSupport.parkNanos(wait);
 				lastPresentNanos = System.nanoTime();
 				// The real frame (last) goes out on Mojang's queue with the frame's Reflex present ID: Reflex paces

@@ -191,9 +191,10 @@ public final class PacedPresenter {
 
 	/**
 	 * Pacer thread: acquires a swapchain image and copies staging image {@code i} of {@code set} into it, ready for
-	 * {@link #present}. Returns the image index, or -1 if none could be acquired.
+	 * {@link #present}. The copy runs once {@code frameSemaphore} (a timeline) reaches {@code frameValue}: the frame
+	 * is staged. Returns the image index, or -1 if none could be acquired.
 	 */
-	static int prepare(int set, int i) {
+	static int prepare(int set, int i, long frameSemaphore, long frameValue) {
 		int k = slot = (slot + 1) % SLOTS;
 		VkDevice vk = device.vkDevice();
 		try (MemoryStack s = MemoryStack.stackPush()) {
@@ -224,14 +225,23 @@ public final class PacedPresenter {
 
 			long value = ++copyValue;
 			VkSubmitInfo.Buffer submit = VkSubmitInfo.calloc(1, s).sType$Default()
-				.waitSemaphoreCount(1).pWaitSemaphores(s.longs(acquireSems[k])).pWaitDstStageMask(s.ints(VK_PIPELINE_STAGE_TRANSFER_BIT))
+				.waitSemaphoreCount(2).pWaitSemaphores(s.longs(acquireSems[k], frameSemaphore))
+				.pWaitDstStageMask(s.ints(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT))
 				.pCommandBuffers(s.pointers(cmd)).pSignalSemaphores(s.longs(presentSems[image], copyDone))
-				.pNext(VkTimelineSemaphoreSubmitInfo.calloc(s).sType$Default().waitSemaphoreValueCount(1).pWaitSemaphoreValues(s.longs(0))
+				.pNext(VkTimelineSemaphoreSubmitInfo.calloc(s).sType$Default().waitSemaphoreValueCount(2).pWaitSemaphoreValues(s.longs(0, frameValue))
 					.signalSemaphoreValueCount(2).pSignalSemaphoreValues(s.longs(0, value)));
 			check(vkQueueSubmit(queue, submit, VK_NULL_HANDLE), "present copy submit");
 			slotValues[k] = value;
 			lastCopy = value;
 			return image;
+		}
+	}
+
+	/** Pacer thread: waits until the copy with this copyDone value has run. */
+	static void awaitCopy(long value) {
+		try (MemoryStack s = MemoryStack.stackPush()) {
+			vkWaitSemaphores(device.vkDevice(), VkSemaphoreWaitInfo.calloc(s).sType$Default().semaphoreCount(1)
+				.pSemaphores(s.longs(copyDone)).pValues(s.longs(value)), 1_000_000_000L);
 		}
 	}
 

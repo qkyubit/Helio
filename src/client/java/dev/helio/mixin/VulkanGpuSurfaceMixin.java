@@ -77,10 +77,10 @@ public class VulkanGpuSurfaceMixin {
 
 	@Inject(method = "blitFromTexture", at = @At("HEAD"), cancellable = true)
 	private void helio$generateFrames(CommandEncoderBackend encoder, GpuTextureView textureView, CallbackInfo ci) {
-		boolean taken = FrameGenSpike.takeFrame((VulkanCommandEncoder) encoder, textureView, swapchain, swapchainImages,
-			swapchainWidth, swapchainHeight, surface, swapchainImageFormat);
 		boolean skipped = helio$skippedAcquire;
 		helio$skippedAcquire = false;
+		boolean taken = FrameGenSpike.takeFrame((VulkanCommandEncoder) encoder, textureView, swapchain, swapchainImages,
+			swapchainWidth, swapchainHeight, surface, swapchainImageFormat, !skipped);
 		if (taken) {
 			ci.cancel();
 		} else if (skipped) {

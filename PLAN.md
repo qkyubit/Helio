@@ -591,6 +591,12 @@ output near 180 Hz and no HUD smearing.
        trace ~15 -> 6.6 ms.
      - Block light RIS: 4 candidates when stochastic (was 8), bisection over the section
        cdf. Nether 6.6 -> 4.2 ms. Nether now 97 fps FG off, 2x 70, 3x 57, 4x 43 (cap).
+     - Frame generation feeling under 80 fps at "140": Mojang's swapchain image was leaked
+       each time FG started (Mojang presents that first frame now; tested with 30 starts).
+       Each frame's copies are queued on the GPU before it finishes and presents are timed
+       from when the first image is ready (0.67 ms after the frame), on a top-priority
+       queue. Readback check confirmed generated frames sit halfway between real ones.
+       User-checked: smooth at 2x.
      - Still to do: cave re-check, HUD smearing.
 
 ### M5 — PBR and 3D resource packs

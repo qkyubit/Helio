@@ -33,7 +33,8 @@ public class VulkanBackendMixin {
 				vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice.vkPhysicalDevice(), n, props);
 				if (props.get(graphics).queueCount() > count) {
 					PacedPresenter.extraGraphicsQueue = count;
-					return original.call(stack, count + 1);
+					// Highest priority: its copies are tiny and time-critical, next to Mojang's queue rendering a frame.
+					return original.call(stack, count + 1).put(count, 1.0f);
 				}
 			}
 		}
