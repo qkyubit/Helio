@@ -556,7 +556,7 @@ output near 180 Hz and no HUD smearing.
    reflection. Sky behind glass is put far away. No transparency guide: vanilla draws
    particles after the tracer and DLSS, so they never pass through RR. User-checked: no
    smearing behind water and glass.
-6. [ ] Multi frame generation 3x/4x, HUD after FG input, presets map to DLSS
+6. [x] Multi frame generation 3x/4x, HUD after FG input, presets map to DLSS
    modes; M4 exit check. In progress:
    - [x] 3x/4x (`DLSSG.MultiFrameCount` = generated, `MultiFrameIndex` 1..N, one
      evaluate each). Setting offers Off..4x (capped by `mfgMax`); presets:
@@ -583,7 +583,7 @@ output near 180 Hz and no HUD smearing.
      pacer thread can't start a frame's evaluate until the last frame's presents are out.
      M7: retry on the async compute queue (family 2, if DLSS-G accepts it), with a
      separate thread for presents.
-   - [ ] M4 exit check. First run (1440p, Balanced + RR, 3x): overworld 72 / 50 -> 150,
+   - [x] M4 exit check. First run (1440p, Balanced + RR, 3x): overworld 72 / 50 -> 150,
      torch cave 50 / 40 -> 119, water + glass 95 / 57 -> 171, lava Nether 50 / 39 -> 116
      (FG off / 3x rendered -> presented); HUD smears with FG. Fixes so far:
      - Radiance cache fed by whole 8x8 groups (1 in 16) instead of scattered pixels: one
@@ -602,8 +602,10 @@ output near 180 Hz and no HUD smearing.
        recomposition off; that needs a separate UI + alpha layer). Vignette skipped
        while FG runs (`HudMixin`), and `hud_keep.comp` puts the real frame's pixels back
        over each generated frame wherever it differs from the HUD-less copy (+1 px):
-       HUD, hand, crosshair. Mask checked on screen.
-     - Still to do: cave re-check.
+       HUD, hand, crosshair. Mask checked on screen. User-checked: HUD sharp.
+     - Torch cave re-check: 97 fps FG off; base 70 (2x), 57 (3x), 42 (4x).
+     - Passed: base >= 60 FG off in all scenes (overworld 72, cave 97, water + glass
+       95, Nether 97); with FG, 3x/4x reach 168-171 at 180 Hz; HUD sharp. M4 done.
 
 ### M5 — PBR and 3D resource packs
 
