@@ -358,10 +358,11 @@ public final class PathTracer {
 				.putFloat(116, HelioConfig.current.normalStrength / 100f)
 				.putFloat(120, exposure).putLong(124, meters.address() + slot * 16L)
 				.putFloat(132, cloudTime).putFloat(136, cloudBottom).putFloat(140, cloudCover(mc))
-				.putFloat(144, mc.options.getEffectiveRenderDistance() * 16);
+				.putFloat(144, mc.options.getEffectiveRenderDistance() * 16)
+				.putFloat(148, HelioConfig.current.nightBrightness / 100f);
 			lastViewProj.set(viewProj);
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
-			Sky.update(cmd, sun, moon, hasSky ? rainBrightness : 1, s);
+			Sky.update(cmd, sun, moon, hasSky ? rainBrightness : 1, moonPhase, s);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
 			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(20, s);

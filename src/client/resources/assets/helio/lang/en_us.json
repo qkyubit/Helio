@@ -49,6 +49,8 @@
 	"helio.accumulate.tooltip": "Averages frames while the camera and world are still, for a clean, anti-aliased reference picture. Moving mobs smear while it's on.",
 	"helio.ray_reconstruction": "Ray Reconstruction",
 	"helio.cave_brightness": "Cave Brightness",
+	"helio.night_brightness": "Night Brightness",
+	"helio.night_brightness.tooltip": "Least light outdoors at night, as a share of the open-air minimum set by Brightness. Near 0 lets moonless nights go truly dark.",
 	"helio.normal_strength": "Normal Map Strength",
 	"helio.bloom": "Bloom",
 	"helio.bloom.tooltip": "How much bright things (the sun, glowing blocks, reflections of light) glow onto their surroundings. Needs DLSS.",

@@ -8,6 +8,7 @@ import dev.helio.config.HelioConfig.Lighting;
 import dev.helio.config.HelioConfig.Preset;
 import dev.helio.config.HelioConfig.ReflexMode;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.CycleButton;
@@ -90,6 +91,7 @@ public class HelioScreen extends OptionsSubScreen {
 				.withValues(0, 100, 200, 300, 400, 600)
 				.withTooltip(n -> Tooltip.create(Component.translatable("helio.normal_strength.tooltip")))
 				.create(Component.translatable("helio.normal_strength"), (b, v) -> c.normalStrength = v)));
+		list.addSmall(unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", percentSlider("helio.night_brightness", c.nightBrightness, v -> c.nightBrightness = v)), null);
 		list.addSmall(
 			unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", CycleButton.builder((Float v) -> Component.literal(String.format("%+.1f EV", v)), c.exposure)
 				.withValues(-2f, -1.5f, -1f, -0.5f, 0f, 0.5f, 1f, 1.5f, 2f)
@@ -99,6 +101,27 @@ public class HelioScreen extends OptionsSubScreen {
 				.withValues(0, 5, 10, 15, 20, 30, 40)
 				.withTooltip(n -> Tooltip.create(Component.translatable("helio.bloom.tooltip")))
 				.create(Component.translatable("helio.bloom"), (b, v) -> c.bloom = v)));
+	}
+
+	/** A 0-100% slider, labelled "name: n%", with name's tooltip. */
+	private static AbstractWidget percentSlider(String key, int value, java.util.function.IntConsumer set) {
+		AbstractSliderButton slider = new AbstractSliderButton(0, 0, 150, 20, Component.empty(), value / 100.0) {
+			{
+				updateMessage();
+			}
+
+			@Override
+			protected void updateMessage() {
+				setMessage(Component.translatable(key).append(": " + (int) Math.round(this.value * 100) + "%"));
+			}
+
+			@Override
+			protected void applyValue() {
+				set.accept((int) Math.round(this.value * 100));
+			}
+		};
+		slider.setTooltip(Tooltip.create(Component.translatable(key + ".tooltip")));
+		return slider;
 	}
 
 	/** Any manual change means the settings no longer match a preset. */

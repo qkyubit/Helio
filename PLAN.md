@@ -792,6 +792,17 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      pixel face with vanilla's 8 phases (unlit part 3%), not a second sun (MOON_GLINT 2.5). Rain left sun and
      sky pitch black (rain brightness squared): now 2% of their light stays (RAIN_LIGHT), about a clear night's
      darkness, and the sun and moon discs fade out behind it.
+   - Night sky upgrade (user: a low-light-pollution sky): `nightSky()` in pathtrace.comp. Two jittered star
+     layers (cells at 350 and 220 per radian, about a pixel wide; magnitudes pow(u, 6); mostly white, some
+     blue-white, yellow, orange), denser along the Milky Way: a band (16-degree sigma) with a warm brighter
+     core, clumps and dark dust lanes from the cloud noise volume, peak 0.035. Turns with the sky; fades with
+     vanilla's star brightness and under a bright moon. The moon's light and the sky's moon glow follow its
+     phase (15% at new moon).
+   - Follow-up (user): the Milky Way's core no longer dominates (0.6 + 1.2 x core), so the band reads all the
+     way round, and it fades slowly through twilight (sun 2 to 20 degrees below the horizon) rather than with
+     vanilla's star brightness. Stars twinkle at their own rates (1.5-4 Hz on game time), up to 60% near the
+     horizon, 15% overhead. Night Brightness slider (default 2%): the share of the Brightness floor left outdoors
+     at night (caves keep Cave Brightness at any hour).
 4. [x] Volumetric clouds in place of vanilla's: ray-marched layer over the sky, lit by the sun through the
    LUTs, casting shadows on the ground.
    - Done in code: `cloud_noise.comp` makes a 128^3 tiling volume once (r Perlin-Worley shapes, stretched from

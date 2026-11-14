@@ -66,6 +66,8 @@ public final class HelioConfig {
 	public boolean rayReconstruction = true;
 	/** Least light in caves and enclosed spaces (no sky light), in percent of the open-air floor from Brightness. */
 	public int caveBrightness = 25;
+	/** Least light outdoors at night, in percent of the open-air floor from Brightness (it applies in full by day). */
+	public int nightBrightness = 2;
 	/** How far resource-pack normal maps tilt surfaces, in percent of what the pack made. */
 	public int normalStrength = 300;
 	/** Share of the picture that's bloom, in percent (0 off). */

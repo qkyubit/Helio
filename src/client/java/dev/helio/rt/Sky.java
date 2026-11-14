@@ -101,8 +101,11 @@ final class Sky {
 		return repeat;
 	}
 
-	/** Before the path trace. rain: vanilla's rain brightness (1 clear .. 0 raining), dimming as pathtrace.comp does. */
-	static void update(VkCommandBuffer cmd, Vector3f sun, Vector3f moon, float rain, MemoryStack s) {
+	/**
+	 * Before the path trace. rain: vanilla's rain brightness (1 clear .. 0 raining), dimming as pathtrace.comp does;
+	 * moonPhase: vanilla's (0 full .. 4 new), the night sky's glow following the moon's lit share.
+	 */
+	static void update(VkCommandBuffer cmd, Vector3f sun, Vector3f moon, float rain, int moonPhase, MemoryStack s) {
 		if (!ready) {
 			Memory.Img[] all = {transmittance, multi, skyView, ambient, cloudNoise};
 			VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(all.length, s);
@@ -136,8 +139,9 @@ final class Sky {
 		vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, w);
 		ByteBuffer pc = s.malloc(36);
 		float dim = RAIN_LIGHT + (1 - RAIN_LIGHT) * rain;
+		float moonLight = 0.15f + 0.85f * Math.abs(moonPhase - 4) * 0.25f; // as pathtrace.comp's moonRadiance: new moon dark
 		pc.putFloat(0, sun.x).putFloat(4, sun.y).putFloat(8, sun.z).putFloat(12, SUN_TOP * dim)
-			.putFloat(16, moon.x).putFloat(20, moon.y).putFloat(24, moon.z).putFloat(28, MOON_TOP * MOON_SKY * dim);
+			.putFloat(16, moon.x).putFloat(20, moon.y).putFloat(24, moon.z).putFloat(28, MOON_TOP * MOON_SKY * dim * moonLight);
 		if (!ready) {
 			pass(cmd, pc, TRANSMITTANCE, transmittance, s);
 			pass(cmd, pc, MULTI, multi, s);

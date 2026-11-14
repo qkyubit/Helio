@@ -78,6 +78,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	float cloudBottom;  // vanilla's cloud height
 	float cloudCover;   // share of the sky clouds cover, 0 = vanilla's clouds are off
 	float fadeEnd;      // blocks: vanilla's render distance, where its terrain has faded into the sky
+	float nightFloor;   // share of lightFloor left outdoors at night (HelioConfig.nightBrightness)
 };
 // Traced pixels' log2 luminance, in sixteenths, and how many (read back by PathTracer a few frames later).
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer Meter { int logSum; uint count; };
@@ -108,7 +109,8 @@ const uint DEBUG_INSTANCES = 1u, DEBUG_ALBEDO = 2u, DEBUG_NORMALS = 3u, DEBUG_TR
 const float SUN_TOP = 2.9, MOON_TOP = 0.23;
 const vec3 SUN_TINT = vec3(1.0, 0.98, 0.95), MOON = vec3(0.55, 0.65, 1.0);
 const float SKY = 2.0;          // gain on the sky's light (radiance and irradiance), 1 = physical: next to sunlit snow the physical sky read dark navy
-const float STAR = 1.2;         // a mid star's radiance
+const float STAR = 40.0;        // the brightest stars' radiance at their centre (magnitudes fall steeply from it)
+const float MILKY_WAY = 0.035;  // the Milky Way's glow at its brightest
 const float MOON_GLINT = 2.5;   // the moon's face as seen, over its light: a pale grey disc, not a second sun
 const float RAIN_LIGHT = 0.02;  // sun and moon light left in full rain (Sky.RAIN_LIGHT): about a clear night's
 const vec3 BLOCK_LIGHT = vec3(1.0, 0.68, 0.38) * 1.6;
@@ -463,6 +465,11 @@ vec3 atmosphereTransmittance(float y) {
 }
 
 // Sunlight and moonlight reaching the ground from cos zenith y; rain dims them (and the sky, through Sky.java).
+// Share of the moon's face lit: 1 full .. 0 new (vanilla's phase). Its light and the sky's glow follow it.
+float moonLit() {
+	return abs(floor(pc.skyColor.x + 0.5) - 4.0) * 0.25;
+}
+
 float rainDim() {
 	return mix(RAIN_LIGHT, 1.0, pc.moonDir.w);
 }
@@ -472,7 +479,7 @@ vec3 sunRadiance(float y) {
 }
 
 vec3 moonRadiance(float y) {
-	return MOON_TOP * MOON * atmosphereTransmittance(y) * rainDim();
+	return MOON_TOP * MOON * atmosphereTransmittance(y) * rainDim() * (0.15 + 0.85 * moonLit());
 }
 
 // Rain greys the sky.
@@ -898,7 +905,7 @@ vec3 cachedBounce(Hit h, vec3 pos, vec3 direct) {
 // Bounces followed when stochastic (Frame.cameraDelta.w: 3 for the reference, 1 under RR); Russian roulette
 // after the second.
 int bounces;
-float lightFloor, caveFloor; // Frame.lightFloor, Frame.caveFloor
+float lightFloor, caveFloor, nightFloor; // Frame.lightFloor, Frame.caveFloor, Frame.nightFloor
 
 // Light leaving an opaque (or textured translucent) surface back along the ray: its emission and direct
 // light, plus bounce light (approximated, or followed when stochastic).
@@ -906,7 +913,8 @@ vec3 surfaceRadiance(Hit h, vec3 pos) {
 	// A floor (vanilla's Brightness, scaled down by Cave Brightness where no sky light reaches) so caves and dense
 	// foliage never go black; when stochastic, also a share of sky light by vanilla's sky level, for the bounces
 	// past the one followed (the radiance cache's job, when on).
-	vec3 ambient = (vec3(lightFloor * mix(caveFloor, 1.0, h.light.y)) + (pc.stochastic != 0.0 && !cacheOn ? skyIrradiance(h.shading) * h.light.y * h.light.y * SKY_FILL : vec3(0.0))) * h.ao;
+	// The floor: caves keep caveFloor of it at any hour; open air keeps it by day, nightFloor of it at night.
+	vec3 ambient = (vec3(lightFloor * mix(caveFloor, mix(nightFloor, 1.0, pc.sunDir.w), h.light.y)) + (pc.stochastic != 0.0 && !cacheOn ? skyIrradiance(h.shading) * h.light.y * h.light.y * SKY_FILL : vec3(0.0))) * h.ao;
 	vec3 direct = directLight(h, pos);
 	vec3 radiance = h.albedo * (EMISSIVE * h.emission + direct + ambient);
 	if (cacheOn) return radiance + h.albedo * h.ao * cachedBounce(h, pos, direct);
@@ -959,18 +967,47 @@ float celestialOffset(vec3 d, vec3 c) {
 	return z > 0.0 ? max(abs(d.z), abs(dot(d, across))) / z : 1e10;
 }
 
-// Stars: points on a grid that turns with the sun (vanilla's sky turns around world Z), as bright as vanilla
-// makes its stars (0 by day and in rain, 0.5 at night).
-vec3 stars(vec3 d) {
-	float fade = pc.skyColor.y * 2.0;
-	if (fade <= 0.0) return vec3(0.0);
+// A layer of stars on a grid of cells (q: a direction scaled to cells per radian): a cell holds one with the
+// given probability, a point about a pixel wide; magnitudes fall off steeply (most faint, a few bright), colours
+// run blue-white to orange like stars' temperatures. Each twinkles at its own pace, by up to twinkle.
+vec3 starLayer(vec3 q, float probability, float size, float twinkle) {
+	vec3 cell = floor(q);
+	uint h = pcg(uint(int(cell.x) + 100000) + pcg(uint(int(cell.y) + 100000) + pcg(uint(int(cell.z) + 100000))));
+	if (float(h % 100000u) >= probability * 100000.0) return vec3(0.0);
+	vec3 centre = cell + 0.5 + (vec3(pcg(h), pcg(h + 1u), pcg(h + 2u)) / 4294967295.0 - 0.5) * 0.5;
+	float magnitude = pow(float(pcg(h + 3u)) / 4294967295.0, 6.0), t = float(pcg(h + 4u)) / 4294967295.0;
+	vec3 colour = t < 0.1 ? vec3(0.7, 0.8, 1.0) : t < 0.75 ? vec3(1.0, 0.98, 0.95) : t < 0.93 ? vec3(1.0, 0.9, 0.75) : vec3(1.0, 0.75, 0.55);
+	float r = length(q - centre) / size;
+	float seconds = cloudTime * 0.5; // game time: cloudTime drifts 0.1 blocks a tick, 20 ticks a second
+	float rate = 1.5 + 2.5 * float(pcg(h + 5u) % 1000u) / 1000.0, phase = float(pcg(h + 6u) % 1000u) * 0.00628;
+	float flicker = 1.0 + twinkle * sin(seconds * 6.2831853 * rate + phase) * sin(seconds * 3.9 * rate + phase * 1.7);
+	return colour * magnitude * flicker * exp(-4.0 * r * r);
+}
+
+// The night sky far from towns (user): thousands of twinkling stars (more near the horizon, through more air),
+// denser along the Milky Way, a band of glow all the way round with a brighter core, clumps and dark dust lanes.
+// All turn with the sun (vanilla's sky turns around world Z) and wash out under a bright moon. Stars fade with
+// vanilla's star brightness (0 by day and in rain, 0.5 at night); the Milky Way more slowly, through twilight.
+vec3 nightSky(vec3 d) {
+	float moonWash = 1.0 - 0.7 * moonLit() * smoothstep(-0.05, 0.15, pc.moonDir.y);
+	float fade = pc.skyColor.y * 2.0 * moonWash;
+	float glowFade = (1.0 - smoothstep(-0.35, -0.02, pc.sunDir.y)) * pc.moonDir.w * moonWash;
+	if (fade <= 0.0 && glowFade <= 0.0) return vec3(0.0);
 	float a = atan(pc.sunDir.x, pc.sunDir.y), c = cos(a), s = sin(a);
-	vec3 q = vec3(c * d.x - s * d.y, s * d.x + c * d.y, d.z) * 150.0, cell = floor(q);
-	uint h = pcg(uint(int(cell.x) + 1000) + pcg(uint(int(cell.y) + 1000) + pcg(uint(int(cell.z) + 1000))));
-	if (h % 1000u >= 12u) return vec3(0.0); // 1.2% of cells
-	vec3 centre = cell + 0.5 + (vec3(pcg(h), pcg(h + 1u), pcg(h + 2u)) / 4294967295.0 - 0.5) * 0.6;
-	float brightness = 0.3 + 1.2 * float(pcg(h + 3u) % 1000u) / 1000.0;
-	return vec3(STAR * brightness * fade * smoothstep(0.15, 0.0, length(q - centre)));
+	vec3 r = vec3(c * d.x - s * d.y, s * d.x + c * d.y, d.z); // in the sky's own frame
+	vec3 pole = normalize(vec3(0.42, 0.55, 0.72)), core = normalize(cross(pole, vec3(0.0, 0.0, 1.0)));
+	float lat = dot(r, pole), band = exp(-lat * lat / (2.0 * 0.16 * 0.16));
+	float toCore = acos(clamp(dot(r, core), -1.0, 1.0)), centre = exp(-toCore * toCore / (2.0 * 0.6 * 0.6));
+	float clumps = textureLod(cloudNoise, r * 0.8 + 0.5, 0.0).r, fine = textureLod(cloudNoise, r * 6.0, 0.0).r;
+	float dust = smoothstep(0.3, 0.8, textureLod(cloudNoise, r * 2.5 + 0.3, 0.0).g);
+	float lanes = 1.0 - 0.75 * exp(-lat * lat / (2.0 * 0.035 * 0.035)) * dust;
+	vec3 milkyWay = mix(vec3(0.8, 0.85, 1.0), vec3(1.0, 0.88, 0.7), centre)
+		* band * (0.35 + 0.65 * clumps) * (0.6 + 0.8 * fine) * (0.6 + 1.2 * centre) * lanes * MILKY_WAY;
+	// Two layers, so the grid doesn't show; about a pixel wide at 1440p's ~0.0015 rad a pixel.
+	float twinkle = mix(0.6, 0.15, clamp(d.y * 3.0, 0.0, 1.0));
+	vec3 starlight = starLayer(r * 350.0, 0.012 * (1.0 + 4.0 * band * lanes), 0.45, twinkle)
+		+ starLayer(r * 220.0 + 17.0, 0.006 * (1.0 + 2.0 * band), 0.35, twinkle);
+	return milkyWay * glowFade + starlight * (STAR * fade);
 }
 
 // The moon's face where d meets it: 16x16 grey pixels like vanilla's, the part vanilla's phase leaves dark
@@ -997,7 +1034,7 @@ vec3 skyRadiance(vec3 d) {
 	float elevation = asin(clamp(d.y, 0.0, 1.0)), s = sqrt(elevation / 1.5707963);
 	float ground = mix(1.0, 0.45, smoothstep(0.0, 0.35, -d.y));
 	vec3 c = overcast(textureLod(skyViewLut, vec2(atan(d.z, d.x) / 6.2831853 + 0.5, s * 0.5 + 0.5), 0.0).rgb) * (SKY * ground);
-	if (d.y > 0.0) c += stars(d) * atmosphereTransmittance(d.y);
+	if (d.y > 0.0) c += nightSky(d) * atmosphereTransmittance(d.y);
 	if (pc.sunDir.y > -0.1) {
 		float k = celestialOffset(d, pc.sunDir.xyz);
 		// Only the core: the atmosphere (sky.comp's Mie scattering) and bloom make the glow vanilla's texture paints.
@@ -1366,6 +1403,7 @@ void main() {
 	fadeEnd = frame.fadeEnd;
 	anchorWorld = vec3(frame.anchor);
 	caveFloor = frame.caveFloor;
+	nightFloor = frame.nightFloor;
 	normalStrength = frame.normalStrength;
 	hybrid = frame.hybrid != 0u;
 	cacheOn = frame.cache != uvec2(0u);
