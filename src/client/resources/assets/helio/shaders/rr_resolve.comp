@@ -21,6 +21,9 @@ layout(push_constant) uniform Push {
 	float exposure; // as Frame.exposure in pathtrace.comp
 	float bloom;    // share of the picture that's bloom (HelioConfig.bloom)
 	uint ownSky;    // 1: pathtrace.comp drew the sky (overworld, not underwater): no vanilla sky pixels to keep
+	// Grading (M6 step 8, HelioConfig): 1, 1, 0, 0, 0 leave the picture as the tonemap made it.
+	float saturation, contrast, warmth, vignette, grain;
+	uint seed;      // changes every frame: the grain's
 } pc;
 
 // As in pathtrace.comp. AgX (Sobotka; Wrensch's polynomial fit): linear radiance -> display-linear [0, 1]. Highlights roll off
@@ -63,17 +66,44 @@ vec3 untonemap(vec3 srgb) {
 	return max(inverse(AGX_IN) * exp2(log2x), vec3(0.0));
 }
 
+// Grading, after the tonemap on display-linear colour, then gamma: white balance (warmth: towards orange or
+// blue, luminance kept), contrast around mid grey in log space, saturation around luminance, a vignette darkening
+// the corners, and film grain (luminance noise, strongest in the midtones, new every frame). The HUD and hand
+// vanilla draws later stay ungraded.
+vec3 grade(vec3 x, ivec2 p, ivec2 size) {
+	const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+	vec3 balance = vec3(1.0 + 0.12 * pc.warmth, 1.0, 1.0 - 0.12 * pc.warmth);
+	x *= balance / dot(balance, LUMA);
+	x = 0.18 * pow(max(x, vec3(0.0)) / 0.18, vec3(pc.contrast));
+	float l = dot(x, LUMA);
+	x = max(l + pc.saturation * (x - l), vec3(0.0));
+	vec2 centred = (vec2(p) + 0.5) / vec2(size) - 0.5;
+	centred.x *= float(size.x) / float(size.y);
+	x *= 1.0 - pc.vignette * smoothstep(0.35, 1.0, length(centred));
+	vec3 c = pow(clamp(x, 0.0, 1.0), vec3(1.0 / 2.2));
+	if (pc.grain > 0.0) {
+		uint h = uint(p.x) * 1973u + uint(p.y) * 9277u + pc.seed * 26699u;
+		h = (h ^ (h >> 15u)) * 2246822519u;
+		h = (h ^ (h >> 13u)) * 3266489917u;
+		float n = float(h ^ (h >> 16u)) / 4294967295.0 - 0.5;
+		float mid = 4.0 * dot(c, LUMA) * (1.0 - dot(c, LUMA));
+		c = clamp(c + n * pc.grain * 0.12 * mid, 0.0, 1.0);
+	}
+	return c;
+}
+
 void main() {
 	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 	if (any(greaterThanEqual(p, imageSize(colorImg)))) return;
 	ivec2 render = imageSize(hitDepth);
 	float depth = imageLoad(hitDepth, min(ivec2((vec2(p) + 0.5) * vec2(render) / vec2(imageSize(colorImg))), render - 1)).r;
 	vec3 glow = textureLod(bloom, (vec2(p) + 0.5) / vec2(imageSize(colorImg)), 0.0).rgb / BLOOM_LEVELS;
-	vec3 c = pow(tonemap(mix(max(imageLoad(denoised, p).rgb, vec3(0.0)), glow, pc.bloom) * pc.exposure), vec3(1.0 / 2.2));
+	ivec2 size = imageSize(colorImg);
+	vec3 c = grade(tonemap(mix(max(imageLoad(denoised, p).rgb, vec3(0.0)), glow, pc.bloom) * pc.exposure), p, size);
 	imageStore(entityImg, p, vec4(c, depth));
 	vec4 under = imageLoad(colorImg, p);
 	if (pc.ownSky == 0u && depth == 0.0 && texelFetch(depthTex, p, 0).r == 0.0) { // vanilla's sky: its pixel, plus bloom
-		c = pow(tonemap(mix(untonemap(under.rgb), glow * pc.exposure, pc.bloom)), vec3(1.0 / 2.2));
+		c = grade(tonemap(mix(untonemap(under.rgb), glow * pc.exposure, pc.bloom)), p, size);
 	}
 	imageStore(colorImg, p, vec4(c, under.a));
 }

@@ -244,7 +244,7 @@ public final class PathTracer {
 				.flags(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR).pBindings(rb), null, h), "resolve set layout");
 			resolveSetLayout = h.get(0);
 			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(resolveSetLayout))
-				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(12)), null, h), "resolve layout");
+				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(36)), null, h), "resolve layout");
 			resolveLayout = h.get(0);
 			resolvePipeline = computePipeline(vk, "rr_resolve.comp", resolveLayout, s);
 			Bloom.init(vk, s);
@@ -527,7 +527,10 @@ public final class PathTracer {
 		float bloom = HelioConfig.current.bloom / 100f;
 		Bloom.run(cmd, Dlss.output.view(), width, height, s); // also with bloom 0: rr_resolve.comp still samples it
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolvePipeline);
-		vkCmdPushConstants(cmd, resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s.malloc(12).putFloat(0, exposure).putFloat(4, bloom).putInt(8, hasSky && !underwater ? 1 : 0));
+		HelioConfig c = HelioConfig.current;
+		vkCmdPushConstants(cmd, resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s.malloc(36).putFloat(0, exposure).putFloat(4, bloom)
+			.putInt(8, hasSky && !underwater ? 1 : 0).putFloat(12, c.saturation / 100f).putFloat(16, c.contrast / 100f)
+			.putFloat(20, c.warmth / 100f).putFloat(24, c.vignette / 100f).putFloat(28, c.filmGrain / 100f).putInt(32, seed));
 		long[] views = {Dlss.output.view(), color.vkImageView(), entityImg.view(), 0, Dlss.hitDepth.view()};
 		VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(6, s);
 		w.get(5).sType$Default().dstBinding(5).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)

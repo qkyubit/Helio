@@ -72,6 +72,8 @@ public final class HelioConfig {
 	public int normalStrength = 300;
 	/** Share of the picture that's bloom, in percent (0 off). */
 	public int bloom = 10;
+	/** Grading after the tonemap (rr_resolve.comp), in percent; the defaults leave the picture as it was. */
+	public int saturation = 100, contrast = 100, warmth = 0, vignette = 0, filmGrain = 0;
 	/** Stops added to the auto exposure (brighter above 0). */
 	public float exposure = 0;
 	/**

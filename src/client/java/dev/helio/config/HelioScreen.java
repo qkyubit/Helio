@@ -92,6 +92,13 @@ public class HelioScreen extends OptionsSubScreen {
 				.withTooltip(n -> Tooltip.create(Component.translatable("helio.normal_strength.tooltip")))
 				.create(Component.translatable("helio.normal_strength"), (b, v) -> c.normalStrength = v)));
 		list.addSmall(unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", percentSlider("helio.night_brightness", c.nightBrightness, v -> c.nightBrightness = v)), null);
+		// Grading: after DLSS, so not without it.
+		boolean noGrading = !Helio.rayTracing || Helio.ngxCaps == null;
+		list.addSmall(unsupportedIf(noGrading, "no DLSS", slider("helio.saturation", c.saturation, 0, 200, "%", v -> c.saturation = v)),
+			unsupportedIf(noGrading, "no DLSS", slider("helio.contrast", c.contrast, 50, 150, "%", v -> c.contrast = v)));
+		list.addSmall(unsupportedIf(noGrading, "no DLSS", slider("helio.warmth", c.warmth, -100, 100, "", v -> c.warmth = v)),
+			unsupportedIf(noGrading, "no DLSS", percentSlider("helio.vignette", c.vignette, v -> c.vignette = v)));
+		list.addSmall(unsupportedIf(noGrading, "no DLSS", percentSlider("helio.film_grain", c.filmGrain, v -> c.filmGrain = v)), null);
 		list.addSmall(
 			unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", CycleButton.builder((Float v) -> Component.literal(String.format("%+.1f EV", v)), c.exposure)
 				.withValues(-2f, -1.5f, -1f, -0.5f, 0f, 0.5f, 1f, 1.5f, 2f)
@@ -105,19 +112,28 @@ public class HelioScreen extends OptionsSubScreen {
 
 	/** A 0-100% slider, labelled "name: n%", with name's tooltip. */
 	private static AbstractWidget percentSlider(String key, int value, java.util.function.IntConsumer set) {
-		AbstractSliderButton slider = new AbstractSliderButton(0, 0, 150, 20, Component.empty(), value / 100.0) {
+		return slider(key, value, 0, 100, "%", set);
+	}
+
+	/** An integer slider from min to max, labelled "name: n" + suffix, with name's tooltip. */
+	private static AbstractWidget slider(String key, int value, int min, int max, String suffix, java.util.function.IntConsumer set) {
+		AbstractSliderButton slider = new AbstractSliderButton(0, 0, 150, 20, Component.empty(), (value - min) / (double) (max - min)) {
 			{
 				updateMessage();
 			}
 
+			private int current() {
+				return min + (int) Math.round(this.value * (max - min));
+			}
+
 			@Override
 			protected void updateMessage() {
-				setMessage(Component.translatable(key).append(": " + (int) Math.round(this.value * 100) + "%"));
+				setMessage(Component.translatable(key).append(": " + current() + suffix));
 			}
 
 			@Override
 			protected void applyValue() {
-				set.accept((int) Math.round(this.value * 100));
+				set.accept(current());
 			}
 		};
 		slider.setTooltip(Tooltip.create(Component.translatable(key + ".tooltip")));

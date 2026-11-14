@@ -857,7 +857,13 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      form through the height falloff out to 1200 blocks (greys the horizon, hides far terrain; clear days keep
      the sky's own haze only); cloud cover climbs past 1 (0.45 + 0.7 x rain), and past full cover the layer is
      an unbroken grey blanket with the shapes billowing through.
-8. [ ] Grading: colour-grading LUT, optional film grain and vignette.
+8. [x] Grading: colour-grading LUT, optional film grain and vignette.
+   - Done in code: `grade()` in rr_resolve.comp after the tonemap (display-linear): warmth (white balance,
+     luminance kept), contrast around mid grey in log space, saturation, vignette, film grain (luminance noise,
+     strongest in midtones, new each frame); HUD and hand stay ungraded. Sliders Saturation (0-200%), Contrast
+     (50-150%), Warmth (-100..100), Vignette, Film Grain (0-100%); defaults leave the picture as it was. Needs
+     DLSS (it's in the resolve); reference accumulation isn't graded. A 3D LUT file skipped until a pack wants
+     one: the sliders cover the grading users asked for.
 9. [ ] Handheld light (user, 2026-11-14): a light-emitting item held in either hand (torch, lantern, glowstone,
    ...) lights its surroundings like the block would, from the player's hand, with shadows; other players and
    mobs holding one too. Joins the light sampling as a moving light.
