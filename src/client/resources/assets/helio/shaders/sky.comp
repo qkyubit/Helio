@@ -1,0 +1,193 @@
+#version 460
+
+// Physically based sky (M6 step 3; Hillaire, "A Scalable and Production Ready Sky and Atmosphere Rendering
+// Technique", 2020), as LUTs for pathtrace.comp (Sky.java runs the modes in order, a barrier between each):
+//   0 transmittance: (height, cos zenith) -> transmittance to the top of the atmosphere (0 where the planet
+//     is in the way), 256x64.
+//   1 multiple scattering: (height, cos sun zenith) -> Hillaire's psi, the light scattered more than once
+//     per unit of light and scattering coefficient, 32x32.
+//   2 sky view: world direction -> sky radiance at the viewer, lit by the sun and the moon, 256x128.
+//   3 ambient cube: sky irradiance onto surfaces facing +x, -x, +y, -y, +z, -z, from the sky view (6x1).
+// Distances in km; the viewer sits VIEW_HEIGHT above the ground; the world's y is up.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0, rgba16f) uniform image2D transmittanceImg;
+layout(binding = 1, rgba16f) uniform image2D multiImg;
+layout(binding = 2, rgba16f) uniform image2D skyViewImg;
+layout(binding = 3, rgba16f) uniform image2D ambientImg;
+layout(binding = 4) uniform sampler2D transmittanceLut;
+layout(binding = 5) uniform sampler2D multiLut;
+layout(binding = 6) uniform sampler2D skyViewLut;
+
+layout(push_constant) uniform Push {
+	vec4 sun;  // xyz towards the sun, w = its light at the top of the atmosphere (pathtrace.comp SUN_TOP, dimmed by rain)
+	vec4 moon; // the same for the moon, times the share the night sky scatters (Sky.MOON_SKY)
+	int mode;
+} pc;
+
+const float PI = 3.14159265;
+const float GROUND = 6360.0, TOP = 6460.0, VIEW_HEIGHT = 0.2;
+const vec3 RAYLEIGH = vec3(5.802, 13.558, 33.1) * 1e-3;
+const float RAYLEIGH_HEIGHT = 8.0;
+const float MIE_SCATTERING = 3.996e-3, MIE_EXTINCTION = 4.440e-3, MIE_HEIGHT = 1.2, MIE_G = 0.8;
+const vec3 OZONE = vec3(0.650, 1.881, 0.085) * 1e-3; // absorption, in a tent 30 km wide around 25 km
+const vec3 GROUND_ALBEDO = vec3(0.3);
+const vec3 SUN_TINT = vec3(1.0, 0.98, 0.95); // the sun's colour above the atmosphere
+const vec3 MOON_TINT = vec3(0.55, 0.65, 1.0); // as pathtrace.comp's MOON: nights read blue
+
+struct Medium { vec3 rayleigh; float mie; vec3 extinction; };
+
+Medium medium(float h) {
+	Medium m;
+	m.rayleigh = RAYLEIGH * exp(-h / RAYLEIGH_HEIGHT);
+	float mieDensity = exp(-h / MIE_HEIGHT);
+	m.mie = MIE_SCATTERING * mieDensity;
+	m.extinction = m.rayleigh + MIE_EXTINCTION * mieDensity + OZONE * max(0.0, 1.0 - abs(h - 25.0) / 15.0);
+	return m;
+}
+
+// Distance along a ray from r (planet centre at the origin) to the sphere of radius R, or -1.
+float sphere(vec3 r, vec3 d, float radius) {
+	float b = dot(r, d), c = dot(r, r) - radius * radius, disc = b * b - c;
+	if (disc < 0.0) return -1.0;
+	float s = sqrt(disc);
+	return -b - s > 0.0 ? -b - s : -b + s > 0.0 ? -b + s : -1.0;
+}
+
+// Transmittance and multiple-scattering LUTs: (cos zenith, height) <-> uv. The square root crowds texels
+// near the horizon and the ground, where things change fastest.
+vec2 transmittanceUv(float h, float mu) {
+	return vec2(0.5 + 0.5 * sign(mu) * sqrt(abs(mu)), sqrt(clamp(h / (TOP - GROUND), 0.0, 1.0)));
+}
+
+vec3 transmittance(float h, float mu) {
+	return textureLod(transmittanceLut, transmittanceUv(h, mu), 0.0).rgb;
+}
+
+vec3 psi(float h, float mu) {
+	return textureLod(multiLut, vec2(mu * 0.5 + 0.5, clamp(h / (TOP - GROUND), 0.0, 1.0)), 0.0).rgb;
+}
+
+float rayleighPhase(float c) {
+	return 3.0 / (16.0 * PI) * (1.0 + c * c);
+}
+
+float miePhase(float c) { // Cornette-Shanks
+	float g2 = MIE_G * MIE_G;
+	return 3.0 / (8.0 * PI) * (1.0 - g2) * (1.0 + c * c) / ((2.0 + g2) * pow(1.0 + g2 - 2.0 * MIE_G * c, 1.5));
+}
+
+// Sky-view LUT: world direction <-> uv (azimuth across, elevation up with more texels near the horizon).
+vec3 skyViewDir(vec2 uv) {
+	float s = uv.y * 2.0 - 1.0, elevation = sign(s) * s * s * PI * 0.5, azimuth = (uv.x - 0.5) * 2.0 * PI;
+	return vec3(cos(elevation) * cos(azimuth), sin(elevation), cos(elevation) * sin(azimuth));
+}
+
+void transmittancePass(ivec2 p, ivec2 size) {
+	vec2 uv = (vec2(p) + 0.5) / vec2(size);
+	float s = uv.x * 2.0 - 1.0, mu = sign(s) * s * s, h = uv.y * uv.y * (TOP - GROUND);
+	vec3 r = vec3(0.0, GROUND + h, 0.0), d = vec3(sqrt(max(1.0 - mu * mu, 0.0)), mu, 0.0);
+	if (sphere(r, d, GROUND) > 0.0) {
+		imageStore(transmittanceImg, p, vec4(0.0));
+		return;
+	}
+	float t = sphere(r, d, TOP), dt = t / 40.0;
+	vec3 depth = vec3(0.0);
+	for (int i = 0; i < 40; i++) depth += medium(length(r + d * (float(i) + 0.5) * dt) - GROUND).extinction * dt;
+	imageStore(transmittanceImg, p, vec4(exp(-depth), 1.0));
+}
+
+// Hillaire's section 5.5: second-order light from 64 directions, uniform phase, with the lit ground; psi =
+// L2 / (1 - f_ms) sums the geometric series of higher orders.
+void multiPass(ivec2 p, ivec2 size) {
+	vec2 uv = (vec2(p) + 0.5) / vec2(size);
+	float mu = uv.x * 2.0 - 1.0, h = max(uv.y * (TOP - GROUND), 0.01);
+	vec3 r = vec3(0.0, GROUND + h, 0.0), sunDir = vec3(sqrt(max(1.0 - mu * mu, 0.0)), mu, 0.0);
+	vec3 l2 = vec3(0.0), fms = vec3(0.0);
+	const int DIRS = 64, STEPS = 20;
+	for (int k = 0; k < DIRS; k++) {
+		float z = 1.0 - 2.0 * (float(k) + 0.5) / float(DIRS), phi = float(k) * 2.39996323;
+		vec3 d = vec3(sqrt(1.0 - z * z) * cos(phi), z, sqrt(1.0 - z * z) * sin(phi));
+		float tGround = sphere(r, d, GROUND), t = tGround > 0.0 ? tGround : sphere(r, d, TOP), dt = t / float(STEPS);
+		vec3 throughput = vec3(1.0), l = vec3(0.0), f = vec3(0.0);
+		for (int i = 0; i < STEPS; i++) {
+			vec3 x = r + d * (float(i) + 0.5) * dt;
+			float hx = length(x) - GROUND;
+			Medium m = medium(hx);
+			vec3 scattering = m.rayleigh + m.mie, step = exp(-m.extinction * dt);
+			vec3 integral = (1.0 - step) / max(m.extinction, vec3(1e-7)); // of the throughput over the step
+			l += throughput * integral * scattering * transmittance(hx, dot(normalize(x), sunDir)) / (4.0 * PI);
+			f += throughput * integral * scattering;
+			throughput *= step;
+		}
+		if (tGround > 0.0) {
+			vec3 x = r + d * tGround, up = normalize(x);
+			l += throughput * transmittance(0.0, dot(up, sunDir)) * max(dot(up, sunDir), 0.0) * GROUND_ALBEDO / PI;
+		}
+		l2 += l / float(DIRS);
+		fms += f / float(DIRS);
+	}
+	imageStore(multiImg, p, vec4(l2 / (1.0 - fms), 1.0));
+}
+
+void skyViewPass(ivec2 p, ivec2 size) {
+	vec3 d = skyViewDir((vec2(p) + 0.5) / vec2(size));
+	vec3 r = vec3(0.0, GROUND + VIEW_HEIGHT, 0.0);
+	float tGround = sphere(r, d, GROUND), tMax = tGround > 0.0 ? tGround : sphere(r, d, TOP);
+	vec3 sunLight = pc.sun.w * SUN_TINT, moonLight = pc.moon.w * MOON_TINT;
+	float sunPhaseR = rayleighPhase(dot(d, pc.sun.xyz)), sunPhaseM = miePhase(dot(d, pc.sun.xyz));
+	float moonPhaseR = rayleighPhase(dot(d, pc.moon.xyz)), moonPhaseM = miePhase(dot(d, pc.moon.xyz));
+	vec3 throughput = vec3(1.0), l = vec3(0.0);
+	const int STEPS = 32;
+	float last = 0.0;
+	for (int i = 0; i < STEPS; i++) {
+		float t = tMax * pow((float(i) + 1.0) / float(STEPS), 2.0), dt = t - last, mid = last + dt * 0.5;
+		last = t;
+		vec3 x = r + d * mid, up = normalize(x);
+		float hx = length(x) - GROUND;
+		Medium m = medium(hx);
+		float muSun = dot(up, pc.sun.xyz), muMoon = dot(up, pc.moon.xyz);
+		vec3 inscatter = sunLight * (transmittance(hx, muSun) * (m.rayleigh * sunPhaseR + m.mie * sunPhaseM) + psi(hx, muSun) * (m.rayleigh + m.mie))
+			+ moonLight * (transmittance(hx, muMoon) * (m.rayleigh * moonPhaseR + m.mie * moonPhaseM) + psi(hx, muMoon) * (m.rayleigh + m.mie));
+		vec3 step = exp(-m.extinction * dt);
+		l += throughput * inscatter * (1.0 - step) / max(m.extinction, vec3(1e-7));
+		throughput *= step;
+	}
+	imageStore(skyViewImg, p, vec4(l, 1.0));
+}
+
+// Irradiance onto a surface facing each axis: the sky view's radiance times the cosine, over the upper
+// hemisphere (below the horizon the world's own ground stands in, traced).
+void ambientPass(int face) {
+	vec3 n = vec3(0.0);
+	n[face / 2] = face % 2 == 0 ? 1.0 : -1.0;
+	ivec2 size = textureSize(skyViewLut, 0);
+	vec3 e = vec3(0.0);
+	const int STRIDE = 8; // columns per sample: the sky changes slowly across
+	float dAzimuth = 2.0 * PI / float(size.x / STRIDE);
+	for (int y = size.y / 2; y < size.y; y++) {
+		float v0 = float(y) / float(size.y), v1 = float(y + 1) / float(size.y);
+		float s0 = v0 * 2.0 - 1.0, s1 = v1 * 2.0 - 1.0;
+		float e0 = s0 * s0 * PI * 0.5, e1 = s1 * s1 * PI * 0.5;
+		float solid = (sin(e1) - sin(e0)) * dAzimuth; // per sample
+		for (int x = 0; x < size.x; x += STRIDE) {
+			vec2 uv = vec2((float(x) + 0.5 * float(STRIDE)) / float(size.x), (float(y) + 0.5) / float(size.y));
+			e += textureLod(skyViewLut, uv, 0.0).rgb * max(dot(skyViewDir(uv), n), 0.0) * solid;
+		}
+	}
+	imageStore(ambientImg, ivec2(face, 0), vec4(e, 1.0));
+}
+
+void main() {
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	if (pc.mode == 3) {
+		if (p.y == 0 && p.x < 6) ambientPass(p.x);
+		return;
+	}
+	ivec2 size = pc.mode == 0 ? imageSize(transmittanceImg) : pc.mode == 1 ? imageSize(multiImg) : imageSize(skyViewImg);
+	if (any(greaterThanEqual(p, size))) return;
+	if (pc.mode == 0) transmittancePass(p, size);
+	else if (pc.mode == 1) multiPass(p, size);
+	else skyViewPass(p, size);
+}

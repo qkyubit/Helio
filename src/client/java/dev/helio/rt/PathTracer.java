@@ -73,7 +73,8 @@ public final class PathTracer {
 	private static final Matrix4f viewRotation = new Matrix4f();
 	private static float sunAngle, moonAngle, rainBrightness;
 	private static boolean hasSky, underwater;
-	private static final Vector3f skyColor = new Vector3f();
+	private static int moonPhase; // vanilla's MoonPhase ordinal: 0 full .. 4 new .. 7
+	private static float starBrightness;
 	private static final Vector4f fogColor = new Vector4f();
 	private static int seed;
 
@@ -117,7 +118,8 @@ public final class PathTracer {
 			sunAngle = sky.sunAngle;
 			moonAngle = sky.moonAngle;
 			rainBrightness = sky.rainBrightness;
-			skyColor.set(sky.skyColor);
+			moonPhase = sky.moonPhase.ordinal();
+			starBrightness = sky.starBrightness;
 		}
 		fogColor.set(camera.fogData.color);
 		underwater = camera.fogType == FogType.WATER;
@@ -164,9 +166,9 @@ public final class PathTracer {
 				.magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_NEAREST).maxLod(0), null, h), "sampler");
 			sampler = h.get(0);
 
-			// 0 TLAS, 2, 5, 14 and 15 sampled (atlas, vanilla depth, PBR atlases), the rest storage images (see pathtrace.comp).
-			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(16, s);
-			for (int i = 0; i < 16; i++) {
+			// 0 TLAS, 2, 5 and 14-18 sampled (atlas, vanilla depth, PBR atlases, sky LUTs), the rest storage images (see pathtrace.comp).
+			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(19, s);
+			for (int i = 0; i < 19; i++) {
 				int type = i == 0 ? VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
 					: i == 2 || i == 5 || i >= 14 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 				b.get(i).binding(i).descriptorType(type).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
@@ -220,10 +222,11 @@ public final class PathTracer {
 				.flags(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR).pBindings(rb), null, h), "resolve set layout");
 			resolveSetLayout = h.get(0);
 			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(resolveSetLayout))
-				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(8)), null, h), "resolve layout");
+				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(12)), null, h), "resolve layout");
 			resolveLayout = h.get(0);
 			resolvePipeline = computePipeline(vk, "rr_resolve.comp", resolveLayout, s);
 			Bloom.init(vk, s);
+			Sky.init(vk, s);
 
 			VkDescriptorSetLayoutBinding.Buffer mb = VkDescriptorSetLayoutBinding.calloc(3, s);
 			for (int i = 0; i < 3; i++) mb.get(i).binding(i).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
@@ -336,9 +339,10 @@ public final class PathTracer {
 				.putFloat(120, exposure).putLong(124, meters.address() + slot * 16L);
 			lastViewProj.set(viewProj);
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
+			Sky.update(cmd, sun, moon, hasSky ? rainBrightness : 1, s);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(16, s);
+			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(19, s);
 			w.get(0).sType$Default().dstBinding(0).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
 				.pNext(VkWriteDescriptorSetAccelerationStructureKHR.calloc(s).sType$Default().pAccelerationStructures(s.longs(Scene.tlas)));
 			w.get(1).sType$Default().dstBinding(1).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -362,6 +366,11 @@ public final class PathTracer {
 				w.get(14 + i).sType$Default().dstBinding(14 + i).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
 					.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(sampler).imageView(((VulkanGpuTextureView) pbr[i]).vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
 			}
+			long[] sky = {Sky.transmittanceView(), Sky.skyViewView(), Sky.ambientView()};
+			for (int i = 0; i < 3; i++) {
+				w.get(16 + i).sType$Default().dstBinding(16 + i).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+					.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(Sky.sampler()).imageView(sky[i]).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+			}
 			vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, w);
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 1, s.longs(writeEntityTextures(mc, s)), null);
 
@@ -376,7 +385,7 @@ public final class PathTracer {
 				// Sampling the sun disc is noisy at 1 sample per pixel: only with accumulation until M4's denoiser.
 				.putInt(120, seed++).putFloat(124, accumulate || rr ? 1 : 0)
 				.putFloat(128, moon.x).putFloat(132, moon.y).putFloat(136, moon.z).putFloat(140, rainBrightness)
-				.putFloat(144, skyColor.x).putFloat(148, skyColor.y).putFloat(152, skyColor.z).putFloat(156, hasSky ? 1 : 0)
+				.putFloat(144, moonPhase).putFloat(148, starBrightness).putFloat(152, 0).putFloat(156, hasSky ? 1 : 0)
 				.putFloat(160, fogColor.x).putFloat(164, fogColor.y).putFloat(168, fogColor.z).putFloat(172, underwater ? 1 : 0);
 			new Matrix4f(levelProjection).mul(viewRotation).get(176, pc);
 			pc.putLong(240, Scene.lights).putLong(248, frame.address());
@@ -459,7 +468,7 @@ public final class PathTracer {
 		float bloom = HelioConfig.current.bloom / 100f;
 		Bloom.run(cmd, Dlss.output.view(), width, height, s); // also with bloom 0: rr_resolve.comp still samples it
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolvePipeline);
-		vkCmdPushConstants(cmd, resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s.malloc(8).putFloat(0, exposure).putFloat(4, bloom));
+		vkCmdPushConstants(cmd, resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s.malloc(12).putFloat(0, exposure).putFloat(4, bloom).putInt(8, hasSky && !underwater ? 1 : 0));
 		long[] views = {Dlss.output.view(), color.vkImageView(), entityImg.view(), 0, Dlss.hitDepth.view()};
 		VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(6, s);
 		w.get(5).sType$Default().dstBinding(5).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
@@ -575,6 +584,7 @@ public final class PathTracer {
 		vkDestroyPipelineLayout(vk, resolveLayout, null);
 		vkDestroyDescriptorSetLayout(vk, resolveSetLayout, null);
 		Bloom.destroy(vk);
+		Sky.destroy(vk);
 		vkDestroyPipeline(vk, compositePipeline, null);
 		vkDestroyPipelineLayout(vk, compositeLayout, null);
 		vkDestroyDescriptorSetLayout(vk, compositeSetLayout, null);

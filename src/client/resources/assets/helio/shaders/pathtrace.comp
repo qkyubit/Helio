@@ -27,6 +27,11 @@ layout(binding = 2) uniform sampler2D blockAtlas;
 // porosity / SSS, emission. Specular all zero = the pack has no map.
 layout(binding = 14) uniform sampler2D normalAtlas;
 layout(binding = 15) uniform sampler2D specularAtlas;
+// The physically based sky (Sky.java, sky.comp): transmittance (cos zenith, height), the sky's radiance by world
+// direction, and the sky's irradiance onto faces along +-x, +-y, +-z (6x1).
+layout(binding = 16) uniform sampler2D transmittanceLut;
+layout(binding = 17) uniform sampler2D skyViewLut;
+layout(binding = 18) uniform sampler2D ambientLut;
 layout(binding = 3, rgba32f) uniform image2D accumImg; // premultiplied radiance + coverage, averaged over frames
 layout(binding = 4, rgba32f) uniform image2D entityImg; // traced colour + NDC depth where an entity is hit (entity_composite.comp)
 layout(binding = 5) uniform sampler2D depthTex; // vanilla's depth so far: sky and terrain past the RT distance
@@ -93,10 +98,14 @@ const uint KIND_CUTOUT = 1u, KIND_TRANSLUCENT = 2u, KIND_DYNAMIC = 3u;
 const uint DEBUG_INSTANCES = 1u, DEBUG_ALBEDO = 2u, DEBUG_NORMALS = 3u, DEBUG_TRIANGLE_DENSITY = 4u, DEBUG_MATERIALS = 5u,
 	DEBUG_PBR_NORMAL = 6u, DEBUG_PBR_SPECULAR = 7u;
 
-const vec3 SUN = vec3(1.0, 0.95, 0.88) * 2.6;
-const vec3 MOON = vec3(0.55, 0.65, 1.0) * 0.2;
-const vec3 NIGHT_SKY = vec3(0.6, 0.7, 1.0) * 0.06; // moonlit sky; vanilla's sky colour is near black at night
-const float SKY = 0.9;
+// Sun and moon light above the atmosphere (Sky.SUN_TOP, MOON_TOP; sky.comp's tints): about 2.6 reaches the
+// ground with the sun overhead. Nights read blue.
+const float SUN_TOP = 2.9, MOON_TOP = 0.23;
+const vec3 SUN_TINT = vec3(1.0, 0.98, 0.95), MOON = vec3(0.55, 0.65, 1.0);
+const float SKY = 2.0;          // gain on the sky's light (radiance and irradiance), 1 = physical: next to sunlit snow the physical sky read dark navy
+const float STAR = 1.2;         // a mid star's radiance
+const float MOON_GLINT = 2.5;   // the moon's face as seen, over its light: a pale grey disc, not a second sun
+const float RAIN_LIGHT = 0.02;  // sun and moon light left in full rain (Sky.RAIN_LIGHT): about a clear night's
 const vec3 BLOCK_LIGHT = vec3(1.0, 0.68, 0.38) * 1.6;
 const float LIGHT = 8.0;        // intensity of an emission-15 block light
 const float EMISSIVE = 4.0;     // radiance of an emission-15 block's own surface, times its texture (M6 bloom keys off it)
@@ -104,10 +113,10 @@ const float PACK_GLOW = 0.5;    // emission of a resource pack's glowing texels 
 const uint CANDIDATES = 8u;     // lights considered per shading point (RIS)
 const float SUN_COS = 0.99994;  // 0.6 degree disc radius: soft-shadow penumbra
 const float MOON_COS = 0.99996;
-const float GLINT = 50.0;       // sun and moon seen in reflections, over their direct light
+const float GLINT = 50.0;       // the sun and moon discs as seen (sky, reflections), over their direct light
 // Vanilla's sun and moon as seen (half-width over distance): its quads are 30 and 20 wide at 100, the sun's
 // bright core is the middle 8 of its texture's 32 pixels with a faint halo out to 22, the moon's face 20.
-const float SUN_SIZE = 0.075, SUN_HALO = 0.206, MOON_SIZE = 0.125;
+const float SUN_SIZE = 0.075, MOON_SIZE = 0.125;
 const float WATER_IOR = 1.33, GLASS_IOR = 1.5;
 const float WATER_OPACITY = 0.3;     // how much of water's texture shows on its surface; the rest is seen through
 const float WATER_ABSORPTION = 0.15; // per block, as a power of the water's (linear) tint
@@ -115,6 +124,7 @@ const float WATER_SCATTER = 0.1;     // light the water itself sends back, over 
 const vec3 WATER_TINT = vec3(0.046, 0.184, 0.782); // vanilla's default 0x3F76E4: absorption when the camera starts underwater
 const float SKY_FILL = 0.4;     // share of sky light added by sky level when stochastic (missing bounces)
 const float MAX_SAMPLE = 12.0;
+const float SKY_SAMPLE = 32.0;  // the same for the sky (its sun)
 const float SKY_DISTANCE = 65504.0; // RR's hit distance for rays that escape (FP16 max)   // luminance cap on what RR gets: sun glints off water and metal flicker past it
 const float FOLIAGE_TRANSMISSION = 0.5; // light leaves and grass let through, over what they reflect
 const float SSS_TRANSMISSION = 1.0;     // the same at a pack's full subsurface value (LabPBR _s blue 255)
@@ -154,7 +164,7 @@ layout(push_constant) uniform Push {
 	uint seed;          // changes every frame
 	float stochastic;   // 1: sample area lights (needs accumulation or a denoiser), 0: their centre
 	vec4 moonDir;       // xyz towards the moon, w = rain brightness (1 clear .. 0 raining)
-	vec4 skyColor;      // vanilla's sky (zenith) colour, sRGB; w = 1 if the dimension has a sky
+	vec4 skyColor;      // x vanilla's moon phase (0 full .. 4 new .. 7), y its star brightness; w = 1 if the dimension has a sky
 	vec4 fogColor;      // vanilla's fog (horizon) colour, sRGB; w = 1 if the camera is underwater
 	mat4 viewProj;      // camera-relative world -> NDC, for depths that match vanilla's
 	uvec2 lights;       // LightTable, zero without lights
@@ -440,19 +450,39 @@ vec3 srgbToLinear(vec3 c) {
 	return pow(c, vec3(2.2));
 }
 
-// Sunlight reddens through more air near the horizon and dims with rain.
-vec3 sunRadiance(float y) {
-	float airmass = 1.0 / max(y, 0.035);
-	return SUN * exp(-vec3(0.020, 0.045, 0.10) * (airmass - 1.0)) * pc.moonDir.w * pc.moonDir.w;
+// Through the atmosphere from the viewer (sky.comp's VIEW_HEIGHT) towards cos zenith y: reddens towards the
+// horizon, nothing past it (the planet's in the way). As sky.comp's transmittance LUT.
+vec3 atmosphereTransmittance(float y) {
+	float h = 0.2 / 100.0; // VIEW_HEIGHT over the atmosphere's thickness
+	return textureLod(transmittanceLut, vec2(0.5 + 0.5 * sign(y) * sqrt(abs(y)), sqrt(h)), 0.0).rgb;
 }
 
-// Light from the sky dome onto a surface facing n: vanilla's sky colour overhead, fog colour at the horizon,
-// half desaturated (vanilla's sky is very blue, and there's no warm ground bounce until step 6).
+// Sunlight and moonlight reaching the ground from cos zenith y; rain dims them (and the sky, through Sky.java).
+float rainDim() {
+	return mix(RAIN_LIGHT, 1.0, pc.moonDir.w);
+}
+
+vec3 sunRadiance(float y) {
+	return SUN_TOP * SUN_TINT * atmosphereTransmittance(y) * rainDim();
+}
+
+vec3 moonRadiance(float y) {
+	return MOON_TOP * MOON * atmosphereTransmittance(y) * rainDim();
+}
+
+// Rain greys the sky.
+vec3 overcast(vec3 c) {
+	return mix(vec3(dot(c, vec3(0.2126, 0.7152, 0.0722))), c, pc.moonDir.w);
+}
+
+// Light from the sky dome onto a surface facing n, over pi (the radiance a white diffuse surface sends back):
+// the ambient cube, blended by n's squared components.
 vec3 skyIrradiance(vec3 n) {
 	if (pc.skyColor.w == 0.0) return srgbToLinear(pc.fogColor.rgb) * 0.15; // Nether, End: no sky
-	vec3 c = mix(srgbToLinear(pc.fogColor.rgb), srgbToLinear(pc.skyColor.rgb), n.y * 0.5 + 0.5);
-	c = mix(vec3(dot(c, vec3(0.2126, 0.7152, 0.0722))), c, 0.5) * SKY;
-	return max(c, NIGHT_SKY * pc.moonDir.w);
+	vec3 n2 = n * n;
+	vec3 e = n2.x * texelFetch(ambientLut, ivec2(n.x > 0.0 ? 0 : 1, 0), 0).rgb + n2.y * texelFetch(ambientLut, ivec2(n.y > 0.0 ? 2 : 3, 0), 0).rgb
+		+ n2.z * texelFetch(ambientLut, ivec2(n.z > 0.0 ? 4 : 5, 0), 0).rgb;
+	return overcast(e) * (SKY / 3.14159265);
 }
 
 // Block lights by resampled importance sampling: CANDIDATES lights drawn from the 27 sections around pos
@@ -576,7 +606,7 @@ vec3 directLight(Hit h, vec3 pos) {
 			nl *= -h.transmission;
 			side = -side;
 		}
-		if (nl > 0.0) direct = nl * shadowTransmittance(pos + side * 0.002, l, 512.0) * (day ? sunRadiance(l.y) : MOON * pc.moonDir.w);
+		if (nl > 0.0) direct = nl * shadowTransmittance(pos + side * 0.002, l, 512.0) * (day ? sunRadiance(l.y) : moonRadiance(l.y));
 	}
 	// Vanilla's light level says whether any block light reaches here: skip sampling (and its shadow ray) if not.
 	// Hybrid lighting takes vanilla's level as the light itself, raster-style.
@@ -778,19 +808,48 @@ float celestialOffset(vec3 d, vec3 c) {
 	return z > 0.0 ? max(abs(d.z), abs(dot(d, across))) / z : 1e10;
 }
 
-// What a reflected or refracted ray that escapes sees: vanilla's sky (fog colour at the horizon) and the sun
-// or moon as vanilla draws them.
+// Stars: points on a grid that turns with the sun (vanilla's sky turns around world Z), as bright as vanilla
+// makes its stars (0 by day and in rain, 0.5 at night).
+vec3 stars(vec3 d) {
+	float fade = pc.skyColor.y * 2.0;
+	if (fade <= 0.0) return vec3(0.0);
+	float a = atan(pc.sunDir.x, pc.sunDir.y), c = cos(a), s = sin(a);
+	vec3 q = vec3(c * d.x - s * d.y, s * d.x + c * d.y, d.z) * 150.0, cell = floor(q);
+	uint h = pcg(uint(int(cell.x) + 1000) + pcg(uint(int(cell.y) + 1000) + pcg(uint(int(cell.z) + 1000))));
+	if (h % 1000u >= 12u) return vec3(0.0); // 1.2% of cells
+	vec3 centre = cell + 0.5 + (vec3(pcg(h), pcg(h + 1u), pcg(h + 2u)) / 4294967295.0 - 0.5) * 0.6;
+	float brightness = 0.3 + 1.2 * float(pcg(h + 3u) % 1000u) / 1000.0;
+	return vec3(STAR * brightness * fade * smoothstep(0.15, 0.0, length(q - centre)));
+}
+
+// The moon's face where d meets it: 16x16 grey pixels like vanilla's, the part vanilla's phase leaves dark
+// unlit (waning from one side, waxing from the other).
+float moonFace(vec3 d) {
+	vec3 m = pc.moonDir.xyz, across = cross(m, vec3(0.0, 0.0, 1.0));
+	float z = dot(d, m);
+	vec2 uv = vec2(dot(d, across), d.z) / (z * MOON_SIZE) * 0.5 + 0.5; // 0..1 across the face
+	ivec2 cell = clamp(ivec2(uv * 16.0), ivec2(0), ivec2(15));
+	float grey = 0.65 + 0.35 * float(pcg(uint(cell.x) + pcg(uint(cell.y) + 0x9E3779B9u)) % 1000u) / 1000.0;
+	int phase = int(pc.skyColor.x + 0.5);
+	float lit = abs(float(phase) - 4.0) * 0.25; // share of the face lit: 1 at full moon, 0 at new
+	float x = (float(cell.x) + 0.5) / 16.0;
+	bool shown = phase == 0 || (phase < 4 ? x < lit : phase > 4 && x > 1.0 - lit);
+	return grey * (shown ? 1.0 : 0.03);
+}
+
+// What a ray that escapes sees: the physically based sky (Sky.java), stars, and the sun and moon as vanilla's
+// squares with their light through the atmosphere.
 vec3 skyRadiance(vec3 d) {
 	if (pc.skyColor.w == 0.0) return srgbToLinear(pc.fogColor.rgb) * 0.15;
-	vec3 c = mix(srgbToLinear(pc.fogColor.rgb), srgbToLinear(pc.skyColor.rgb), smoothstep(0.0, 0.5, d.y));
-	c = max(c, NIGHT_SKY * pc.moonDir.w);
-	if (pc.sunDir.y > 0.0) {
+	float elevation = asin(clamp(d.y, -1.0, 1.0)), s = sign(elevation) * sqrt(abs(elevation) / 1.5707963);
+	vec3 c = overcast(textureLod(skyViewLut, vec2(atan(d.z, d.x) / 6.2831853 + 0.5, s * 0.5 + 0.5), 0.0).rgb) * SKY;
+	if (d.y > 0.0) c += stars(d) * atmosphereTransmittance(d.y);
+	if (pc.sunDir.y > -0.1) {
 		float k = celestialOffset(d, pc.sunDir.xyz);
-		// The halo fades like the texture's (40 to 7 of 255, sRGB) from the core's edge outwards.
-		float halo = k < SUN_HALO ? pow(mix(40.0, 7.0, (k - SUN_SIZE) / (SUN_HALO - SUN_SIZE)) / 255.0, 2.2) : 0.0;
-		c += sunRadiance(pc.sunDir.y) * GLINT * (k < SUN_SIZE ? 1.0 : halo);
+		// Only the core: the atmosphere (sky.comp's Mie scattering) and bloom make the glow vanilla's texture paints.
+		if (k < SUN_SIZE) c += sunRadiance(pc.sunDir.y) * GLINT * pc.moonDir.w; // gone behind rain clouds, as vanilla's
 	}
-	if (pc.moonDir.y > 0.0 && celestialOffset(d, pc.moonDir.xyz) < MOON_SIZE) c += MOON * pc.moonDir.w * GLINT;
+	if (pc.moonDir.y > -0.1 && celestialOffset(d, pc.moonDir.xyz) < MOON_SIZE) c += moonFace(d) * moonRadiance(pc.moonDir.y) * MOON_GLINT * pc.moonDir.w;
 	return c;
 }
 
@@ -799,7 +858,7 @@ vec3 waterSigma, waterGlow;
 
 void enterWater(vec3 tint, float skyLight) {
 	waterSigma = -log(max(tint, vec3(0.01))) * WATER_ABSORPTION;
-	vec3 sun = pc.sunDir.y > 0.0 ? sunRadiance(pc.sunDir.y) * pc.sunDir.y : MOON * pc.moonDir.w * max(pc.moonDir.y, 0.0);
+	vec3 sun = pc.sunDir.y > 0.0 ? sunRadiance(pc.sunDir.y) * pc.sunDir.y : moonRadiance(pc.moonDir.y) * max(pc.moonDir.y, 0.0);
 	waterGlow = tint * (skyIrradiance(vec3(0.0, 1.0, 0.0)) + sun * pc.skyColor.w) * skyLight * skyLight * WATER_SCATTER;
 }
 
@@ -1029,17 +1088,42 @@ void meter(Frame frame, ivec2 p, vec3 radiance, bool traced) {
 
 // Vanilla's picture at a fractional pixel position, bilinear: vanilla draws unjittered, so sampling it where
 // this frame's rays went keeps it consistent with the jitter RR is told about (else the sun's edges shimmer).
-vec3 vanillaAt(vec2 pixel, ivec2 size) {
+// Where Helio draws the sky (replaceSky), taps on vanilla's sky (depth 0) take skySrgb instead, so silhouettes
+// blend into Helio's sky, not vanilla's; skyShare: their weight.
+vec3 vanillaAt(vec2 pixel, ivec2 size, bool replaceSky, vec3 skySrgb, out float skyShare) {
 	vec2 f = pixel - 0.5;
 	ivec2 i = ivec2(floor(f)), hi = size - 1;
 	vec2 t = f - vec2(i);
-	vec3 a = imageLoad(colorImg, clamp(i, ivec2(0), hi)).rgb, b = imageLoad(colorImg, clamp(i + ivec2(1, 0), ivec2(0), hi)).rgb;
-	vec3 c = imageLoad(colorImg, clamp(i + ivec2(0, 1), ivec2(0), hi)).rgb, d = imageLoad(colorImg, clamp(i + 1, ivec2(0), hi)).rgb;
-	return mix(mix(a, b, t.x), mix(c, d, t.x), t.y);
+	vec3 c = vec3(0.0);
+	skyShare = 0.0;
+	for (int k = 0; k < 4; k++) {
+		ivec2 o = ivec2(k & 1, k >> 1), at = clamp(i + o, ivec2(0), hi);
+		float w = (o.x == 1 ? t.x : 1.0 - t.x) * (o.y == 1 ? t.y : 1.0 - t.y);
+		bool sky = replaceSky && texelFetch(depthTex, at, 0).r == 0.0;
+		c += w * (sky ? skySrgb : imageLoad(colorImg, at).rgb);
+		skyShare += sky ? w : 0.0;
+	}
+	return c;
 }
 
 // DLSS's inputs, at render size (the dispatch's). Where the tracer leaves vanilla's picture (sky, past the RT distance) RR gets that picture as
 // radiance, with vanilla's depth, so RR anti-aliases and stabilises the whole frame and its edges.
+// Helio draws the overworld's sky itself (Sky.java) where vanilla's depth is the sky's; underwater, vanilla's
+// fog colour stays.
+bool ownSky(ivec2 windowPixel) {
+	return pc.skyColor.w != 0.0 && pc.fogColor.w == 0.0 && texelFetch(depthTex, windowPixel, 0).r == 0.0;
+}
+
+// The sky through a pixel (fractional, at render size), as the primary ray goes; capped for RR like vanilla's
+// brightest pixel (the sun's core is far brighter).
+vec3 skyThrough(vec2 pixel, vec2 size) {
+	vec2 ndc = pixel / size * 2.0 - 1.0;
+	vec4 near = pc.invViewProj * vec4(ndc, 1.0, 1.0), mid = pc.invViewProj * vec4(ndc, 0.5, 1.0);
+	vec3 c = skyRadiance(normalize(mid.xyz / mid.w - near.xyz / near.w));
+	float l = luminance(c);
+	return l > SKY_SAMPLE ? c * (SKY_SAMPLE / l) : c;
+}
+
 void writeDenoiserInputs(ivec2 p, ivec2 size, vec4 current, Frame frame) {
 	// Position relative to the camera, homogeneous: w = 0 for the sky (reversed-Z depth 0 is infinitely far).
 	vec4 rel;
@@ -1057,7 +1141,12 @@ void writeDenoiserInputs(ivec2 p, ivec2 size, vec4 current, Frame frame) {
 		vec2 scale = vec2(outSize) / vec2(size), ndc = (vec2(p) + 0.5) / vec2(size) * 2.0 - 1.0;
 		ivec2 under = clamp(ivec2((vec2(p) + 0.5) * scale), ivec2(0), outSize - 1);
 		rel = pc.invViewProj * vec4(ndc, texelFetch(depthTex, under, 0).r, 1.0);
-		imageStore(rrColor, p, vec4(untonemap(vanillaAt((vec2(p) + 0.5 + pc.jitter) * scale, outSize)) / frame.exposure, 1.0));
+		bool replaceSky = pc.skyColor.w != 0.0 && pc.fogColor.w == 0.0; // as ownSky()
+		vec3 sky = replaceSky ? skyThrough(vec2(p) + 0.5 + pc.jitter, vec2(size)) : vec3(0.0);
+		float skyShare;
+		vec3 v = vanillaAt((vec2(p) + 0.5 + pc.jitter) * scale, outSize, replaceSky, pow(tonemap(sky * frame.exposure), vec3(1.0 / 2.2)), skyShare);
+		vec3 c = skyShare >= 0.999 ? sky : untonemap(v) / frame.exposure;
+		imageStore(rrColor, p, vec4(c, 1.0));
 		imageStore(rrDiffuse, p, vec4(0.5, 0.5, 0.5, 1.0)); // RR's suggested sky defaults
 		imageStore(rrSpecular, p, vec4(0.0));
 		imageStore(rrNormals, p, vec4(0.0));
@@ -1122,9 +1211,11 @@ void main() {
 	vec4 acc = pc.frameIndex == 0u ? current : mix(imageLoad(accumImg, p), current, 1.0 / float(pc.frameIndex + 1u));
 	imageStore(accumImg, p, acc);
 	vec4 vanilla = imageLoad(colorImg, p);
+	bool sky = acc.a <= 0.0 && ownSky(p);
+	if (sky) vanilla.rgb = pow(tonemap(skyThrough(vec2(p) + 0.5 + pc.jitter, vec2(size)) * frame.exposure), vec3(1.0 / 2.2));
 	vec3 shown = acc.a <= 0.0 ? vanilla.rgb : mix(vanilla.rgb, pow(tonemap(acc.rgb / acc.a * frame.exposure), vec3(1.0 / 2.2)), acc.a);
 	// Vanilla draws entities over this next (for their depth); entity_composite.comp puts this colour back,
 	// on the entity (depth matches) or behind traced water / glass (negative depth: anything behind it).
 	imageStore(entityImg, p, vec4(shown, hitEntity ? hitDepth : hitTranslucent ? -hitDepth : 0.0));
-	if (acc.a > 0.0) imageStore(colorImg, p, vec4(shown, vanilla.a));
+	if (acc.a > 0.0 || sky) imageStore(colorImg, p, vec4(shown, vanilla.a));
 }

@@ -3,8 +3,8 @@
 // After DLSS (Ray Reconstruction or Super Resolution): tonemap its clean, window-sized radiance into the main
 // colour (it covers the whole frame: pathtrace.comp gave it vanilla's picture where nothing was traced), and
 // fill in the traced colour that entity_composite.comp later puts back over vanilla's entities. The sky keeps
-// vanilla's own pixels (its sun, hard-edged and near white, flickers in brightness through DLSS), with bloom
-// (Bloom.java) mixed over everything.
+// vanilla's own pixels where Helio doesn't draw it (Nether, End, underwater; vanilla's sun flickers in brightness
+// through DLSS), with bloom (Bloom.java) mixed over everything.
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -20,6 +20,7 @@ const float BLOOM_LEVELS = 6.0;
 layout(push_constant) uniform Push {
 	float exposure; // as Frame.exposure in pathtrace.comp
 	float bloom;    // share of the picture that's bloom (HelioConfig.bloom)
+	uint ownSky;    // 1: pathtrace.comp drew the sky (overworld, not underwater): no vanilla sky pixels to keep
 } pc;
 
 // As in pathtrace.comp. AgX (Sobotka; Wrensch's polynomial fit): linear radiance -> display-linear [0, 1]. Highlights roll off
@@ -71,7 +72,7 @@ void main() {
 	vec3 c = pow(tonemap(mix(max(imageLoad(denoised, p).rgb, vec3(0.0)), glow, pc.bloom) * pc.exposure), vec3(1.0 / 2.2));
 	imageStore(entityImg, p, vec4(c, depth));
 	vec4 under = imageLoad(colorImg, p);
-	if (depth == 0.0 && texelFetch(depthTex, p, 0).r == 0.0) { // sky, no traced entity in front: vanilla's pixel, plus bloom
+	if (pc.ownSky == 0u && depth == 0.0 && texelFetch(depthTex, p, 0).r == 0.0) { // vanilla's sky: its pixel, plus bloom
 		c = pow(tonemap(mix(untonemap(under.rgb), glow * pc.exposure, pc.bloom)), vec3(1.0 / 2.2));
 	}
 	imageStore(colorImg, p, vec4(c, under.a));

@@ -770,10 +770,25 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      Jimenez's 13-tap down (Karis-weighted first pass), 3x3 tent up added level by level. `rr_resolve.comp` mixes
      the Bloom setting's share of it (default 10%: 5% looked too faint, 15% too strong) into the radiance before exposure and AgX; sky pixels too (vanilla's pixel through
      `untonemap`), so the vanilla sun gets a halo. Not in reference accumulation (no DLSS).
-3. [ ] Physically based sky: transmittance, multi-scattering and sky-view LUTs (Hillaire 2020) from the sun
+3. [x] Physically based sky: transmittance, multi-scattering and sky-view LUTs (Hillaire 2020) from the sun
    angle; the tracer draws the sky (vanilla's square sun and moon kept as sprites, stars), sun light comes
    through the transmittance LUT, sky light from the sky-view LUT. Rain and thunder darken it; Nether and End
    keep fog-coloured skies, tuned.
+   - Done in code: `rt/Sky.java` + `sky.comp`: transmittance (256x64) and multiple-scattering (32x32) LUTs once;
+     each frame a sky view (256x128, world azimuth, both sun and moon) and a 6-face ambient cube from it.
+     pathtrace.comp: sun and moon light through the transmittance LUT (SUN_TOP 2.9 puts about 2.6 on the ground
+     at noon), sky radiance from the sky view, sky light from the ambient cube, stars that turn with the sun,
+     rain greys it. Helio draws the sky where vanilla's depth is the sky's (overworld, not underwater: RR input,
+     reference path, rr_resolve); vanilla's clouds still draw on top. SKY gain 2: at 1 (physical) the sky read
+     dark navy next to sunlit snow. The sun's square halo is gone (the atmosphere's Mie glow and bloom make it).
+     Cost about 0.35 ms (4.87 -> 5.2 ms path trace, LUT passes included).
+   - User check fixes: silhouettes against the sky had a faint fringe of vanilla's sky (RR's input sampled
+     vanilla's picture bilinearly at the jittered position): `vanillaAt` now swaps taps on vanilla's sky for
+     Helio's. Night sky was far too bright: the moon lights the sky at 10% (Sky.MOON_SKY; its light on the
+     ground stays); stars 1.2% of cells, brighter, faded by vanilla's star brightness. The moon is a 16x16 grey
+     pixel face with vanilla's 8 phases (unlit part 3%), not a second sun (MOON_GLINT 2.5). Rain left sun and
+     sky pitch black (rain brightness squared): now 2% of their light stays (RAIN_LIGHT), about a clear night's
+     darkness, and the sun and moon discs fade out behind it.
 4. [ ] Volumetric clouds in place of vanilla's: ray-marched layer over the sky, lit by the sun through the
    LUTs, casting shadows on the ground.
 5. [ ] Volumetric fog and god rays: sun shafts through trees and cave mouths, from one shadow ray per step
