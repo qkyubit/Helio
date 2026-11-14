@@ -60,6 +60,8 @@
 	"helio.contrast.tooltip": "Spread between dark and bright, around mid grey. 100% is as the tonemap makes it.",
 	"helio.warmth": "Warmth",
 	"helio.warmth.tooltip": "White balance: above 0 towards orange, below towards blue. 0 is neutral.",
+	"helio.auto_warmth": "Auto Warmth",
+	"helio.auto_warmth.tooltip": "White balance follows the biome (hot warmer, snowy cooler), the time of day (sunrise and sunset warm, night cool) and the light around you (torches warmer, soul fire and moonlight cooler), on top of Warmth.",
 	"helio.vignette": "Vignette",
 	"helio.vignette.tooltip": "Darkens the corners of the picture.",
 	"helio.film_grain": "Film Grain",

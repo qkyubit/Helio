@@ -98,7 +98,10 @@ public class HelioScreen extends OptionsSubScreen {
 			unsupportedIf(noGrading, "no DLSS", slider("helio.contrast", c.contrast, 50, 150, "%", v -> c.contrast = v)));
 		list.addSmall(unsupportedIf(noGrading, "no DLSS", slider("helio.warmth", c.warmth, -100, 100, "", v -> c.warmth = v)),
 			unsupportedIf(noGrading, "no DLSS", percentSlider("helio.vignette", c.vignette, v -> c.vignette = v)));
-		list.addSmall(unsupportedIf(noGrading, "no DLSS", percentSlider("helio.film_grain", c.filmGrain, v -> c.filmGrain = v)), null);
+		list.addSmall(unsupportedIf(noGrading, "no DLSS", percentSlider("helio.film_grain", c.filmGrain, v -> c.filmGrain = v)),
+			unsupportedIf(noGrading, "no DLSS", CycleButton.onOffBuilder(c.autoWarmth)
+				.withTooltip(v -> Tooltip.create(Component.translatable("helio.auto_warmth.tooltip")))
+				.create(Component.translatable("helio.auto_warmth"), (b, v) -> c.autoWarmth = v)));
 		list.addSmall(
 			unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", CycleButton.builder((Float v) -> Component.literal(String.format("%+.1f EV", v)), c.exposure)
 				.withValues(-2f, -1.5f, -1f, -0.5f, 0f, 0.5f, 1f, 1.5f, 2f)

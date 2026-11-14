@@ -864,6 +864,10 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      (50-150%), Warmth (-100..100), Vignette, Film Grain (0-100%); defaults leave the picture as it was. Needs
      DLSS (it's in the resolve); reference accumulation isn't graded. A 3D LUT file skipped until a pack wants
      one: the sliders cover the grading users asked for.
+   - Auto Warmth (user; toggle, default off): on top of Warmth, eased over ~2 s: biome temperature at the camera
+     ((t - 0.8) x 25, -20..25), sunrise and sunset +30, night -25, and the light's own colour: the meter now
+     also sums red and blue over luminance of radiance over albedo (log2 of red/blue x 30, -40..40: torches
+     warm, soul fire and moonlight cool); total -60..60. Snowy taiga by day: about -21.
 9. [ ] Handheld light (user, 2026-11-14): a light-emitting item held in either hand (torch, lantern, glowstone,
    ...) lights its surroundings like the block would, from the player's hand, with shadows; other players and
    mobs holding one too. Joins the light sampling as a moving light.

@@ -74,6 +74,8 @@ public final class HelioConfig {
 	public int bloom = 10;
 	/** Grading after the tonemap (rr_resolve.comp), in percent; the defaults leave the picture as it was. */
 	public int saturation = 100, contrast = 100, warmth = 0, vignette = 0, filmGrain = 0;
+	/** The white balance follows biome, time of day and the light's colour, on top of Warmth. */
+	public boolean autoWarmth = false;
 	/** Stops added to the auto exposure (brighter above 0). */
 	public float exposure = 0;
 	/**

@@ -346,6 +346,7 @@ public final class PathTracer {
 			int slot = seed % RING;
 			Memory.Buf frame = frameData[slot];
 			float exposure = adaptExposure(frame.mapped(), daylight);
+			updateAutoWarmth(mc, sun);
 			vkCmdFillBuffer(cmd, meters.buffer(), meters.offset() + slot * 16L, 16, 0);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			ByteBuffer fb = MemoryUtil.memByteBuffer(frame.mapped(), 256);
@@ -431,7 +432,7 @@ public final class PathTracer {
 			GpuTimers.end(cmd, GpuTimers.Pass.PATH_TRACE);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			vkCmdCopyBuffer(cmd, meters.buffer(), frame.buffer(),
-				VkBufferCopy.calloc(1, s).srcOffset(meters.offset() + slot * 16L).dstOffset(frame.offset() + METER).size(8));
+				VkBufferCopy.calloc(1, s).srcOffset(meters.offset() + slot * 16L).dstOffset(frame.offset() + METER).size(16));
 			if (++timedFrames % 600 == 0) Helio.LOG.info("GPU ms: path trace {}, DLSS {}", String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE)),
 				String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS)));
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
@@ -478,6 +479,8 @@ public final class PathTracer {
 	 */
 	private static float adaptExposure(long frame, float daylight) {
 		int sum = MemoryUtil.memGetInt(frame + METER), count = MemoryUtil.memGetInt(frame + METER + 4);
+		if (count > 0) lightRedOverBlue = (float) Integer.toUnsignedLong(MemoryUtil.memGetInt(frame + METER + 8))
+			/ Math.max(1, Integer.toUnsignedLong(MemoryUtil.memGetInt(frame + METER + 12)));
 		long now = System.nanoTime();
 		float dt = lastExposureNanos == 0 ? 0 : Math.min((now - lastExposureNanos) / 1e9f, 0.25f);
 		lastExposureNanos = now;
@@ -490,14 +493,43 @@ public final class PathTracer {
 			};
 			float target = Math.clamp((float) (Math.log(key) / Math.log(2)) - average, AUTO_EV_MIN, AUTO_EV_MAX);
 			autoEv += (target - autoEv) * (1 - (float) Math.exp(-dt / EXPOSURE_TAU));
-			if (timedFrames % 600 == 0) Helio.LOG.info("Exposure: average log2 luminance {}, auto {} EV", String.format("%.2f", average),
-				String.format("%.2f", autoEv));
+			if (timedFrames % 600 == 0) Helio.LOG.info("Exposure: average log2 luminance {}, auto {} EV; light red/blue {}, auto warmth {}",
+				String.format("%.2f", average), String.format("%.2f", autoEv), String.format("%.2f", lightRedOverBlue), String.format("%.0f", autoWarmth));
 		}
 		return (float) Math.pow(2, autoEv + HelioConfig.current.exposure);
 	}
 
 	private static float wetness;
 	private static long lastWetNanos;
+	/** The traced light's red over blue, last metered (pathtrace.comp meter()). */
+	private static float lightRedOverBlue = 1;
+	private static float autoWarmth;
+	private static long lastWarmthNanos;
+
+	/**
+	 * Auto Warmth (HelioConfig.autoWarmth): the grading's white balance follows the biome (hot ones warmer, snowy
+	 * ones cooler), the time of day (sunrise and sunset warm, night cool) and the light itself (torches and lava
+	 * warmer, soul fire and moonlight cooler), easing towards it over about 2 s. In Warmth units, on top of the
+	 * Warmth slider.
+	 */
+	private static float updateAutoWarmth(Minecraft mc, Vector3f sun) {
+		long now = System.nanoTime();
+		float dt = lastWarmthNanos == 0 ? 0 : Math.min((now - lastWarmthNanos) / 1e9f, 0.25f);
+		lastWarmthNanos = now;
+		float target = 0;
+		if (mc.level != null) {
+			float temperature = mc.level.getBiome(BlockPos.containing(cameraPos)).value().getBaseTemperature();
+			target += Math.clamp((temperature - 0.8f) * 25, -20, 25);
+		}
+		if (hasSky) {
+			float y = sun.y;
+			target += 30 * (float) Math.exp(-(y / 0.15f) * (y / 0.15f)) - 25 * smoothstep(0, -0.3f, y);
+		}
+		target += Math.clamp((float) (Math.log(lightRedOverBlue) / Math.log(2)) * 30, -40, 40);
+		target = Math.clamp(target, -60, 60);
+		autoWarmth += (target - autoWarmth) * (1 - (float) Math.exp(-dt / 2));
+		return autoWarmth;
+	}
 
 	/**
 	 * How wet the open air is (pathtrace.comp Frame.wetness): following the rain where the camera is (none where
@@ -530,7 +562,7 @@ public final class PathTracer {
 		HelioConfig c = HelioConfig.current;
 		vkCmdPushConstants(cmd, resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s.malloc(36).putFloat(0, exposure).putFloat(4, bloom)
 			.putInt(8, hasSky && !underwater ? 1 : 0).putFloat(12, c.saturation / 100f).putFloat(16, c.contrast / 100f)
-			.putFloat(20, c.warmth / 100f).putFloat(24, c.vignette / 100f).putFloat(28, c.filmGrain / 100f).putInt(32, seed));
+			.putFloat(20, (c.warmth + (c.autoWarmth ? autoWarmth : 0)) / 100f).putFloat(24, c.vignette / 100f).putFloat(28, c.filmGrain / 100f).putInt(32, seed));
 		long[] views = {Dlss.output.view(), color.vkImageView(), entityImg.view(), 0, Dlss.hitDepth.view()};
 		VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(6, s);
 		w.get(5).sType$Default().dstBinding(5).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)

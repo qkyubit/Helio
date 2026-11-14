@@ -82,7 +82,9 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	float wetness;      // how wet the open air leaves things: rain where the camera is, drying after (PathTracer)
 };
 // Traced pixels' log2 luminance, in sixteenths, and how many (read back by PathTracer a few frames later).
-layout(buffer_reference, scalar, buffer_reference_align = 4) buffer Meter { int logSum; uint count; };
+// And the light's colour: red and blue over luminance of the light reaching surfaces (radiance over albedo), in
+// 256ths, for Auto Warmth.
+layout(buffer_reference, scalar, buffer_reference_align = 4) buffer Meter { int logSum; uint count; uint red; uint blue; };
 // Radiance cache (M4 step 4, after NVIDIA's SHaRC): a hash table of world-space cells, each the light arriving
 // at the faces in it (direct and bounced, without the face's own albedo). A bounce ray that lands in a cell
 // takes its light from there instead of tracing on: every bounce after the first for the cost of one lookup.
@@ -1380,11 +1382,15 @@ vec3 untonemap(vec3 srgb) {
 // Adds the log luminance of every 8th pixel each way to the frame's meter. Only traced pixels count:
 // vanilla's (sky, past the RT distance) come back from untonemap() scaled by the exposure itself.
 // (Summing a subgroup's pixels with subgroupAdd after the ray queries hung the GPU within a minute.)
-void meter(Frame frame, ivec2 p, vec3 radiance, bool traced) {
+void meter(Frame frame, ivec2 p, vec3 radiance, vec3 albedo, bool traced) {
 	if (!traced || any(notEqual(p & 7, ivec2(0)))) return;
 	Meter m = Meter(frame.meter);
 	atomicAdd(m.logSum, int(round(clamp(log2(max(luminance(radiance), 1e-4)), -16.0, 16.0) * 16.0)));
 	atomicAdd(m.count, 1u);
+	vec3 light = radiance / max(albedo, vec3(0.05));
+	vec2 tint = clamp(light.rb / max(luminance(light), 1e-4), 0.0, 4.0);
+	atomicAdd(m.red, uint(tint.x * 256.0));
+	atomicAdd(m.blue, uint(tint.y * 256.0));
 }
 
 // Vanilla's picture at a fractional pixel position, bilinear: vanilla draws unjittered, so sampling it where
@@ -1528,7 +1534,7 @@ void main() {
 		current.rgb = (current.rgb * cloud.a + cloud.rgb) * haze.a + haze.rgb;
 	}
 	if (frame.denoise != 0u) {
-		meter(frame, p, current.rgb, current.a > 0.0);
+		meter(frame, p, current.rgb, guideAlbedo, current.a > 0.0);
 		writeDenoiserInputs(p, size, current, frame);
 		return;
 	}
