@@ -105,6 +105,7 @@ const float SKY_FILL = 0.4;     // share of sky light added by sky level when st
 const float MAX_SAMPLE = 12.0;
 const float SKY_DISTANCE = 65504.0; // RR's hit distance for rays that escape (FP16 max)   // luminance cap on what RR gets: sun glints off water and metal flicker past it
 const float FOLIAGE_TRANSMISSION = 0.5; // light leaves and grass let through, over what they reflect
+const float SSS_TRANSMISSION = 1.0;     // the same at a pack's full subsurface value (LabPBR _s blue 255)
 // Polished blocks (Scene.METAL_MARK, Scene.GEM_MARK): metals reflect in their own colour, slightly blurred,
 // over a little diffuse; gems reflect faintly and sharply over their full colour.
 const float METAL_ROUGHNESS = 0.2, METAL_DIFFUSE = 0.3, GEM_ROUGHNESS = 0.05, GEM_F0 = 0.08;
@@ -165,6 +166,7 @@ struct Hit {
 	float opacity;  // texture alpha: translucent surfaces let the rest through
 	bool water;     // marked by vertex alpha (Scene.WATER_MARK)
 	bool foliage;   // leaves and plants (Scene.FOLIAGE_MARK in the cutout layer): lets light through
+	float transmission; // foliage: light let through, over what it reflects (the pack's subsurface value if any)
 	bool glass;     // refracts: stained glass, ice and plain glass (translucent layer)
 	bool metal, gem; // polished (Scene.METAL_MARK, GEM_MARK), or metal by the pack's specular map
 	bool specular;   // gets a reflection ray (smooth enough, or metal)
@@ -317,6 +319,12 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 	float level = round((1.0 - tintAt(vb, t.x, stride).a) * 255.0);
 	h.water = inst.kind == KIND_TRANSLUCENT && level == 1.0;
 	h.foliage = inst.kind == KIND_CUTOUT && level == 1.0;
+	h.transmission = 0.0;
+	if (h.foliage) {
+		// LabPBR _s blue: 0-64 porosity (M6 rain), 65-255 subsurface scattering.
+		float b = round(h.pbrSpecular.b * 255.0);
+		h.transmission = h.pbrSpecular == vec4(0.0) ? FOLIAGE_TRANSMISSION : max(b - 65.0, 0.0) / 190.0 * SSS_TRANSMISSION;
+	}
 	h.glass = inst.kind == KIND_TRANSLUCENT && !h.water;
 	h.metal = inst.kind < KIND_TRANSLUCENT && level == 32.0;
 	h.gem = inst.kind < KIND_TRANSLUCENT && level == 33.0;
@@ -511,8 +519,8 @@ vec3 directLight(Hit h, vec3 pos) {
 		vec3 l = pc.stochastic != 0.0 ? sampleCone(lightDir, day ? SUN_COS : MOON_COS, vec2(rand(), rand())) : lightDir;
 		float nl = dot(h.normal, l) > 0.0 ? dot(h.shading, l) : dot(h.normal, l);
 		vec3 side = h.normal;
-		if (h.foliage && nl < 0.0) { // lit from behind: some of it comes through
-			nl *= -FOLIAGE_TRANSMISSION;
+		if (h.transmission > 0.0 && nl < 0.0) { // lit from behind: some of it comes through
+			nl *= -h.transmission;
 			side = -side;
 		}
 		if (nl > 0.0) direct = nl * shadowTransmittance(pos + side * 0.002, l, 512.0) * (day ? sunRadiance(l.y) : MOON * pc.moonDir.w);
@@ -616,12 +624,12 @@ vec3 cachedBounce(Hit h, vec3 pos, vec3 direct) {
 	ns[0] = h.normal;
 	ds[0] = direct;
 	vec3 x = pos, n = h.normal, bounce = vec3(0.0);
-	bool foliage = h.foliage;
+	float transmission = h.transmission;
 	for (int k = 0; k < steps; k++) {
 		float w = 1.0;
-		if (foliage) { // as in surfaceRadiance
-			if (rand() * (1.0 + FOLIAGE_TRANSMISSION) < FOLIAGE_TRANSMISSION) n = -n;
-			w = 1.0 + FOLIAGE_TRANSMISSION;
+		if (transmission > 0.0) { // as in surfaceRadiance
+			if (rand() * (1.0 + transmission) < transmission) n = -n;
+			w = 1.0 + transmission;
 		}
 		vec3 d = firstBounce(k == 0, n, h.shading);
 		rayQueryEXT b;
@@ -642,7 +650,7 @@ vec3 cachedBounce(Hit h, vec3 pos, vec3 direct) {
 		xs[k + 1] = x = xb;
 		ns[k + 1] = n = hb.normal;
 		ds[k + 1] = directLight(hb, xb);
-		foliage = hb.foliage;
+		transmission = hb.transmission;
 	}
 	// Back along the path: each surface's light is its direct light plus what its bounce brought.
 	for (int i = last; feed && i >= 0; i--) {
@@ -680,12 +688,12 @@ vec3 surfaceRadiance(Hit h, vec3 pos) {
 	// Stochastic: follow the light around. Each bounce picks up direct light where it lands; a ray that
 	// escapes brings the sky's. Light blocks a bounce hits add no glow: block-light sampling already counted them.
 	vec3 throughput = h.albedo * h.ao, x = pos, n = h.normal;
-	bool foliage = h.foliage;
+	float transmission = h.transmission;
 	for (int bounce = 0; bounce < bounces; bounce++) {
 		// Foliage scatters to either side: through it with probability T / (1 + T), weighted to match.
-		if (foliage) {
-			if (rand() * (1.0 + FOLIAGE_TRANSMISSION) < FOLIAGE_TRANSMISSION) n = -n;
-			throughput *= 1.0 + FOLIAGE_TRANSMISSION;
+		if (transmission > 0.0) {
+			if (rand() * (1.0 + transmission) < transmission) n = -n;
+			throughput *= 1.0 + transmission;
 		}
 		vec3 d = firstBounce(bounce == 0, n, h.shading);
 		rayQueryEXT b;
@@ -699,7 +707,7 @@ vec3 surfaceRadiance(Hit h, vec3 pos) {
 		radiance += throughput * (hb.albedo * directLight(hb, x) + glow(hb));
 		throughput *= hb.albedo;
 		n = hb.normal;
-		foliage = hb.foliage;
+		transmission = hb.transmission;
 		if (bounce >= 1) {
 			float survive = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
 			if (rand() > survive) break;

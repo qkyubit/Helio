@@ -660,8 +660,12 @@ in the Radiance Test instance) plus its add-ons (emission, glowing ore, mirror).
      list: vanilla's light level gates light sampling, and ores have none.
    - SPBR add-ons (GlowingOre, BlockEmission) needed their pack.mcmeta rewritten for
      26.3 (min_format 65); done on the test instance's copies only.
-5. [ ] Subsurface (`_s` B 65-255) on leaves and plants in place of the fixed foliage
+5. [x] Subsurface (`_s` B 65-255) on leaves and plants in place of the fixed foliage
    transmission; porosity (B 0-64) stored for M6 rain.
+   - In `pathtrace.comp`: `Hit.transmission` = (B - 65) / 190 for foliage with pack
+     data (SPBR leaves 0.56, vines 1.0), `FOLIAGE_TRANSMISSION` (0.5) without; drives
+     sun from behind and which side bounces leave from. Porosity isn't stored: M6 reads
+     it from `pbrSpecular.b` (B / 64 below 65) when rain needs it.
 6. [ ] Animated sprites: PBR maps follow the atlas animation frames.
 7. [ ] 3D pack check: BLAS size, build time and OMM on a 3D pack.
 8. [ ] Exit check: SPBR + one more LabPBR pack + one 3D pack; F3+T reload; performance
