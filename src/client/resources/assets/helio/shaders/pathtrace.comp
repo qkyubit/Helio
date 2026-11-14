@@ -79,6 +79,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	float cloudCover;   // share of the sky clouds cover, 0 = vanilla's clouds are off
 	float fadeEnd;      // blocks: vanilla's render distance, where its terrain has faded into the sky
 	float nightFloor;   // share of lightFloor left outdoors at night (HelioConfig.nightBrightness)
+	float wetness;      // how wet the open air leaves things: rain where the camera is, drying after (PathTracer)
 };
 // Traced pixels' log2 luminance, in sixteenths, and how many (read back by PathTracer a few frames later).
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer Meter { int logSum; uint count; };
@@ -275,6 +276,7 @@ bool cutoutHit(rayQueryEXT rq) {
 
 float cloudTime, cloudBottom, cloudCover; // Frame (cloudTime: also the clock for waves and twinkling)
 vec3 anchorWorld;                          // the scene anchor's world position (Frame.anchor)
+float wetness;                             // Frame.wetness
 
 // The water a view ray is in: per-block absorption, and the light the water itself sends back.
 vec3 waterSigma, waterGlow;
@@ -442,6 +444,29 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 		h.roughness = h.metal ? METAL_ROUGHNESS : GEM_ROUGHNESS;
 		h.diffuse = h.metal ? METAL_DIFFUSE : 1.0;
 		h.specular = true;
+	}
+	// Rain (M6 step 7): what the sky reaches (vanilla's sky light near full) gets wet, up-facing faces most (water
+	// runs off walls). Wet surfaces darken as much as they're porous (LabPBR _s blue 0-64; 40% without pack
+	// data, none for metal) and turn smooth and water-glossy; on flat ground puddles gather where a low-frequency
+	// pattern dips, spreading as it rains longer: mirror-smooth, flat (no normal map), darker underneath.
+	if (wetness > 0.0 && inst.kind < KIND_TRANSLUCENT && !h.foliage) {
+		float exposed = smoothstep(0.86, 0.98, h.light.y) * wetness, up = clamp(h.normal.y, 0.0, 1.0);
+		float b = round(h.pbrSpecular.b * 255.0);
+		float porosity = h.metal ? 0.0 : h.pbrSpecular != vec4(0.0) && b < 65.0 ? b / 64.0 : 0.4;
+		float wet = exposed * mix(0.35, 1.0, up);
+		h.albedo *= mix(1.0, 0.55, wet * porosity);
+		h.roughness = mix(h.roughness, 0.12, wet * mix(0.6, 1.0, up) * (1.0 - 0.5 * porosity));
+		h.f0 = max(h.f0, vec3(0.02 * wet));
+		if (up > 0.9 && exposed > 0.0) {
+			vec3 world = rayQueryGetWorldRayOriginEXT(rq) + rayQueryGetWorldRayDirectionEXT(rq) * rayQueryGetIntersectionTEXT(rq, true) + anchorWorld;
+			float pattern = textureLod(cloudNoise, vec3(world.x / 40.0, 0.3, world.z / 40.0), 0.0).r * 0.7
+				+ textureLod(cloudNoise, vec3(world.x / 9.0, 0.6, world.z / 9.0), 0.0).g * 0.3;
+			float edge = 1.0 - 0.5 * exposed, puddle = smoothstep(edge, edge + 0.05, pattern);
+			h.roughness = mix(h.roughness, 0.02, puddle);
+			h.shading = normalize(mix(h.shading, h.normal, puddle));
+			h.albedo *= mix(1.0, 0.7, puddle);
+		}
+		h.specular = h.metal || h.roughness < SPECULAR_CUTOFF;
 	}
 	h.emission = inst.kind == KIND_DYNAMIC || h.water || h.foliage || h.glass || level > 15.0 ? 0.0 : level / 15.0;
 	h.listed = h.emission > 0.0;
@@ -1468,6 +1493,7 @@ void main() {
 	anchorWorld = vec3(frame.anchor);
 	caveFloor = frame.caveFloor;
 	nightFloor = frame.nightFloor;
+	wetness = frame.wetness;
 	normalStrength = frame.normalStrength;
 	hybrid = frame.hybrid != 0u;
 	cacheOn = frame.cache != uvec2(0u);

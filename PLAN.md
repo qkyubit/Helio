@@ -844,7 +844,14 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      surface bunches or spreads the refracted light at its depth (inverse Jacobian of where it lands, clamped
      0.3-4). Underwater the haze is light shafts from the surface (4 steps over 48 blocks, through the waves,
      dimmed by the water to the eye). Cost about 0.6 ms at the lake (9.3 -> 9.9). Underwater not checked yet.
-7. [ ] Weather: rain wets surfaces (darker, smoother, by porosity) and fills puddles on flat ground.
+7. [x] Weather: rain wets surfaces (darker, smoother, by porosity) and fills puddles on flat ground.
+   - Done in code: `PathTracer.updateWetness`: rain level where the camera is if its biome rains (none where it
+     snows or never rains), soaking in over ~20 s, drying over ~90 s. `shade()` in pathtrace.comp: surfaces with
+     near-full sky light get wet, up-facing most (walls 35%); albedo darkens by porosity (LabPBR _s blue 0-64,
+     40% without data, 0 for metal) to 55%, roughness towards 0.12, F0 at least 0.02 (then specular below the
+     cutoff); flat ground grows puddles from a low-frequency pattern (40- and 9-block scales) as wetness rises:
+     roughness 0.02, flat normal, 70% albedo. Foliage stays dry. Only checked with the biome test bypassed
+     (snowy test world); needs a look in a rainy biome.
 8. [ ] Grading: colour-grading LUT, optional film grain and vignette.
 9. [ ] Exit: side-by-side screenshots (vanilla / Helio) of the M3 scenes, at recorded coordinates.
 

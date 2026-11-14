@@ -14,6 +14,8 @@ import dev.helio.vk.GpuTimers;
 import dev.helio.vk.Memory;
 import dev.helio.vk.Shaders;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.biome.Biome;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
 import net.minecraft.client.renderer.state.level.SkyRenderState;
@@ -359,7 +361,8 @@ public final class PathTracer {
 				.putFloat(120, exposure).putLong(124, meters.address() + slot * 16L)
 				.putFloat(132, cloudTime).putFloat(136, cloudBottom).putFloat(140, cloudCover(mc))
 				.putFloat(144, mc.options.getEffectiveRenderDistance() * 16)
-				.putFloat(148, HelioConfig.current.nightBrightness / 100f);
+				.putFloat(148, HelioConfig.current.nightBrightness / 100f)
+				.putFloat(152, updateWetness(mc));
 			lastViewProj.set(viewProj);
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			Sky.update(cmd, sun, moon, hasSky ? rainBrightness : 1, moonPhase, s);
@@ -491,6 +494,26 @@ public final class PathTracer {
 				String.format("%.2f", autoEv));
 		}
 		return (float) Math.pow(2, autoEv + HelioConfig.current.exposure);
+	}
+
+	private static float wetness;
+	private static long lastWetNanos;
+
+	/**
+	 * How wet the open air is (pathtrace.comp Frame.wetness): following the rain where the camera is (none where
+	 * it snows or never rains), soaking in over about 20 s and drying over about 90 s after it stops.
+	 */
+	private static float updateWetness(Minecraft mc) {
+		long now = System.nanoTime();
+		float dt = lastWetNanos == 0 ? 0 : Math.min((now - lastWetNanos) / 1e9f, 0.25f);
+		lastWetNanos = now;
+		float target = 0;
+		if (hasSky && mc.level != null) {
+			BlockPos at = BlockPos.containing(cameraPos);
+			if (mc.level.getBiome(at).value().getPrecipitationAt(at, mc.level.getSeaLevel()) == Biome.Precipitation.RAIN) target = 1 - rainBrightness;
+		}
+		wetness = target > wetness ? Math.min(target, wetness + dt / 20) : Math.max(target, wetness - dt / 90);
+		return wetness;
 	}
 
 	/** Share of the sky the clouds cover: none with vanilla's clouds off, more as rain sets in. */
