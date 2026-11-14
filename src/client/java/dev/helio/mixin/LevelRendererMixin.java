@@ -102,20 +102,28 @@ public class LevelRendererMixin {
 		if (helio$deferredFeatures == null) return;
 		PathTracer.run();
 		RenderTarget main = gameRenderer.mainRenderTarget();
-		try (RenderPass pass = RenderSystem.getDevice().createCommandEncoder()
-			.createRenderPass(() -> "Helio solid features", main.getColorTextureView(), Optional.empty(), main.getDepthTextureView(), OptionalDouble.empty())) {
-			RenderSystem.bindDefaultUniforms(pass);
-			helio$deferredFeatures.executeSolid(pass);
+		try {
+			try (RenderPass pass = RenderSystem.getDevice().createCommandEncoder()
+				.createRenderPass(() -> "Helio solid features", main.getColorTextureView(), Optional.empty(), main.getDepthTextureView(), OptionalDouble.empty())) {
+				RenderSystem.bindDefaultUniforms(pass);
+				helio$deferredFeatures.executeSolid(pass);
+			}
+			// Before translucents: the composite puts traced colour back wherever vanilla's depth lies behind traced
+			// water or glass, and weather, clouds and translucent particles write no depth there.
+			PathTracer.compositeEntities();
 			if (helio$deferredSections != null) {
 				helio$replaying = true;
-				executeClassicTransparency(helio$deferredSections, helio$deferredFeatures, pass);
+				try (RenderPass pass = RenderSystem.getDevice().createCommandEncoder()
+					.createRenderPass(() -> "Helio classic translucents", main.getColorTextureView(), Optional.empty(), main.getDepthTextureView(), OptionalDouble.empty())) {
+					RenderSystem.bindDefaultUniforms(pass);
+					executeClassicTransparency(helio$deferredSections, helio$deferredFeatures, pass);
+				}
 			}
 		} finally {
 			helio$replaying = false;
 			helio$deferredSections = null;
 			helio$deferredFeatures = null;
 		}
-		PathTracer.compositeEntities();
 	}
 
 	// The first-person body goes in with render types vanilla won't draw (Entities.bodyCollector).

@@ -671,6 +671,11 @@ in the Radiance Test instance) plus its add-ons (emission, glowing ore, mirror).
 8. [ ] Exit check: SPBR + one more LabPBR pack + one 3D pack; F3+T reload; performance
    against M4 numbers.
 
+Fixed along the way: weather, clouds and translucent particles vanished in front of
+traced water and glass with classic transparency. The entity composite (traced colour
+back wherever vanilla's depth lies behind the water) ran after the replayed classic
+translucents, which write no depth; it now runs between solid features and translucents.
+
 ### M6 — Visuals beyond ray tracing
 
 - Physically based sky (transmittance / multi-scatter LUTs), sun/moon disc,
