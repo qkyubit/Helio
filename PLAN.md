@@ -651,8 +651,15 @@ in the Radiance Test instance) plus its add-ons (emission, glowing ore, mirror).
      around the shading normal, mirrored above the real face. Fresnel: Schlick with
      the grazing rise capped by roughness. In SPBR about half the textures are smooth
      enough (planks, polished stone, diamond), 290 have metal texels.
-4. [ ] Emission (`_s` alpha): emissive texels glow and count in the block's light
+4. [x] Emission (`_s` alpha): emissive texels glow and count in the block's light
    (Lights.java samples the texture already); emissive ores etc. become light sources.
+   - In `pathtrace.comp`: _s alpha (0-254, 255 none) masks light blocks' glow (SPBR's
+     torch: only the 4 flame texels glow, not the stick); blocks that give no light
+     (glowing ores) glow at `PACK_GLOW` (half an emission-15 surface) and light their
+     surroundings through bounce rays and the radiance cache (`glow()`), not the light
+     list: vanilla's light level gates light sampling, and ores have none.
+   - SPBR add-ons (GlowingOre, BlockEmission) needed their pack.mcmeta rewritten for
+     26.3 (min_format 65); done on the test instance's copies only.
 5. [ ] Subsurface (`_s` B 65-255) on leaves and plants in place of the fixed foliage
    transmission; porosity (B 0-64) stored for M6 rain.
 6. [ ] Animated sprites: PBR maps follow the atlas animation frames.

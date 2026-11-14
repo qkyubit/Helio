@@ -88,6 +88,7 @@ const float SKY = 0.9;
 const vec3 BLOCK_LIGHT = vec3(1.0, 0.68, 0.38) * 1.6;
 const float LIGHT = 8.0;        // intensity of an emission-15 block light
 const float EMISSIVE = 4.0;     // radiance of an emission-15 block's own surface, times its texture (M6 bloom keys off it)
+const float PACK_GLOW = 0.5;    // emission of a resource pack's glowing texels on blocks that give no light (ores), as a share of EMISSIVE
 const uint CANDIDATES = 8u;     // lights considered per shading point (RIS)
 const float SUN_COS = 0.99994;  // 0.6 degree disc radius: soft-shadow penumbra
 const float MOON_COS = 0.99996;
@@ -157,7 +158,9 @@ struct Hit {
 	vec3 shading;   // normal-mapped (LabPBR _n), on the ray's side: how light falls on the surface
 	float ao;       // the texture's ambient occlusion (_n blue), on indirect light
 	vec2 light;     // vanilla block / sky light level, 0..1
-	float emission; // the block's own light level, 0..1 (sections encode it in vertex alpha)
+	float emission; // glow of the surface, 0..1 of EMISSIVE: the block's light level (sections encode it in vertex alpha),
+	                // masked by the pack's emission map (LabPBR _s alpha) where it has one
+	bool listed;    // a light block (in Lights.java's table): light sampling counts its light, bounces mustn't again
 	vec3 tint;      // linear vertex colour (biome tint)
 	float opacity;  // texture alpha: translucent surfaces let the rest through
 	bool water;     // marked by vertex alpha (Scene.WATER_MARK)
@@ -337,6 +340,13 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 		h.specular = true;
 	}
 	h.emission = inst.kind == KIND_DYNAMIC || h.water || h.foliage || h.glass || level > 15.0 ? 0.0 : level / 15.0;
+	h.listed = h.emission > 0.0;
+	// LabPBR emission (0-254, 255 = none): which texels of a light block glow (a torch's flame, not its stick);
+	// on other blocks (glowing ores) a glow of their own that lights the surroundings through bounces.
+	if (inst.kind < KIND_TRANSLUCENT && h.pbrSpecular != vec4(0.0)) {
+		float a = round(h.pbrSpecular.a * 255.0), texel = a < 255.0 ? a / 254.0 : 0.0;
+		h.emission = h.listed ? h.emission * texel : PACK_GLOW * texel;
+	}
 	return h;
 }
 
@@ -530,6 +540,11 @@ vec3 firstBounce(bool first, vec3 n, vec3 shading) {
 	return dot(d, n) > 0.0 ? d : reflect(d, n);
 }
 
+// Light a surface a bounce ray hits gives off by itself: light blocks' glow is already counted by light sampling.
+vec3 glow(Hit h) {
+	return h.listed ? vec3(0.0) : h.albedo * (EMISSIVE * h.emission);
+}
+
 bool cacheOn, feeding; // Frame.cache set; this pixel feeds the cache (its first surface's path only)
 RadianceCache cache;
 ivec3 anchor;
@@ -596,7 +611,7 @@ vec3 cachedBounce(Hit h, vec3 pos, vec3 direct) {
 	bool feed = feeding;
 	feeding = false;
 	int steps = feed ? CACHE_PATH : 1, last = 0;
-	vec3 xs[CACHE_PATH], ns[CACHE_PATH], ds[CACHE_PATH], transfer[CACHE_PATH];
+	vec3 xs[CACHE_PATH], ns[CACHE_PATH], ds[CACHE_PATH], transfer[CACHE_PATH], glows[CACHE_PATH];
 	xs[0] = pos;
 	ns[0] = h.normal;
 	ds[0] = direct;
@@ -619,8 +634,9 @@ vec3 cachedBounce(Hit h, vec3 pos, vec3 direct) {
 		vec3 xb = x + n * 0.002 + d * rayQueryGetIntersectionTEXT(b, true);
 		Hit hb = shade(b, d);
 		transfer[k] = w * hb.albedo;
+		glows[k] = w * glow(hb);
 		if (k == steps - 1) {
-			bounce = transfer[k] * bounceIrradiance(hb, xb);
+			bounce = transfer[k] * bounceIrradiance(hb, xb) + glows[k];
 			break;
 		}
 		xs[k + 1] = x = xb;
@@ -632,7 +648,7 @@ vec3 cachedBounce(Hit h, vec3 pos, vec3 direct) {
 	for (int i = last; feed && i >= 0; i--) {
 		vec3 e = ds[i] + bounce;
 		cacheAdd(xs[i], ns[i], e);
-		if (i > 0) bounce = transfer[i - 1] * e;
+		if (i > 0) bounce = transfer[i - 1] * e + glows[i - 1];
 	}
 	return bounce;
 }
@@ -662,7 +678,7 @@ vec3 surfaceRadiance(Hit h, vec3 pos) {
 	}
 
 	// Stochastic: follow the light around. Each bounce picks up direct light where it lands; a ray that
-	// escapes brings the sky's. Emitters a bounce hits add nothing: block-light sampling already counted them.
+	// escapes brings the sky's. Light blocks a bounce hits add no glow: block-light sampling already counted them.
 	vec3 throughput = h.albedo * h.ao, x = pos, n = h.normal;
 	bool foliage = h.foliage;
 	for (int bounce = 0; bounce < bounces; bounce++) {
@@ -680,7 +696,7 @@ vec3 surfaceRadiance(Hit h, vec3 pos) {
 		}
 		x = x + n * 0.002 + d * rayQueryGetIntersectionTEXT(b, true);
 		Hit hb = shade(b, d);
-		radiance += throughput * hb.albedo * directLight(hb, x);
+		radiance += throughput * (hb.albedo * directLight(hb, x) + glow(hb));
 		throughput *= hb.albedo;
 		n = hb.normal;
 		foliage = hb.foliage;
