@@ -107,6 +107,20 @@ const float FOLIAGE_TRANSMISSION = 0.5; // light leaves and grass let through, o
 // Polished blocks (Scene.METAL_MARK, Scene.GEM_MARK): metals reflect in their own colour, slightly blurred,
 // over a little diffuse; gems reflect faintly and sharply over their full colour.
 const float METAL_ROUGHNESS = 0.2, METAL_DIFFUSE = 0.3, GEM_ROUGHNESS = 0.05, GEM_F0 = 0.08;
+// LabPBR specular: surfaces smoother than this (perceptual roughness) get a reflection ray; rougher dielectrics
+// stay diffuse. Metals always get one (they have no diffuse).
+const float SPECULAR_CUTOFF = 0.6;
+// LabPBR's hardcoded metals (_s green 230-237): reflectance at normal incidence, linear.
+const vec3 HARDCODED_F0[8] = vec3[](
+	vec3(0.531, 0.512, 0.496), // iron
+	vec3(1.000, 0.766, 0.336), // gold
+	vec3(0.913, 0.922, 0.924), // aluminium
+	vec3(0.550, 0.556, 0.554), // chrome
+	vec3(0.955, 0.638, 0.538), // copper
+	vec3(0.632, 0.626, 0.641), // lead
+	vec3(0.672, 0.637, 0.585), // platinum
+	vec3(0.972, 0.960, 0.915)  // silver
+);
 const int MAX_LAYERS = 6;
 const uint CACHE_SIZE = 1u << 21;  // entries (PathTracer.CACHE_ENTRIES)
 const uint CACHE_PROBES = 8u;      // slots a key may sit in, from its hash on
@@ -149,7 +163,11 @@ struct Hit {
 	bool water;     // marked by vertex alpha (Scene.WATER_MARK)
 	bool foliage;   // leaves and plants (Scene.FOLIAGE_MARK in the cutout layer): lets light through
 	bool glass;     // refracts: stained glass, ice and plain glass (translucent layer)
-	bool metal, gem; // polished (Scene.METAL_MARK, GEM_MARK): get a reflection ray
+	bool metal, gem; // polished (Scene.METAL_MARK, GEM_MARK), or metal by the pack's specular map
+	bool specular;   // gets a reflection ray (smooth enough, or metal)
+	vec3 f0;         // reflectance at normal incidence
+	float roughness; // perceptual (GGX alpha = roughness²)
+	float diffuse;   // share of the non-reflected light scattered diffusely (metals: none)
 	vec3 motion;    // entities: last frame's position relative to last frame's camera, minus now's; NaN if unknown
 	vec4 pbrNormal, pbrSpecular; // raw LabPBR texels (entities: flat normal, no specular data)
 };
@@ -299,6 +317,25 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 	h.glass = inst.kind == KIND_TRANSLUCENT && !h.water;
 	h.metal = inst.kind < KIND_TRANSLUCENT && level == 32.0;
 	h.gem = inst.kind < KIND_TRANSLUCENT && level == 33.0;
+	// Specular from the pack's LabPBR map where it has one (all zero: none), else Helio's polished marks.
+	h.f0 = vec3(0.04);
+	h.roughness = 1.0;
+	h.diffuse = 1.0;
+	h.specular = false;
+	if (inst.kind < KIND_TRANSLUCENT && h.pbrSpecular != vec4(0.0)) {
+		float g = round(h.pbrSpecular.g * 255.0);
+		h.roughness = 1.0 - h.pbrSpecular.r;
+		h.metal = g >= 230.0;
+		h.gem = false;
+		h.f0 = g < 230.0 ? vec3(g / 255.0) : g < 238.0 ? HARDCODED_F0[int(g) - 230] : h.albedo;
+		h.diffuse = h.metal ? 0.0 : 1.0;
+		h.specular = h.metal || h.roughness < SPECULAR_CUTOFF;
+	} else if (h.metal || h.gem) {
+		h.f0 = h.metal ? h.albedo : vec3(GEM_F0);
+		h.roughness = h.metal ? METAL_ROUGHNESS : GEM_ROUGHNESS;
+		h.diffuse = h.metal ? METAL_DIFFUSE : 1.0;
+		h.specular = true;
+	}
 	h.emission = inst.kind == KIND_DYNAMIC || h.water || h.foliage || h.glass || level > 15.0 ? 0.0 : level / 15.0;
 	return h;
 }
@@ -707,9 +744,10 @@ vec3 ggxNormal(vec3 n, float alpha) {
 }
 
 // Light a polished surface at pos reflects back along dir: a mirror ray, spread by roughness when stochastic.
-vec3 specularRadiance(vec3 pos, vec3 n, vec3 dir, float roughness) {
-	vec3 r = reflect(dir, pc.stochastic != 0.0 ? ggxNormal(n, roughness * roughness) : n);
-	if (dot(r, n) <= 0.0) r = reflect(dir, n);
+// n: the geometric normal (offsets, what's above the surface); shading: the normal-mapped one the lobe is around.
+vec3 specularRadiance(vec3 pos, vec3 n, vec3 shading, vec3 dir, float roughness) {
+	vec3 r = reflect(dir, pc.stochastic != 0.0 ? ggxNormal(shading, roughness * roughness) : shading);
+	if (dot(r, n) <= 0.0) r = reflect(r, n); // below the real face: mirror back above it
 	rayQueryEXT rq;
 	TRACE(rq, pos + n * 0.002, r, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
 	specularDistance = SKY_DISTANCE;
@@ -799,15 +837,14 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 				guideMotion = h.motion;
 			}
 			vec3 diffuse = vec3(1.0);
-			if (h.metal || h.gem) {
-				vec3 f0 = h.metal ? h.albedo : vec3(GEM_F0);
-				vec3 f = f0 + (1.0 - f0) * pow(1.0 - clamp(-dot(dir, h.normal), 0.0, 1.0), 5.0);
-				float roughness = h.metal ? METAL_ROUGHNESS : GEM_ROUGHNESS;
-				result += weight * f * specularRadiance(pos, h.normal, dir, roughness);
-				diffuse = (1.0 - f) * (h.metal ? METAL_DIFFUSE : 1.0);
+			if (h.specular) {
+				// Schlick, its grazing rise held down on rough surfaces (Fdez-Agüera).
+				vec3 f = h.f0 + (max(vec3(1.0 - h.roughness), h.f0) - h.f0) * pow(1.0 - clamp(-dot(dir, h.shading), 0.0, 1.0), 5.0);
+				result += weight * f * specularRadiance(pos, h.normal, h.shading, dir, h.roughness);
+				diffuse = (1.0 - f) * h.diffuse;
 				if (layer == 0) {
 					guideSpecular = f;
-					guideRoughness = roughness;
+					guideRoughness = h.roughness;
 					guideHitDistance = specularDistance;
 				}
 			}

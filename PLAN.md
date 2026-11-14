@@ -641,10 +641,16 @@ in the Radiance Test instance) plus its add-ons (emission, glowing ore, mirror).
      The first bounce leaves around the shading normal too (mirrored above the real
      face). Normal Map Strength setting (default 300%: SPBR's bumps were barely
      visible at 100%).
-3. [ ] Specular: smoothness -> roughness, F0 (0-229 dielectric), hardcoded metals
+3. [x] Specular: smoothness -> roughness, F0 (0-229 dielectric), hardcoded metals
    230-237 (iron, gold, aluminium, chrome, copper, lead, platinum, silver: real
    N/K), 238-254 albedo metals. One GGX reflection ray per surface below a roughness
    cutoff, diffuse for the rest. Pack data replaces Helio's metal/gem marks.
+   - In `pathtrace.comp` (`Hit.f0/roughness/diffuse/specular`): roughness = 1 - R,
+     F0 = G/255 below 230, table F0 for 230-237, albedo for 238+; metals have no
+     diffuse and always get a ray, dielectrics below roughness 0.6. Reflection lobe
+     around the shading normal, mirrored above the real face. Fresnel: Schlick with
+     the grazing rise capped by roughness. In SPBR about half the textures are smooth
+     enough (planks, polished stone, diamond), 290 have metal texels.
 4. [ ] Emission (`_s` alpha): emissive texels glow and count in the block's light
    (Lights.java samples the texture already); emissive ores etc. become light sources.
 5. [ ] Subsurface (`_s` B 65-255) on leaves and plants in place of the fixed foliage
