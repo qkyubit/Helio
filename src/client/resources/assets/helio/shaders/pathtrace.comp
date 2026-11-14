@@ -66,7 +66,11 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	ivec3 anchor;       // the scene anchor's world block position (a section corner)
 	float caveFloor;    // share of lightFloor left where there's no sky light (HelioConfig.caveBrightness)
 	float normalStrength; // how far normal maps tilt the surface, 1 = as the pack made them (HelioConfig)
+	float exposure;     // radiance scale before the tonemap (PathTracer's auto exposure and the Exposure setting)
+	uvec2 meter;        // Meter: this frame's log luminance, summed for the auto exposure
 };
+// Traced pixels' log2 luminance, in sixteenths, and how many (read back by PathTracer a few frames later).
+layout(buffer_reference, scalar, buffer_reference_align = 4) buffer Meter { int logSum; uint count; };
 // Radiance cache (M4 step 4, after NVIDIA's SHaRC): a hash table of world-space cells, each the light arriving
 // at the faces in it (direct and bounced, without the face's own albedo). A bounce ray that lands in a cell
 // takes its light from there instead of tracing on: every bounce after the first for the cost of one lookup.
@@ -534,9 +538,29 @@ vec3 debugColour(rayQueryEXT rq, vec3 dir, uint mode) {
 	return mode == DEBUG_NORMALS ? h.shading * 0.5 + 0.5 : pow(h.albedo, vec3(1.0 / 2.2));
 }
 
-// Narkowicz's ACES fit.
+// AgX (Sobotka; Wrensch's polynomial fit): linear radiance -> display-linear [0, 1]. Highlights roll off
+// towards white instead of skewing hue. Inset, log2 encoding over AGX_MIN_EV..AGX_MAX_EV, sigmoid, outset.
+const mat3 AGX_IN = mat3(0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+	0.0784335999999992, 0.878468636469772, 0.0784336,
+	0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+const mat3 AGX_OUT = mat3(1.19687900512017, -0.0528968517574562, -0.0529716355144438,
+	-0.0980208811401368, 1.15190312990417, -0.0980434501171241,
+	-0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+const float AGX_MIN_EV = -12.47393, AGX_MAX_EV = 4.026069;
+const float AGX_SATURATION = 1.2; // the look: base AgX greyed Minecraft's colours (grass, ice) more than ACES did
+const vec3 AGX_LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+vec3 agxCurve(vec3 x) {
+	vec3 x2 = x * x, x4 = x2 * x2;
+	return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+}
+
 vec3 tonemap(vec3 x) {
-	return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+	x = clamp(log2(max(AGX_IN * max(x, vec3(0.0)), vec3(1e-10))), AGX_MIN_EV, AGX_MAX_EV);
+	x = agxCurve((x - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV));
+	float luma = dot(x, AGX_LUMA);
+	x = luma + AGX_SATURATION * (x - luma);
+	return clamp(pow(max(AGX_OUT * x, vec3(0.0)), vec3(2.2)), 0.0, 1.0);
 }
 
 // Sun or moon (one shadow ray toward a point on the disc, its centre unless stochastic) plus block lights.
@@ -977,11 +1001,30 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 	return vec4(result, 1.0);
 }
 
-// Inverse of tonemap() after vanilla's gamma: the linear radiance that would come out as this sRGB colour.
+// Inverse of tonemap() after vanilla's gamma: the linear radiance that would come out as this sRGB colour
+// (the curve by bisection; it rises over 0..1). Colours AgX can't reach come back as the nearest it can.
 vec3 untonemap(vec3 srgb) {
-	vec3 y = min(pow(srgb, vec3(2.2)), vec3(0.99));
-	vec3 a = 2.51 - 2.43 * y, b = 0.03 - 0.59 * y, c = -0.14 * y;
-	return (-b + sqrt(b * b - 4.0 * a * c)) / (2.0 * a);
+	vec3 target = inverse(AGX_OUT) * srgb, lo = vec3(0.0), hi = vec3(1.0);
+	float luma = dot(target, AGX_LUMA);
+	target = luma + (target - luma) / AGX_SATURATION;
+	for (int i = 0; i < 16; i++) {
+		vec3 mid = (lo + hi) * 0.5;
+		bvec3 below = lessThan(agxCurve(mid), target);
+		lo = mix(lo, mid, below);
+		hi = mix(mid, hi, below);
+	}
+	vec3 log2x = mix(vec3(AGX_MIN_EV), vec3(AGX_MAX_EV), (lo + hi) * 0.5);
+	return max(inverse(AGX_IN) * exp2(log2x), vec3(0.0));
+}
+
+// Adds the log luminance of every 8th pixel each way to the frame's meter. Only traced pixels count:
+// vanilla's (sky, past the RT distance) come back from untonemap() scaled by the exposure itself.
+// (Summing a subgroup's pixels with subgroupAdd after the ray queries hung the GPU within a minute.)
+void meter(Frame frame, ivec2 p, vec3 radiance, bool traced) {
+	if (!traced || any(notEqual(p & 7, ivec2(0)))) return;
+	Meter m = Meter(frame.meter);
+	atomicAdd(m.logSum, int(round(clamp(log2(max(luminance(radiance), 1e-4)), -16.0, 16.0) * 16.0)));
+	atomicAdd(m.count, 1u);
 }
 
 // Vanilla's picture at a fractional pixel position, bilinear: vanilla draws unjittered, so sampling it where
@@ -1014,7 +1057,7 @@ void writeDenoiserInputs(ivec2 p, ivec2 size, vec4 current, Frame frame) {
 		vec2 scale = vec2(outSize) / vec2(size), ndc = (vec2(p) + 0.5) / vec2(size) * 2.0 - 1.0;
 		ivec2 under = clamp(ivec2((vec2(p) + 0.5) * scale), ivec2(0), outSize - 1);
 		rel = pc.invViewProj * vec4(ndc, texelFetch(depthTex, under, 0).r, 1.0);
-		imageStore(rrColor, p, vec4(untonemap(vanillaAt((vec2(p) + 0.5 + pc.jitter) * scale, outSize)), 1.0));
+		imageStore(rrColor, p, vec4(untonemap(vanillaAt((vec2(p) + 0.5 + pc.jitter) * scale, outSize)) / frame.exposure, 1.0));
 		imageStore(rrDiffuse, p, vec4(0.5, 0.5, 0.5, 1.0)); // RR's suggested sky defaults
 		imageStore(rrSpecular, p, vec4(0.0));
 		imageStore(rrNormals, p, vec4(0.0));
@@ -1068,6 +1111,7 @@ void main() {
 	}
 	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size), uvec2(p));
 	if (frame.denoise != 0u) {
+		meter(frame, p, current.rgb, current.a > 0.0);
 		writeDenoiserInputs(p, size, current, frame);
 		return;
 	}
@@ -1078,7 +1122,7 @@ void main() {
 	vec4 acc = pc.frameIndex == 0u ? current : mix(imageLoad(accumImg, p), current, 1.0 / float(pc.frameIndex + 1u));
 	imageStore(accumImg, p, acc);
 	vec4 vanilla = imageLoad(colorImg, p);
-	vec3 shown = acc.a <= 0.0 ? vanilla.rgb : mix(vanilla.rgb, pow(tonemap(acc.rgb / acc.a), vec3(1.0 / 2.2)), acc.a);
+	vec3 shown = acc.a <= 0.0 ? vanilla.rgb : mix(vanilla.rgb, pow(tonemap(acc.rgb / acc.a * frame.exposure), vec3(1.0 / 2.2)), acc.a);
 	// Vanilla draws entities over this next (for their depth); entity_composite.comp puts this colour back,
 	// on the entity (depth matches) or behind traced water / glass (negative depth: anything behind it).
 	imageStore(entityImg, p, vec4(shown, hitEntity ? hitDepth : hitTranslucent ? -hitDepth : 0.0));

@@ -13,9 +13,31 @@ layout(binding = 2, rgba32f) writeonly uniform image2D entityImg; // every pixel
 layout(binding = 3) uniform sampler2D depthTex;         // vanilla's depth so far: 0 (reversed-Z) is sky
 layout(binding = 4, r32f) readonly uniform image2D hitDepth; // render size: entity / water / glass depth from pathtrace.comp
 
-// Narkowicz's ACES fit, as in pathtrace.comp.
+layout(push_constant) uniform Push { float exposure; } pc; // as Frame.exposure in pathtrace.comp
+
+// As in pathtrace.comp. AgX (Sobotka; Wrensch's polynomial fit): linear radiance -> display-linear [0, 1]. Highlights roll off
+// towards white instead of skewing hue. Inset, log2 encoding over AGX_MIN_EV..AGX_MAX_EV, sigmoid, outset.
+const mat3 AGX_IN = mat3(0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+	0.0784335999999992, 0.878468636469772, 0.0784336,
+	0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+const mat3 AGX_OUT = mat3(1.19687900512017, -0.0528968517574562, -0.0529716355144438,
+	-0.0980208811401368, 1.15190312990417, -0.0980434501171241,
+	-0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+const float AGX_MIN_EV = -12.47393, AGX_MAX_EV = 4.026069;
+const float AGX_SATURATION = 1.2; // the look: base AgX greyed Minecraft's colours (grass, ice) more than ACES did
+const vec3 AGX_LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+vec3 agxCurve(vec3 x) {
+	vec3 x2 = x * x, x4 = x2 * x2;
+	return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+}
+
 vec3 tonemap(vec3 x) {
-	return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+	x = clamp(log2(max(AGX_IN * max(x, vec3(0.0)), vec3(1e-10))), AGX_MIN_EV, AGX_MAX_EV);
+	x = agxCurve((x - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV));
+	float luma = dot(x, AGX_LUMA);
+	x = luma + AGX_SATURATION * (x - luma);
+	return clamp(pow(max(AGX_OUT * x, vec3(0.0)), vec3(2.2)), 0.0, 1.0);
 }
 
 void main() {
@@ -23,7 +45,7 @@ void main() {
 	if (any(greaterThanEqual(p, imageSize(colorImg)))) return;
 	ivec2 render = imageSize(hitDepth);
 	float depth = imageLoad(hitDepth, min(ivec2((vec2(p) + 0.5) * vec2(render) / vec2(imageSize(colorImg))), render - 1)).r;
-	vec3 c = pow(tonemap(max(imageLoad(denoised, p).rgb, vec3(0.0))), vec3(1.0 / 2.2));
+	vec3 c = pow(tonemap(max(imageLoad(denoised, p).rgb, vec3(0.0)) * pc.exposure), vec3(1.0 / 2.2));
 	imageStore(entityImg, p, vec4(c, depth));
 	if (depth == 0.0 && texelFetch(depthTex, p, 0).r == 0.0) return; // sky, no traced entity in front
 	imageStore(colorImg, p, vec4(c, imageLoad(colorImg, p).a));

@@ -748,7 +748,37 @@ light under it (vanilla's texture made it a strong blue filter).
   film grain / vignette.
 - SDR output only (the user's monitor has no HDR); lighting stays HDR internally.
 
-Exit: side-by-side screenshots you're proud of; HDR verified on your monitor.
+Exit: side-by-side screenshots you're proud of, in SDR.
+
+**M6 steps** (planned 2026-11-14). Today: one fixed exposure and Narkowicz's ACES fit (pathtrace.comp,
+rr_resolve.comp); vanilla draws the sky, sun, moon, stars and clouds, and the tracer's own sky light is a
+blend of vanilla's sky and fog colours (`skyIrradiance`, `skyRadiance`) with a fitted sun (`sunRadiance`).
+Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
+1. [x] Exposure and tonemap: auto exposure from the frame's average log luminance (after RR, adapting over
+   about a second, kept within a few stops of daylight so caves stay dark); AgX in place of ACES, with an
+   Exposure setting (EV offset). Vanilla's pixels (sky, past the RT distance) still come out as vanilla drew
+   them: their radiance for RR is the inverse of tonemap and exposure.
+   - Done in code: `pathtrace.comp` meters every 8th traced pixel's log2 luminance into a device-local slot
+     (`Meter`), copied into the frame's data; `PathTracer.adaptExposure` reads it when the ring comes back
+     around, aims at EXPOSURE_KEY 0.07 (snowy daylight lands near 1x), within +-2 EV, tau 0.8 s, times the
+     Exposure setting (-2..+2 EV). AgX (Wrensch's fit) with a 1.2 saturation look in both shaders; `untonemap`
+     inverts it exactly (curve by bisection). Summing with subgroupAdd after the ray queries hung the GPU
+     within a minute (5 s semaphore timeout); plain atomics from the sparse grid don't (200 s soak FG off, 180 s
+     FG 2x). Same daylight view: about the ACES picture's brightness, softer highlights.
+2. [ ] Bloom: from the HDR picture after RR, before the tonemap (emissive blocks, sun glints, the sun).
+3. [ ] Physically based sky: transmittance, multi-scattering and sky-view LUTs (Hillaire 2020) from the sun
+   angle; the tracer draws the sky (vanilla's square sun and moon kept as sprites, stars), sun light comes
+   through the transmittance LUT, sky light from the sky-view LUT. Rain and thunder darken it; Nether and End
+   keep fog-coloured skies, tuned.
+4. [ ] Volumetric clouds in place of vanilla's: ray-marched layer over the sky, lit by the sun through the
+   LUTs, casting shadows on the ground.
+5. [ ] Volumetric fog and god rays: sun shafts through trees and cave mouths, from one shadow ray per step
+   of a short march; underwater fog the same way.
+6. [ ] Water: waves (normal from a procedural height or the pack's water normal map), caustics on what's
+   under it, underwater look.
+7. [ ] Weather: rain wets surfaces (darker, smoother, by porosity) and fills puddles on flat ground.
+8. [ ] Grading: colour-grading LUT, optional film grain and vignette.
+9. [ ] Exit: side-by-side screenshots (vanilla / Helio) of the M3 scenes, at recorded coordinates.
 
 ### M7 — Performance pass
 

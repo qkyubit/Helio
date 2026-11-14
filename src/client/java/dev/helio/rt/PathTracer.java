@@ -88,6 +88,22 @@ public final class PathTracer {
 	private static final Matrix4f lastViewProj = new Matrix4f();
 	private static boolean lastUpscaled, lastRr;
 	private static int jitterIndex, timedFrames;
+	/** Auto exposure (log2 of the radiance scale before the tonemap), and when it last adapted. */
+	private static float autoEv;
+	private static long lastExposureNanos;
+	/**
+	 * The shader sums traced pixels' log luminance into a device-local slot per frame in flight (pathtrace.comp
+	 * Meter: its atomics stay off the host bus), copied after the trace to METER in that frame's data.
+	 */
+	private static final int METER = 192;
+	private static Memory.Buf meters;
+	/**
+	 * Average luminance (geometric mean of 1-sample pixels) the auto exposure brings the traced picture to: snowy
+	 * daylight lands near 1x. And how far the auto exposure may go from 1x either way (caves stay darker).
+	 */
+	private static final float EXPOSURE_KEY = 0.07f, AUTO_EV_MIN = -2, AUTO_EV_MAX = 2;
+	/** Seconds the exposure takes to cover about 63% of the way to a new target. */
+	private static final float EXPOSURE_TAU = 0.8f;
 	private static Vec3 rrOrigin;
 
 	private PathTracer() {}
@@ -203,7 +219,8 @@ public final class PathTracer {
 			check(vkCreateDescriptorSetLayout(vk, VkDescriptorSetLayoutCreateInfo.calloc(s).sType$Default()
 				.flags(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR).pBindings(rb), null, h), "resolve set layout");
 			resolveSetLayout = h.get(0);
-			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(resolveSetLayout)), null, h), "resolve layout");
+			check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(resolveSetLayout))
+				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(4)), null, h), "resolve layout");
 			resolveLayout = h.get(0);
 			resolvePipeline = computePipeline(vk, "rr_resolve.comp", resolveLayout, s);
 
@@ -219,7 +236,8 @@ public final class PathTracer {
 				.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(16)), null, h), "cache layout");
 			cacheLayout = h.get(0);
 			cachePipeline = computePipeline(vk, "radiance_cache.comp", cacheLayout, s);
-			for (int i = 0; i < RING; i++) frameData[i] = Memory.buffer(256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+			for (int i = 0; i < RING; i++) frameData[i] = Memory.buffer(256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true);
+			meters = Memory.buffer(RING * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
 		}
 		Helio.LOG.info("Path tracer initialised");
 	}
@@ -299,7 +317,11 @@ public final class PathTracer {
 			// accumulation follows its bounces in full).
 			boolean cacheOn = rr;
 			if (cacheOn) ensureCache(cmd, mc, s);
-			Memory.Buf frame = frameData[seed % RING];
+			int slot = seed % RING;
+			Memory.Buf frame = frameData[slot];
+			float exposure = adaptExposure(frame.mapped());
+			vkCmdFillBuffer(cmd, meters.buffer(), meters.offset() + slot * 16L, 16, 0);
+			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			ByteBuffer fb = MemoryUtil.memByteBuffer(frame.mapped(), 256);
 			lastViewProj.get(0, fb);
 			fb.putFloat(64, (float) cameraDelta.x).putFloat(68, (float) cameraDelta.y).putFloat(72, (float) cameraDelta.z)
@@ -309,7 +331,8 @@ public final class PathTracer {
 				.putLong(92, cacheOn ? radianceCache.address() : 0)
 				.putInt(100, Scene.anchorX).putInt(104, Scene.anchorY).putInt(108, Scene.anchorZ)
 				.putFloat(112, HelioConfig.current.caveBrightness / 100f)
-				.putFloat(116, HelioConfig.current.normalStrength / 100f);
+				.putFloat(116, HelioConfig.current.normalStrength / 100f)
+				.putFloat(120, exposure).putLong(124, meters.address() + slot * 16L);
 			lastViewProj.set(viewProj);
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
@@ -368,6 +391,9 @@ public final class PathTracer {
 				vkCmdDispatch(cmd, CACHE_ENTRIES / 64, 1, 1);
 			}
 			GpuTimers.end(cmd, GpuTimers.Pass.PATH_TRACE);
+			VulkanCommandEncoder.memoryBarrier(cmd, s);
+			vkCmdCopyBuffer(cmd, meters.buffer(), frame.buffer(),
+				VkBufferCopy.calloc(1, s).srcOffset(meters.offset() + slot * 16L).dstOffset(frame.offset() + METER).size(8));
 			if (++timedFrames % 600 == 0) Helio.LOG.info("GPU ms: path trace {}, DLSS {}", String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE)),
 				String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS)));
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
@@ -382,7 +408,7 @@ public final class PathTracer {
 				boolean ok = Dlss.evaluate(cmd, rr, -jitterX, -jitterY, worldToView, levelProjection);
 				GpuTimers.end(cmd, GpuTimers.Pass.DLSS);
 				VulkanCommandEncoder.memoryBarrier(cmd, s);
-				if (ok) resolve(cmd, color, depth, main.width, main.height, s);
+				if (ok) resolve(cmd, color, depth, main.width, main.height, exposure, s);
 			}
 			dispatched = true;
 		}
@@ -408,9 +434,29 @@ public final class PathTracer {
 		}
 	}
 
+	/**
+	 * The radiance scale for this frame: the auto exposure, adapted towards what the frame that last used this
+	 * slot measured (its GPU work is done: the ring waits for it), times the Exposure setting. Resets the meter.
+	 */
+	private static float adaptExposure(long frame) {
+		int sum = MemoryUtil.memGetInt(frame + METER), count = MemoryUtil.memGetInt(frame + METER + 4);
+		long now = System.nanoTime();
+		float dt = lastExposureNanos == 0 ? 0 : Math.min((now - lastExposureNanos) / 1e9f, 0.25f);
+		lastExposureNanos = now;
+		if (count > 0) {
+			float average = sum / 16f / count; // log2 luminance
+			float target = Math.clamp((float) (Math.log(EXPOSURE_KEY) / Math.log(2)) - average, AUTO_EV_MIN, AUTO_EV_MAX);
+			autoEv += (target - autoEv) * (1 - (float) Math.exp(-dt / EXPOSURE_TAU));
+			if (timedFrames % 600 == 0) Helio.LOG.info("Exposure: average log2 luminance {}, auto {} EV", String.format("%.2f", average),
+				String.format("%.2f", autoEv));
+		}
+		return (float) Math.pow(2, autoEv + HelioConfig.current.exposure);
+	}
+
 	/** After DLSS: its output, tonemapped, into the main colour (rr_resolve.comp). */
-	private static void resolve(VkCommandBuffer cmd, VulkanGpuTextureView color, VulkanGpuTextureView depth, int width, int height, MemoryStack s) {
+	private static void resolve(VkCommandBuffer cmd, VulkanGpuTextureView color, VulkanGpuTextureView depth, int width, int height, float exposure, MemoryStack s) {
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolvePipeline);
+		vkCmdPushConstants(cmd, resolveLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, s.malloc(4).putFloat(0, exposure));
 		long[] views = {Dlss.output.view(), color.vkImageView(), entityImg.view(), 0, Dlss.hitDepth.view()};
 		VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(5, s);
 		for (int i = 0; i < 5; i++) {
@@ -511,6 +557,8 @@ public final class PathTracer {
 		vkDestroyPipelineLayout(vk, pipelineLayout, null);
 		Dlss.destroyImages();
 		for (Memory.Buf b : frameData) if (b != null) b.free();
+		if (meters != null) meters.free();
+		meters = null;
 		if (radianceCache != null) radianceCache.free();
 		radianceCache = null;
 		vkDestroyPipeline(vk, cachePipeline, null);

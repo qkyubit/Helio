@@ -90,6 +90,12 @@ public class HelioScreen extends OptionsSubScreen {
 				.withValues(0, 100, 200, 300, 400, 600)
 				.withTooltip(n -> Tooltip.create(Component.translatable("helio.normal_strength.tooltip")))
 				.create(Component.translatable("helio.normal_strength"), (b, v) -> c.normalStrength = v)));
+		list.addSmall(
+			unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", CycleButton.builder((Float v) -> Component.literal(String.format("%+.1f EV", v)), c.exposure)
+				.withValues(-2f, -1.5f, -1f, -0.5f, 0f, 0.5f, 1f, 1.5f, 2f)
+				.withTooltip(v -> Tooltip.create(Component.translatable("helio.exposure.tooltip")))
+				.create(Component.translatable("helio.exposure"), (b, v) -> c.exposure = v)),
+			null);
 	}
 
 	/** Any manual change means the settings no longer match a preset. */
