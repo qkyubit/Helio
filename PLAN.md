@@ -666,7 +666,14 @@ in the Radiance Test instance) plus its add-ons (emission, glowing ore, mirror).
      data (SPBR leaves 0.56, vines 1.0), `FOLIAGE_TRANSMISSION` (0.5) without; drives
      sun from behind and which side bounces leave from. Porosity isn't stored: M6 reads
      it from `pbrSpecular.b` (B / 64 below 65) when rain needs it.
-6. [ ] Animated sprites: PBR maps follow the atlas animation frames.
+6. [x] Animated sprites: PBR maps follow the atlas animation frames.
+   - `PbrAtlas`: animated maps' frames go into strip textures; `TextureAtlas.
+     cycleAnimationFrames` (TAIL) advances a frame clock built from the texture's
+     .mcmeta like vanilla's (both restart at upload) and copies changed frames into
+     the PBR atlases. No interpolated frames (ponytail). SPBR: 13 animated maps (water,
+     nether portal, sculk family, respawn anchor, firefly bush); its lava, fire and sea
+     lantern maps are single frames. Water's normal map isn't used for its reflection
+     and refraction yet (M6 water waves).
 7. [ ] 3D pack check: BLAS size, build time and OMM on a 3D pack.
 8. [ ] Exit check: SPBR + one more LabPBR pack + one 3D pack; F3+T reload; performance
    against M4 numbers.

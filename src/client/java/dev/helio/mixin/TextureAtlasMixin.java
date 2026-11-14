@@ -14,4 +14,9 @@ public class TextureAtlasMixin {
 	private void helio$buildPbr(SpriteLoader.Preparations preparations, CallbackInfo ci) {
 		PbrAtlas.rebuild((TextureAtlas) (Object) this);
 	}
+
+	@Inject(method = "cycleAnimationFrames", at = @At("TAIL"))
+	private void helio$animatePbr(CallbackInfo ci) {
+		PbrAtlas.tick((TextureAtlas) (Object) this);
+	}
 }
