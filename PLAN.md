@@ -789,8 +789,19 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      pixel face with vanilla's 8 phases (unlit part 3%), not a second sun (MOON_GLINT 2.5). Rain left sun and
      sky pitch black (rain brightness squared): now 2% of their light stays (RAIN_LIGHT), about a clear night's
      darkness, and the sun and moon discs fade out behind it.
-4. [ ] Volumetric clouds in place of vanilla's: ray-marched layer over the sky, lit by the sun through the
+4. [x] Volumetric clouds in place of vanilla's: ray-marched layer over the sky, lit by the sun through the
    LUTs, casting shadows on the ground.
+   - Done in code: `cloud_noise.comp` makes a 128^3 tiling volume once (r Perlin-Worley shapes, stretched from
+     their 0.5-0.75 bunch to 0..1; g Worley detail). `pathtrace.comp` `clouds()`: a layer from vanilla's cloud
+     height up 90 blocks, weather pattern (12000-block tile) x shape (1500) eroded by detail (250, nearer than
+     2000 blocks), 20 jittered steps with 3 towards the sun or moon (two HG lobes, a softer second octave, sky
+     ambient), fading into the sky past ~3000 blocks. Over sky pixels, in front of traced hits the camera ray
+     reaches through the layer (flying above them), and in reflections that escape. Sun and moon light get
+     `cloudShadow` (two samples through the layer). Drift 0.03 blocks a tick like vanilla's; cover 45%, up to
+     85% in rain; vanilla's Clouds Off turns them off; `CloudRendererMixin` skips vanilla's clouds while Helio
+     draws the sky. Cost about 0.7 ms at the snowy lake (9.6 -> 10.3 ms): 48 steps were 0.5 ms more for little.
+   - Shaders.compile now hands shaderc the source from the heap: the bigger shaders overflowed LWJGL's
+     MemoryStack (the path tracer failed to start).
 5. [ ] Volumetric fog and god rays: sun shafts through trees and cave mouths, from one shadow ray per step
    of a short march; underwater fog the same way.
 6. [ ] Water: waves (normal from a procedural height or the pack's water normal map), caustics on what's

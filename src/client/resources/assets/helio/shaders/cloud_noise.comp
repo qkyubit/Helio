@@ -1,0 +1,63 @@
+#version 460
+
+// The clouds' noise (M6 step 4; after Schneider, "The Real-time Volumetric Cloudscapes of Horizon Zero Dawn"),
+// made once: a 128^3 volume that tiles. r: Perlin-Worley, the clouds' billowing shapes; g: Worley fBm, the
+// detail that erodes their edges. pathtrace.comp samples it at two scales.
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(binding = 0, rgba8) uniform writeonly image3D noise;
+
+uint pcg(uint v) {
+	uint state = v * 747796405u + 2891336453u;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return (word >> 22u) ^ word;
+}
+
+vec3 hash3(ivec3 c) {
+	uint h = pcg(uint(c.x) + pcg(uint(c.y) + pcg(uint(c.z))));
+	return vec3(pcg(h), pcg(h + 1u), pcg(h + 2u)) / 4294967295.0;
+}
+
+// Gradient noise repeating every period cells, about -1..1.
+float perlin(vec3 p, int period) {
+	ivec3 i = ivec3(floor(p));
+	vec3 f = fract(p), u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+	float n[8];
+	for (int k = 0; k < 8; k++) {
+		ivec3 o = ivec3(k & 1, (k >> 1) & 1, k >> 2);
+		vec3 g = normalize(hash3((i + o) % period) * 2.0 - 1.0 + 1e-4);
+		n[k] = dot(g, f - vec3(o));
+	}
+	return mix(mix(mix(n[0], n[1], u.x), mix(n[2], n[3], u.x), u.y), mix(mix(n[4], n[5], u.x), mix(n[6], n[7], u.x), u.y), u.z);
+}
+
+// 1 at a feature point, 0 a cell away; cells per side, repeating.
+float worley(vec3 uvw, int cells) {
+	vec3 p = uvw * float(cells);
+	ivec3 c = ivec3(floor(p));
+	float best = 1.0;
+	for (int z = -1; z <= 1; z++) for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+		ivec3 n = c + ivec3(x, y, z);
+		vec3 point = vec3(n) + hash3((n % cells + cells) % cells);
+		best = min(best, length(p - point));
+	}
+	return 1.0 - best;
+}
+
+float remap(float v, float lo, float hi, float newLo, float newHi) {
+	return newLo + (v - lo) / (hi - lo) * (newHi - newLo);
+}
+
+void main() {
+	ivec3 p = ivec3(gl_GlobalInvocationID);
+	ivec3 size = imageSize(noise);
+	if (any(greaterThanEqual(p, size))) return;
+	vec3 uvw = (vec3(p) + 0.5) / vec3(size);
+	float perlinFbm = (perlin(uvw * 4.0, 4) * 0.5 + perlin(uvw * 8.0, 8) * 0.25 + perlin(uvw * 16.0, 16) * 0.125) * 0.5 + 0.5;
+	float worleyFbm = worley(uvw, 4) * 0.625 + worley(uvw, 8) * 0.25 + worley(uvw, 16) * 0.125;
+	// Perlin-Worley sits mostly between 0.5 and 0.75: stretched to use the whole range, so cover maps to coverage.
+	float shape = clamp((remap(perlinFbm, worleyFbm - 1.0, 1.0, 0.0, 1.0) - 0.45) / 0.4, 0.0, 1.0);
+	float detail = worley(uvw, 8) * 0.625 + worley(uvw, 16) * 0.25 + worley(uvw, 32) * 0.125;
+	imageStore(noise, p, vec4(shape, detail, 0.0, 1.0));
+}

@@ -4,6 +4,7 @@
 	"compatibilityLevel": "JAVA_25",
 	"client": [
 		"BlockModelLighterMixin",
+		"CloudRendererMixin",
 		"FluidRendererMixin",
 		"GameRendererMixin",
 		"HudMixin",

@@ -16,7 +16,7 @@ import static org.lwjgl.vulkan.VK12.*;
 
 /**
  * The physically based sky's LUTs (M6 step 3, sky.comp): transmittance and multiple scattering once, then every
- * frame the sky view for this sun and moon and the ambient cube from it. pathtrace.comp samples them for the
+ * frame the sky view for this sun and moon and the ambient cube from it. Also the clouds' noise (step 4), once. pathtrace.comp samples them for the
  * sky it draws, the sun and moon light reaching the ground, and sky light.
  */
 final class Sky {
@@ -30,6 +30,10 @@ final class Sky {
 
 	private static long setLayout, layout, pipeline, linear;
 	private static Memory.Img transmittance, multi, skyView, ambient;
+	/** The clouds' noise volume (cloud_noise.comp, made once), sampled tiling. */
+	private static final int NOISE_SIZE = 128;
+	private static long noiseSetLayout, noiseLayout, noisePipeline, repeat;
+	private static Memory.Img cloudNoise;
 	private static boolean ready;
 
 	private Sky() {}
@@ -52,6 +56,19 @@ final class Sky {
 			.pPushConstantRanges(VkPushConstantRange.calloc(1, s).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT).size(36)), null, h), "sky layout");
 		layout = h.get(0);
 		pipeline = PathTracer.computePipeline(vk, "sky.comp", layout, s);
+		check(vkCreateSampler(vk, VkSamplerCreateInfo.calloc(s).sType$Default().magFilter(VK_FILTER_LINEAR).minFilter(VK_FILTER_LINEAR)
+			.addressModeU(VK_SAMPLER_ADDRESS_MODE_REPEAT).addressModeV(VK_SAMPLER_ADDRESS_MODE_REPEAT)
+			.addressModeW(VK_SAMPLER_ADDRESS_MODE_REPEAT).maxLod(0), null, h), "cloud sampler");
+		repeat = h.get(0);
+		VkDescriptorSetLayoutBinding.Buffer nb = VkDescriptorSetLayoutBinding.calloc(1, s);
+		nb.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+		check(vkCreateDescriptorSetLayout(vk, VkDescriptorSetLayoutCreateInfo.calloc(s).sType$Default()
+			.flags(VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR).pBindings(nb), null, h), "cloud noise set layout");
+		noiseSetLayout = h.get(0);
+		check(vkCreatePipelineLayout(vk, VkPipelineLayoutCreateInfo.calloc(s).sType$Default().pSetLayouts(s.longs(noiseSetLayout)), null, h), "cloud noise layout");
+		noiseLayout = h.get(0);
+		noisePipeline = PathTracer.computePipeline(vk, "cloud_noise.comp", noiseLayout, s);
+		cloudNoise = Memory.storageImage(NOISE_SIZE, NOISE_SIZE, NOISE_SIZE, VK_FORMAT_R8G8B8A8_UNORM);
 		transmittance = Memory.storageImage(256, 64, VK_FORMAT_R16G16B16A16_SFLOAT);
 		multi = Memory.storageImage(32, 32, VK_FORMAT_R16G16B16A16_SFLOAT);
 		skyView = Memory.storageImage(256, 128, VK_FORMAT_R16G16B16A16_SFLOAT);
@@ -75,10 +92,19 @@ final class Sky {
 		return ambient.view();
 	}
 
+	static long cloudNoiseView() {
+		return cloudNoise.view();
+	}
+
+	/** Linear, repeating: for the cloud noise. */
+	static long repeatSampler() {
+		return repeat;
+	}
+
 	/** Before the path trace. rain: vanilla's rain brightness (1 clear .. 0 raining), dimming as pathtrace.comp does. */
 	static void update(VkCommandBuffer cmd, Vector3f sun, Vector3f moon, float rain, MemoryStack s) {
 		if (!ready) {
-			Memory.Img[] all = {transmittance, multi, skyView, ambient};
+			Memory.Img[] all = {transmittance, multi, skyView, ambient, cloudNoise};
 			VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(all.length, s);
 			for (int i = 0; i < all.length; i++) {
 				barrier.get(i).sType$Default().oldLayout(VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK_IMAGE_LAYOUT_GENERAL)
@@ -87,6 +113,13 @@ final class Sky {
 					.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1);
 			}
 			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, null, null, barrier);
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, noisePipeline);
+			VkWriteDescriptorSet.Buffer nw = VkWriteDescriptorSet.calloc(1, s);
+			nw.get(0).sType$Default().dstBinding(0).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).imageView(cloudNoise.view()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+			vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, noiseLayout, 0, nw);
+			vkCmdDispatch(cmd, NOISE_SIZE / 4, NOISE_SIZE / 4, NOISE_SIZE / 4);
+			VulkanCommandEncoder.memoryBarrier(cmd, s);
 		}
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 		VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(7, s);
@@ -122,8 +155,12 @@ final class Sky {
 	}
 
 	static void destroy(VkDevice vk) {
-		for (Memory.Img img : new Memory.Img[]{transmittance, multi, skyView, ambient}) if (img != null) img.free();
-		transmittance = multi = skyView = ambient = null;
+		for (Memory.Img img : new Memory.Img[]{transmittance, multi, skyView, ambient, cloudNoise}) if (img != null) img.free();
+		transmittance = multi = skyView = ambient = cloudNoise = null;
+		vkDestroyPipeline(vk, noisePipeline, null);
+		vkDestroyPipelineLayout(vk, noiseLayout, null);
+		vkDestroyDescriptorSetLayout(vk, noiseSetLayout, null);
+		vkDestroySampler(vk, repeat, null);
 		vkDestroyPipeline(vk, pipeline, null);
 		vkDestroyPipelineLayout(vk, layout, null);
 		vkDestroyDescriptorSetLayout(vk, setLayout, null);

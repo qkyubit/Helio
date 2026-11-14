@@ -15,7 +15,9 @@ import dev.helio.vk.Memory;
 import dev.helio.vk.Shaders;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.minecraft.client.renderer.state.level.LevelRenderState;
 import net.minecraft.client.renderer.state.level.SkyRenderState;
+import net.minecraft.client.CloudStatus;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.world.level.dimension.DimensionType.Skybox;
 import net.minecraft.world.level.material.FogType;
@@ -74,6 +76,7 @@ public final class PathTracer {
 	private static float sunAngle, moonAngle, rainBrightness;
 	private static boolean hasSky, underwater;
 	private static int moonPhase; // vanilla's MoonPhase ordinal: 0 full .. 4 new .. 7
+	private static float cloudTime, cloudBottom;
 	private static float starBrightness;
 	private static final Vector4f fogColor = new Vector4f();
 	private static int seed;
@@ -110,7 +113,11 @@ public final class PathTracer {
 	private PathTracer() {}
 
 	/** Start of the level render. */
-	public static void beginFrame(CameraRenderState camera, SkyRenderState sky) {
+	public static void beginFrame(CameraRenderState camera, LevelRenderState level) {
+		SkyRenderState sky = level.skyRenderState;
+		// Clouds drift 0.03 blocks a tick along +x, as vanilla's; wrapped where the noise tiles (pathtrace.comp).
+		cloudTime = (float) (((level.gameTime % 400_000L) + level.worldPartialTicks) * 0.03);
+		cloudBottom = level.cloudHeight;
 		cameraPos = camera.pos;
 		viewRotation.set(camera.viewRotationMatrix);
 		hasSky = sky.skybox == Skybox.OVERWORLD;
@@ -128,6 +135,11 @@ public final class PathTracer {
 	}
 
 	/** Whether {@link #run} will replace vanilla's opaque picture this frame. */
+	/** Helio draws the sky (and its clouds) this frame: vanilla's clouds stay off (CloudRendererMixin). */
+	public static boolean drawsSky() {
+		return active() && hasSky && !underwater;
+	}
+
 	public static boolean active() {
 		return !failed && Helio.rayTracing && HelioConfig.current.rayTracing && Helio.device != null && Minecraft.getInstance().level != null;
 	}
@@ -166,9 +178,9 @@ public final class PathTracer {
 				.magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_NEAREST).maxLod(0), null, h), "sampler");
 			sampler = h.get(0);
 
-			// 0 TLAS, 2, 5 and 14-18 sampled (atlas, vanilla depth, PBR atlases, sky LUTs), the rest storage images (see pathtrace.comp).
-			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(19, s);
-			for (int i = 0; i < 19; i++) {
+			// 0 TLAS, 2, 5 and 14-19 sampled (atlas, vanilla depth, PBR atlases, sky LUTs, cloud noise), the rest storage images (see pathtrace.comp).
+			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(20, s);
+			for (int i = 0; i < 20; i++) {
 				int type = i == 0 ? VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
 					: i == 2 || i == 5 || i >= 14 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 				b.get(i).binding(i).descriptorType(type).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
@@ -336,13 +348,14 @@ public final class PathTracer {
 				.putInt(100, Scene.anchorX).putInt(104, Scene.anchorY).putInt(108, Scene.anchorZ)
 				.putFloat(112, HelioConfig.current.caveBrightness / 100f)
 				.putFloat(116, HelioConfig.current.normalStrength / 100f)
-				.putFloat(120, exposure).putLong(124, meters.address() + slot * 16L);
+				.putFloat(120, exposure).putLong(124, meters.address() + slot * 16L)
+				.putFloat(132, cloudTime).putFloat(136, cloudBottom).putFloat(140, cloudCover(mc));
 			lastViewProj.set(viewProj);
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			Sky.update(cmd, sun, moon, hasSky ? rainBrightness : 1, s);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(19, s);
+			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(20, s);
 			w.get(0).sType$Default().dstBinding(0).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
 				.pNext(VkWriteDescriptorSetAccelerationStructureKHR.calloc(s).sType$Default().pAccelerationStructures(s.longs(Scene.tlas)));
 			w.get(1).sType$Default().dstBinding(1).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -371,6 +384,8 @@ public final class PathTracer {
 				w.get(16 + i).sType$Default().dstBinding(16 + i).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
 					.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(Sky.sampler()).imageView(sky[i]).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
 			}
+			w.get(19).sType$Default().dstBinding(19).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(Sky.repeatSampler()).imageView(Sky.cloudNoiseView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
 			vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, w);
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 1, s.longs(writeEntityTextures(mc, s)), null);
 
@@ -461,6 +476,12 @@ public final class PathTracer {
 				String.format("%.2f", autoEv));
 		}
 		return (float) Math.pow(2, autoEv + HelioConfig.current.exposure);
+	}
+
+	/** Share of the sky the clouds cover: none with vanilla's clouds off, more as rain sets in. */
+	private static float cloudCover(Minecraft mc) {
+		if (mc.options.getCloudStatus() == CloudStatus.OFF) return 0;
+		return 0.45f + 0.4f * (1 - rainBrightness);
 	}
 
 	/** After DLSS: its output, tonemapped, into the main colour (rr_resolve.comp). */

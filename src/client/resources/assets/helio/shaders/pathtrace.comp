@@ -32,6 +32,7 @@ layout(binding = 15) uniform sampler2D specularAtlas;
 layout(binding = 16) uniform sampler2D transmittanceLut;
 layout(binding = 17) uniform sampler2D skyViewLut;
 layout(binding = 18) uniform sampler2D ambientLut;
+layout(binding = 19) uniform sampler3D cloudNoise; // Sky.java, cloud_noise.comp: r shapes, g detail; tiles
 layout(binding = 3, rgba32f) uniform image2D accumImg; // premultiplied radiance + coverage, averaged over frames
 layout(binding = 4, rgba32f) uniform image2D entityImg; // traced colour + NDC depth where an entity is hit (entity_composite.comp)
 layout(binding = 5) uniform sampler2D depthTex; // vanilla's depth so far: sky and terrain past the RT distance
@@ -73,6 +74,9 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	float normalStrength; // how far normal maps tilt the surface, 1 = as the pack made them (HelioConfig)
 	float exposure;     // radiance scale before the tonemap (PathTracer's auto exposure and the Exposure setting)
 	uvec2 meter;        // Meter: this frame's log luminance, summed for the auto exposure
+	float cloudTime;    // how far the clouds have drifted along +x, blocks (wraps every CLOUD_WEATHER_TILE)
+	float cloudBottom;  // vanilla's cloud height
+	float cloudCover;   // share of the sky clouds cover, 0 = vanilla's clouds are off
 };
 // Traced pixels' log2 luminance, in sixteenths, and how many (read back by PathTracer a few frames later).
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer Meter { int logSum; uint count; };
@@ -485,6 +489,95 @@ vec3 skyIrradiance(vec3 n) {
 	return overcast(e) * (SKY / 3.14159265);
 }
 
+// Volumetric clouds (M6 step 4): a layer from vanilla's cloud height up CLOUD_THICKNESS blocks, shaped by the
+// noise volume (cloud_noise.comp: Perlin-Worley shapes, Worley detail on their edges, a low-frequency weather
+// pattern for where they gather), drifting like vanilla's. Lit by the sun or moon through a short march towards
+// it (Beer's law, a forward and a back lobe, a softer second octave for light scattered more than once) and the
+// sky's light.
+float cloudTime, cloudBottom, cloudCover; // Frame
+vec3 anchorWorld;                          // the scene anchor's world position (Frame.anchor)
+const float CLOUD_THICKNESS = 90.0;
+const float CLOUD_EXTINCTION = 0.06;       // per block, at full density
+const float CLOUD_FAR = 6000.0;            // blocks: past this the layer isn't marched
+// Few steps, jittered per pixel and frame: RR smooths what one frame's march leaves noisy (48 steps and 4
+// light steps cost 5 ms at 1440p Balanced).
+const int CLOUD_STEPS = 20, CLOUD_LIGHT_STEPS = 3;
+const float CLOUD_LIGHT_STEP = 16.0;
+const float CLOUD_DETAIL_FAR = 2000.0;     // blocks: past this the edge detail is too small to see
+// Noise scales, blocks per tile: each divides the next, so the wind's wrap (Frame.cloudTime) is seamless.
+const float CLOUD_DETAIL_TILE = 250.0, CLOUD_SHAPE_TILE = 1500.0, CLOUD_WEATHER_TILE = 12000.0;
+
+float cloudDensity(vec3 w, bool detail) {
+	float h = (w.y - cloudBottom) / CLOUD_THICKNESS;
+	if (h <= 0.0 || h >= 1.0) return 0.0;
+	vec3 q = w + vec3(cloudTime, 0.0, 0.0);
+	float weather = textureLod(cloudNoise, vec3(q.x, 0.0, q.z) / CLOUD_WEATHER_TILE, 0.0).r;
+	float cover = clamp(cloudCover + (weather - 0.5) * 0.6, 0.0, 1.0);
+	float profile = smoothstep(0.0, 0.12, h) * smoothstep(1.0, 0.35, h); // flat-ish bottoms, wispy tops
+	float d = clamp((textureLod(cloudNoise, q / CLOUD_SHAPE_TILE, 0.0).r * profile - (1.0 - cover)) / max(cover, 0.05), 0.0, 1.0);
+	if (detail && d > 0.0) d = clamp(d - textureLod(cloudNoise, q / CLOUD_DETAIL_TILE, 0.0).g * 0.3 * (1.0 - d), 0.0, 1.0);
+	return d;
+}
+
+// Sun or moon light that gets through the clouds to scene position pos: two density samples through the layer.
+float cloudShadow(vec3 pos, vec3 l) {
+	if (cloudCover <= 0.0 || pc.skyColor.w == 0.0 || l.y <= 0.02) return 1.0;
+	vec3 w = pos + anchorWorld;
+	float sum = 0.0;
+	for (int k = 0; k < 2; k++) {
+		float t = (cloudBottom + CLOUD_THICKNESS * (0.3 + 0.35 * float(k)) - w.y) / l.y;
+		if (t > 0.0) sum += cloudDensity(w + l * t, false);
+	}
+	return exp(-sum * 0.5 * CLOUD_EXTINCTION * CLOUD_THICKNESS / l.y);
+}
+
+float henyeyGreenstein(float c, float g) {
+	return (1.0 - g * g) / (12.5663706 * pow(1.0 + g * g - 2.0 * g * c, 1.5));
+}
+
+// What the clouds add along a ray from scene position origin, up to tMax: radiance, and the transmittance that
+// scales what's behind them.
+vec4 clouds(vec3 origin, vec3 dir, float tMax) {
+	if (cloudCover <= 0.0 || pc.skyColor.w == 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+	vec3 o = origin + anchorWorld;
+	float top = cloudBottom + CLOUD_THICKNESS, t0, t1;
+	if (abs(dir.y) < 1e-4) {
+		if (o.y <= cloudBottom || o.y >= top) return vec4(0.0, 0.0, 0.0, 1.0);
+		t0 = 0.0;
+		t1 = CLOUD_FAR;
+	} else {
+		float a = (cloudBottom - o.y) / dir.y, b = (top - o.y) / dir.y;
+		t0 = max(min(a, b), 0.0);
+		t1 = max(a, b);
+	}
+	t1 = min(min(t1, tMax), CLOUD_FAR);
+	if (t1 <= t0) return vec4(0.0, 0.0, 0.0, 1.0);
+	bool day = pc.sunDir.y > 0.0;
+	vec3 l = day ? pc.sunDir.xyz : pc.moonDir.xyz;
+	vec3 light = l.y > 0.0 ? (day ? sunRadiance(l.y) : moonRadiance(l.y)) : vec3(0.0);
+	vec3 ambient = skyIrradiance(vec3(0.0, 1.0, 0.0));
+	float c = dot(dir, l), phase = mix(henyeyGreenstein(c, 0.7), henyeyGreenstein(c, -0.2), 0.4);
+	float dt = (t1 - t0) / float(CLOUD_STEPS), t = t0 + dt * rand();
+	vec3 radiance = vec3(0.0);
+	float transmittance = 1.0;
+	for (int i = 0; i < CLOUD_STEPS && transmittance > 0.02; i++, t += dt) {
+		vec3 p = o + dir * t;
+		float d = cloudDensity(p, t < CLOUD_DETAIL_FAR);
+		if (d <= 0.0) continue;
+		float depth = 0.0; // towards the light
+		for (int k = 1; k <= CLOUD_LIGHT_STEPS; k++) depth += cloudDensity(p + l * (float(k) * CLOUD_LIGHT_STEP), false) * CLOUD_LIGHT_STEP;
+		depth *= CLOUD_EXTINCTION;
+		float h = (p.y - cloudBottom) / CLOUD_THICKNESS;
+		vec3 scattered = light * (exp(-depth) * phase + 0.5 * exp(-depth * 0.25) * 0.0796) + ambient * mix(0.5, 1.0, h);
+		float step = exp(-d * CLOUD_EXTINCTION * dt);
+		radiance += transmittance * scattered * (1.0 - step);
+		transmittance *= step;
+	}
+	// Far clouds fade into the sky behind them (aerial perspective, roughly).
+	float fade = exp(-t0 / (CLOUD_FAR * 0.5));
+	return vec4(radiance * fade, mix(1.0, transmittance, fade));
+}
+
 // Block lights by resampled importance sampling: CANDIDATES lights drawn from the 27 sections around pos
 // (a section in proportion to its light count over its squared distance, then a light in it uniformly), one
 // kept in proportion to its unshadowed contribution, then a single shadow ray to a point inside its block
@@ -606,7 +699,7 @@ vec3 directLight(Hit h, vec3 pos) {
 			nl *= -h.transmission;
 			side = -side;
 		}
-		if (nl > 0.0) direct = nl * shadowTransmittance(pos + side * 0.002, l, 512.0) * (day ? sunRadiance(l.y) : moonRadiance(l.y));
+		if (nl > 0.0) direct = nl * shadowTransmittance(pos + side * 0.002, l, 512.0) * (day ? sunRadiance(l.y) : moonRadiance(l.y)) * cloudShadow(pos, l);
 	}
 	// Vanilla's light level says whether any block light reaches here: skip sampling (and its shadow ray) if not.
 	// Hybrid lighting takes vanilla's level as the light itself, raster-style.
@@ -879,7 +972,10 @@ vec3 reflectionSeen(vec3 origin, vec3 r, vec3 miss) {
 	TRACE(rq, origin, r, 512.0, MASK_OPAQUE_SCENE | MASK_NOT_ONLY_WATER, gl_RayFlagsNoneEXT)
 	reflectionRay = false;
 	reflectionDistance = SKY_DISTANCE;
-	if (!HIT(rq)) return miss;
+	if (!HIT(rq)) { // the sky, with its clouds
+		vec4 cloud = clouds(origin, r, 1e9);
+		return miss * cloud.a + cloud.rgb;
+	}
 	float t = rayQueryGetIntersectionTEXT(rq, true);
 	reflectionDistance = t;
 	Hit h = shade(rq, r);
@@ -1119,7 +1215,9 @@ bool ownSky(ivec2 windowPixel) {
 vec3 skyThrough(vec2 pixel, vec2 size) {
 	vec2 ndc = pixel / size * 2.0 - 1.0;
 	vec4 near = pc.invViewProj * vec4(ndc, 1.0, 1.0), mid = pc.invViewProj * vec4(ndc, 0.5, 1.0);
-	vec3 c = skyRadiance(normalize(mid.xyz / mid.w - near.xyz / near.w));
+	vec3 dir = normalize(mid.xyz / mid.w - near.xyz / near.w);
+	vec4 cloud = clouds(pc.cameraInScene.xyz + near.xyz / near.w, dir, 1e9);
+	vec3 c = skyRadiance(dir) * cloud.a + cloud.rgb;
 	float l = luminance(c);
 	return l > SKY_SAMPLE ? c * (SKY_SAMPLE / l) : c;
 }
@@ -1187,6 +1285,10 @@ void main() {
 	if (any(greaterThanEqual(p, size))) return;
 	bounces = int(frame.cameraDelta.w);
 	lightFloor = frame.lightFloor;
+	cloudTime = frame.cloudTime;
+	cloudBottom = frame.cloudBottom;
+	cloudCover = frame.cloudCover;
+	anchorWorld = vec3(frame.anchor);
 	caveFloor = frame.caveFloor;
 	normalStrength = frame.normalStrength;
 	hybrid = frame.hybrid != 0u;
@@ -1199,6 +1301,10 @@ void main() {
 		feeding = pcg(gl_WorkGroupID.x + pcg(gl_WorkGroupID.y + pcg(pc.seed ^ 0xA511E9B3u))) % CACHE_FEED == 0u;
 	}
 	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size), uvec2(p));
+	if (current.a > 0.0) { // clouds between the camera and what it hit (flying above or through them)
+		vec4 cloud = clouds(pc.cameraInScene.xyz, normalize(guidePos), length(guidePos));
+		current.rgb = current.rgb * cloud.a + cloud.rgb;
+	}
 	if (frame.denoise != 0u) {
 		meter(frame, p, current.rgb, current.a > 0.0);
 		writeDenoiserInputs(p, size, current, frame);

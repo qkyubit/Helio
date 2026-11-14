@@ -89,16 +89,21 @@ public final class Memory {
 
 	/** Device-local 2D storage image (one mip), also sampled (NGX reads its inputs). Callers move it to VK_IMAGE_LAYOUT_GENERAL before use. */
 	public static Img storageImage(int width, int height, int format) {
+		return storageImage(width, height, 1, format);
+	}
+
+	/** The same, 3D when depth > 1 (the cloud noise). */
+	public static Img storageImage(int width, int height, int depth, int format) {
 		try (MemoryStack s = MemoryStack.stackPush()) {
 			LongBuffer pImage = s.mallocLong(1);
 			PointerBuffer pAlloc = s.mallocPointer(1);
-			VkImageCreateInfo ci = VkImageCreateInfo.calloc(s).sType$Default().imageType(VK_IMAGE_TYPE_2D).format(format)
+			VkImageCreateInfo ci = VkImageCreateInfo.calloc(s).sType$Default().imageType(depth > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D).format(format)
 				.mipLevels(1).arrayLayers(1).samples(VK_SAMPLE_COUNT_1_BIT).tiling(VK_IMAGE_TILING_OPTIMAL)
 				.usage(VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT).initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
-			ci.extent().set(width, height, 1);
+			ci.extent().set(width, height, depth);
 			check(vmaCreateImage(vma, ci, VmaAllocationCreateInfo.calloc(s).usage(VMA_MEMORY_USAGE_AUTO), pImage, pAlloc, null), "vmaCreateImage");
 			LongBuffer pView = s.mallocLong(1);
-			VkImageViewCreateInfo vi = VkImageViewCreateInfo.calloc(s).sType$Default().image(pImage.get(0)).viewType(VK_IMAGE_VIEW_TYPE_2D).format(format);
+			VkImageViewCreateInfo vi = VkImageViewCreateInfo.calloc(s).sType$Default().image(pImage.get(0)).viewType(depth > 1 ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D).format(format);
 			vi.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1);
 			check(vkCreateImageView(vk, vi, null, pView), "image view");
 			return new Img(pImage.get(0), pAlloc.get(0), pView.get(0), width, height, format);

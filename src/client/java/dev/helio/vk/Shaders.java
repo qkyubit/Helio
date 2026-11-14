@@ -25,7 +25,16 @@ public final class Shaders {
 			shaderc_compile_options_set_target_spirv(opts, shaderc_spirv_version_1_4);
 			shaderc_compile_options_set_optimization_level(opts, shaderc_optimization_level_performance);
 			if (dev.helio.Helio.omm) shaderc_compile_options_add_macro_definition(opts, "HELIO_OMM", "1");
-			long result = shaderc_compile_into_spv(compiler, src, shaderc_compute_shader, name, "main", opts);
+			// Source on the heap: the String overload puts it on the thread's MemoryStack, which the shaders outgrew.
+			ByteBuffer source = MemoryUtil.memUTF8(src, false), file = MemoryUtil.memUTF8(name), entry = MemoryUtil.memUTF8("main");
+			long result;
+			try {
+				result = shaderc_compile_into_spv(compiler, source, shaderc_compute_shader, file, entry, opts);
+			} finally {
+				MemoryUtil.memFree(source);
+				MemoryUtil.memFree(file);
+				MemoryUtil.memFree(entry);
+			}
 			try {
 				if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success)
 					throw new IllegalStateException(name + ": " + shaderc_result_get_error_message(result));
