@@ -852,8 +852,16 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      cutoff); flat ground grows puddles from a low-frequency pattern (40- and 9-block scales) as wetness rises:
      roughness 0.02, flat normal, 70% albedo. Foliage stays dry. Only checked with the biome test bypassed
      (snowy test world); needs a look in a rainy biome.
+   - Rain look (user): 15% of sun and moon light stays in full rain (RAIN_LIGHT; 2% read as night); fog 15x
+     denser (about 170 blocks' visibility at sea level), with rain's extra fog past FOG_FAR integrated in closed
+     form through the height falloff out to 1200 blocks (greys the horizon, hides far terrain; clear days keep
+     the sky's own haze only); cloud cover climbs past 1 (0.45 + 0.7 x rain), and past full cover the layer is
+     an unbroken grey blanket with the shapes billowing through.
 8. [ ] Grading: colour-grading LUT, optional film grain and vignette.
-9. [ ] Exit: side-by-side screenshots (vanilla / Helio) of the M3 scenes, at recorded coordinates.
+9. [ ] Handheld light (user, 2026-11-14): a light-emitting item held in either hand (torch, lantern, glowstone,
+   ...) lights its surroundings like the block would, from the player's hand, with shadows; other players and
+   mobs holding one too. Joins the light sampling as a moving light.
+10. [ ] Exit: side-by-side screenshots (vanilla / Helio) of the M3 scenes, at recorded coordinates.
 
 ### M7 — Performance pass
 

@@ -24,8 +24,8 @@ final class Sky {
 	static final float SUN_TOP = 2.9f, MOON_TOP = 0.23f;
 	/** Share of the moon's light the night sky scatters (its light on the ground stays): at 1 nights read like dusk. */
 	private static final float MOON_SKY = 0.1f;
-	/** Sun and moon light left in full rain (pathtrace.comp RAIN_LIGHT): about as dark as a clear night. */
-	static final float RAIN_LIGHT = 0.02f;
+	/** Sun and moon light left in full rain (pathtrace.comp RAIN_LIGHT): overcast, not night (2% read as night). */
+	static final float RAIN_LIGHT = 0.15f;
 	private static final int TRANSMITTANCE = 0, MULTI = 1, SKY_VIEW = 2, AMBIENT = 3;
 
 	private static long setLayout, layout, pipeline, linear;

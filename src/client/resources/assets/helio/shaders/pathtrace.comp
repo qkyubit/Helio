@@ -113,7 +113,7 @@ const float SKY = 2.0;          // gain on the sky's light (radiance and irradia
 const float STAR = 40.0;        // the brightest stars' radiance at their centre (magnitudes fall steeply from it)
 const float MILKY_WAY = 0.035;  // the Milky Way's glow at its brightest
 const float MOON_GLINT = 2.5;   // the moon's face as seen, over its light: a pale grey disc, not a second sun
-const float RAIN_LIGHT = 0.02;  // sun and moon light left in full rain (Sky.RAIN_LIGHT): about a clear night's
+const float RAIN_LIGHT = 0.15;  // sun and moon light left in full rain (Sky.RAIN_LIGHT; 2% read as night)
 const vec3 BLOCK_LIGHT = vec3(1.0, 0.68, 0.38) * 1.6;
 const float LIGHT = 8.0;        // intensity of an emission-15 block light
 const float EMISSIVE = 4.0;     // radiance of an emission-15 block's own surface, times its texture (M6 bloom keys off it)
@@ -594,6 +594,8 @@ float cloudDensity(vec3 w, bool detail) {
 	float shape = textureLod(cloudNoise, (w + vec3(cloudTime, 0.0, cloudTime * 0.25)) / CLOUD_SHAPE_TILE, 0.0).r;
 	float profile = smoothstep(0.0, 0.05, h) * smoothstep(1.0, 0.8, h); // a flat base; tops fade before the layer ends
 	float d = clamp((shape * profile - (1.0 - cover)) / max(cover, 0.05), 0.0, 1.0);
+	// Past full cover (rain): an unbroken grey layer, the shapes still billowing through it.
+	d = max(d, clamp((cloudCover - 1.0) / 0.15, 0.0, 1.0) * 0.6 * profile);
 	if (detail && d > 0.0) {
 		// The detail churns as it drifts; wispy (inverted) at the base, billowing higher up; it eats the thin edges.
 		float n = textureLod(cloudNoise, (w + vec3(cloudTime * 1.5, cloudTime * 0.25, cloudTime * 0.5)) / CLOUD_DETAIL_TILE, 0.0).g;
@@ -682,6 +684,8 @@ vec4 clouds(vec3 origin, vec3 dir, float tMax) {
 const float FOG_DENSITY = 0.0012;  // extinction per block at sea level on a clear day (0.0025 greyed the sky)
 const float FOG_HEIGHT = 80.0;     // blocks over which it thins by e
 const float FOG_FAR = 160.0;
+const float FOG_RAIN = 15.0;       // density in full rain, over a clear day's: about 170 blocks' visibility at sea level
+const float FOG_TAIL = 1200.0;     // blocks: rain's fog past FOG_FAR, integrated in one go (unshadowed)
 const int FOG_STEPS = 4;              // each a shadow ray: 6 cost 1.9 ms
 float fogSkyLight = 1.0; // vanilla's sky light where the primary ray ended (1 for the sky): the haze's sky fill
 
@@ -711,7 +715,7 @@ vec4 fog(vec3 origin, vec3 dir, float tMax) {
 	vec3 light = l.y > 0.0 ? (day ? sunRadiance(l.y) : moonRadiance(l.y)) : vec3(0.0);
 	vec3 ambient = skyIrradiance(vec3(0.0, 1.0, 0.0)) * fogSkyLight * fogSkyLight;
 	float phase = mix(henyeyGreenstein(dot(dir, l), 0.6), 0.0796, 0.3);
-	float density = FOG_DENSITY * mix(4.0, 1.0, pc.moonDir.w);
+	float density = FOG_DENSITY * mix(FOG_RAIN, 1.0, pc.moonDir.w);
 	vec3 radiance = vec3(0.0);
 	float transmittance = 1.0;
 	for (int i = 0; i < FOG_STEPS; i++, t += dt) {
@@ -725,6 +729,19 @@ vec4 fog(vec3 origin, vec3 dir, float tMax) {
 		}
 		float step = exp(-sigma * dt);
 		radiance += transmittance * inscatter * (1.0 - step);
+		transmittance *= step;
+	}
+	// Past FOG_FAR, rain's extra fog (not a clear day's: the sky has that haze already) in closed form: optical
+	// depth through the height falloff, lit by the sky and unshadowed sun or moon. It greys the horizon and hides
+	// far terrain.
+	float extra = density - FOG_DENSITY;
+	if (tMax > FOG_FAR && extra > 0.0) {
+		float len = min(tMax, FOG_TAIL) - FOG_FAR, h0 = max(origin.y + dir.y * FOG_FAR + anchorWorld.y - 63.0, 0.0);
+		float h1 = max(h0 + dir.y * len, 0.0);
+		float depth = abs(dir.y) < 1e-3 ? extra * exp(-h0 / FOG_HEIGHT) * len
+			: extra * FOG_HEIGHT / dir.y * (exp(-h0 / FOG_HEIGHT) - exp(-h1 / FOG_HEIGHT));
+		float step = exp(-max(depth, 0.0));
+		radiance += transmittance * (ambient + light * phase) * (1.0 - step);
 		transmittance *= step;
 	}
 	return vec4(radiance, transmittance);

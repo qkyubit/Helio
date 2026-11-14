@@ -516,10 +516,10 @@ public final class PathTracer {
 		return wetness;
 	}
 
-	/** Share of the sky the clouds cover: none with vanilla's clouds off, more as rain sets in. */
+	/** Share of the sky the clouds cover: none with vanilla's clouds off, overcast as rain sets in. */
 	private static float cloudCover(Minecraft mc) {
 		if (mc.options.getCloudStatus() == CloudStatus.OFF) return 0;
-		return 0.45f + 0.4f * (1 - rainBrightness);
+		return 0.45f + 0.7f * (1 - rainBrightness); // past 1 in full rain: an unbroken grey cover
 	}
 
 	/** After DLSS: its output, tonemapped, into the main colour (rr_resolve.comp). */
