@@ -911,6 +911,49 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
 
 Exit: meet targets per preset and no regressions vs M4 numbers.
 
+**M7 steps (planned 2026-11-14):**
+
+Targets (1440p, SPBR, FG off, the four M6 exit scenes): Balanced (RR Balanced, Path Traced) base >= 60 FPS
+everywhere; Performance (Hybrid, RR Performance) >= 90. Proposed by Claude; the user can change them.
+
+1. [x] Bench: `config/helio-bench.txt` (dev only, re-read every 120 frames) logs path trace / DLSS / scene
+   build GPU ms and FPS, and switches named effects off one at a time (specular, fog, clouds, block, bounce,
+   sun, caustics: pathtrace.comp's OFF_* bits in Frame.off). A script poses the save at each exit scene
+   and steps through them. Baseline and cost breakdown recorded here.
+   - Bench needs vanilla's "Reduce FPS when AFK" off (`inactivityFpsLimit`): it drops to 30 FPS a minute
+     after the last input, which the first run hit halfway through each scene.
+   - Baseline (2026-11-14; SPBR, 1440p, RR Balanced, Path Traced, FG off, vsync on, noon, clear). GPU ms;
+     the "off" columns are what the path trace saves with that effect switched off:
+
+     | Scene | FPS | path trace | DLSS | scene build | bounce | block | sun | fog | clouds | specular | caustics |
+     |---|---|---|---|---|---|---|---|---|---|---|---|
+     | Overworld | 63 | 9.73 | 4.50 | 0.35 | 3.0 | 1.7 | 1.25 | 1.0 | 0.9 | 0.9 | 0.4 |
+     | Torch cave | 83 | 5.46 | 4.49 | 0.36 | 1.4 | 1.75 | 0.1 | 0.5 | 0 | 0 | 0 |
+     | Water + glass | 60.5 | 10.26 | 4.42 | 0.38 | 3.0 | 1.0 | 1.2 | 0.9 | 0.7 | 0.55 | 0 |
+     | Nether | 74.5 | 6.74 | 4.55 | 0.41 | 2.9 | 2.8 | 0 | 0 | 0 | 1.75 | 0 |
+
+     Balanced already holds 60 everywhere, with no margin at water + glass. The bounce (indirect light with
+     the radiance cache) is the biggest share in every scene; block light next. DLSS RR is a fixed 4.5 ms.
+     The M5 water + glass figure (45 FPS) was another view.
+2. [x] Specular reflections: the biggest share in the water + glass scene (M5: ~2.5 ms). Levers as listed
+   above.
+   - What a reflection ray hits was shaded in full: sun and block-light shadow rays and a bounce ray (with the
+     cache past it). Under RR it now takes the radiance cache's light at the hit (direct and bounced both: no
+     rays), or where the cache has nothing yet, its direct light and the sky fill (`reflectedRadiance`). The
+     reference stays in full. Shadows seen in reflections soften to the cache's cells.
+   - Water, glass and ice reflections go through the same function. Path trace: overworld 9.73 -> 8.59 ms,
+     water + glass 10.26 -> 9.75, Nether 6.74 -> 5.12, cave unchanged; FPS 63 -> 66, 60.5 -> 62, 74.5 -> 83.5.
+     Specular now costs 0.3-0.45 ms where it was 0.55-1.75. Screenshots against the M6 exit shots: no visible
+     change. SPECULAR_CUTOFF stays 0.6.
+3. [ ] Volumetric fog: cheaper steps (half resolution or checkerboard, fewer shadow rays).
+4. [ ] Distance-scaled ray budget.
+5. [ ] Ray budgets per preset; half-res GI where RR hides it. Shader execution reordering:
+   VK_EXT_ray_tracing_invocation_reorder is exposed, but only for ray tracing pipelines (Helio traces with
+   ray queries in compute); worth it only if the breakdown shows divergence-bound shading.
+6. [ ] VRAM budget: cap scene memory, shrink the RT distance near it; RAM budget.
+7. [ ] CPU: mesh -> BLAS input off the render thread; fewer FFM calls per frame.
+8. [ ] Exit: targets met, no regressions against step 1's baseline.
+
 ### M8 — Optimisation-mod compatibility
 
 Test one mod at a time against the M3 scenes, then together. Start here,

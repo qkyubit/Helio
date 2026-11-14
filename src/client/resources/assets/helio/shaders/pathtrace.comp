@@ -80,7 +80,11 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	float fadeEnd;      // blocks: vanilla's render distance, where its terrain has faded into the sky
 	float nightFloor;   // share of lightFloor left outdoors at night (HelioConfig.nightBrightness)
 	float wetness;      // how wet the open air leaves things: rain where the camera is, drying after (PathTracer)
+	uint off;           // effects switched off, OFF_* bits: M7's cost breakdown (PathTracer.benchOff), 0 normally
 };
+// M7 bench: effects the cost breakdown can switch off one at a time (config/helio-bench.txt).
+const uint OFF_SPECULAR = 1u, OFF_FOG = 2u, OFF_CLOUDS = 4u, OFF_BLOCK = 8u, OFF_BOUNCE = 16u, OFF_SUN = 32u, OFF_CAUSTICS = 64u;
+uint off;
 // Traced pixels' log2 luminance, in sixteenths, and how many (read back by PathTracer a few frames later).
 // And the light's colour: red and blue over luminance of the light reaching surfaces (radiance over albedo), in
 // 256ths, for Auto Warmth.
@@ -310,6 +314,7 @@ vec3 waveNormal(vec3 pos) {
 // Caustics: light along l crossing the water's surface at s, refracted by the waves, lands depth blocks below
 // spread or bunched; its brightness there is the inverse of the area a patch of surface lands on.
 float caustics(vec3 s, vec3 l, float depth) {
+	if ((off & OFF_CAUSTICS) != 0u) return 1.0;
 	if (depth < 0.2) return 1.0;
 	const float e = 0.2;
 	vec2 land[3];
@@ -628,7 +633,7 @@ float henyeyGreenstein(float c, float g) {
 // What the clouds add along a ray from scene position origin, up to tMax: radiance, and the transmittance that
 // scales what's behind them.
 vec4 clouds(vec3 origin, vec3 dir, float tMax) {
-	if (cloudCover <= 0.0 || pc.skyColor.w == 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+	if (cloudCover <= 0.0 || pc.skyColor.w == 0.0 || (off & OFF_CLOUDS) != 0u) return vec4(0.0, 0.0, 0.0, 1.0);
 	vec3 o = origin + anchorWorld;
 	float top = cloudBottom + CLOUD_THICKNESS, t0, t1;
 	if (abs(dir.y) < 1e-4) {
@@ -711,7 +716,7 @@ vec4 waterShafts(vec3 origin, vec3 dir, float tMax) {
 }
 
 vec4 fog(vec3 origin, vec3 dir, float tMax) {
-	if (pc.skyColor.w == 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+	if (pc.skyColor.w == 0.0 || (off & OFF_FOG) != 0u) return vec4(0.0, 0.0, 0.0, 1.0);
 	if (pc.fogColor.w != 0.0) return waterShafts(origin, dir, tMax);
 	float t1 = min(tMax, FOG_FAR), dt = t1 / float(FOG_STEPS), t = dt * rand();
 	bool day = pc.sunDir.y > 0.0;
@@ -779,7 +784,7 @@ vec3 heldLightUnshadowed(vec3 pos, vec3 n) {
 // contribution, then a single shadow ray to a point inside its block (stopping where the ray enters that
 // block, which would otherwise hide its own light; for a held light, short of the hand holding it).
 vec3 blockLight(vec3 pos, vec3 n, vec3 shading) {
-	if (pc.lights == uvec2(0)) return vec3(0.0);
+	if (pc.lights == uvec2(0) || (off & OFF_BLOCK) != 0u) return vec3(0.0);
 	LightTable table = LightTable(pc.lights);
 	LightArray lights = LightArray(table.lights);
 	ivec3 base = ivec3(floor(pos / 16.0));
@@ -911,7 +916,7 @@ vec3 directLight(Hit h, vec3 pos) {
 			nl *= -h.transmission;
 			side = -side;
 		}
-		if (nl > 0.0) direct = nl * shadowTransmittance(pos + side * 0.002, l, 512.0) * (day ? sunRadiance(l.y) : moonRadiance(l.y)) * cloudShadow(pos, l);
+		if (nl > 0.0) direct = nl * ((off & OFF_SUN) != 0u ? vec3(1.0) : shadowTransmittance(pos + side * 0.002, l, 512.0)) * (day ? sunRadiance(l.y) : moonRadiance(l.y)) * cloudShadow(pos, l);
 	}
 	// Vanilla's light level says whether any block light reaches here: skip sampling (and its shadow ray) if not.
 	// Hybrid lighting takes vanilla's level as the light itself, raster-style.
@@ -1006,6 +1011,7 @@ vec3 bounceIrradiance(Hit h, vec3 pos) {
 // Light arriving at a surface by one bounce, with the cache past it. A feeding pixel follows the path
 // CACHE_PATH bounces and adds the light that reached each surface (its direct light included) to its cell.
 vec3 cachedBounce(Hit h, vec3 pos, vec3 direct) {
+	if ((off & OFF_BOUNCE) != 0u) return vec3(0.0);
 	bool feed = feeding;
 	feeding = false;
 	int steps = feed ? CACHE_PATH : 1, last = 0;
@@ -1209,6 +1215,18 @@ void throughWater(float d, inout vec3 result, inout vec3 weight) {
 
 float reflectionDistance; // set by reflectionSeen(): how far its ray went (SKY_DISTANCE: nothing hit)
 
+// Light leaving a surface a reflection ray hit (M7 step 2), under RR: the radiance cache's light there (direct and bounced
+// both, so no shadow or bounce rays), or where it has none yet, its direct light and the sky fill. ponytail:
+// shadows seen in reflections soften to the cache's cells (1/4 block near the camera, coarser far off).
+vec3 reflectedRadiance(Hit h, vec3 pos) {
+	if (!cacheOn) return surfaceRadiance(h, pos); // the reference (and no RR): in full
+	vec3 ambient = vec3(lightFloor * mix(caveFloor, mix(nightFloor, 1.0, pc.sunDir.w), h.light.y)) * h.ao;
+	vec3 e;
+	if (!cacheLookup(pos, h.normal, e))
+		e = directLight(h, pos) + skyIrradiance(h.shading) * h.light.y * h.light.y * SKY_FILL * h.ao;
+	return h.albedo * (EMISSIVE * h.emission + e + ambient);
+}
+
 // What a reflection ray from origin along r sees, or miss if nothing. Stained glass, ice and nether portals show,
 // over what lies behind them; water doesn't (cutoutHit).
 vec3 reflectionSeen(vec3 origin, vec3 r, vec3 miss) {
@@ -1224,14 +1242,14 @@ vec3 reflectionSeen(vec3 origin, vec3 r, vec3 miss) {
 	float t = rayQueryGetIntersectionTEXT(rq, true);
 	reflectionDistance = t;
 	Hit h = shade(rq, r);
-	vec3 c = surfaceRadiance(h, origin + r * t);
+	vec3 c = reflectedRadiance(h, origin + r * t);
 	if (h.kind != KIND_TRANSLUCENT) return c;
 	// ponytail: one translucent layer; a second one behind it is skipped.
 	rayQueryEXT bq;
 	reflectionRay = true;
 	TRACE(bq, origin + r * (t + 0.002), r, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsNoneEXT)
 	reflectionRay = false;
-	vec3 behind = HIT(bq) ? surfaceRadiance(shade(bq, r), origin + r * (t + 0.002 + rayQueryGetIntersectionTEXT(bq, true))) : miss;
+	vec3 behind = HIT(bq) ? reflectedRadiance(shade(bq, r), origin + r * (t + 0.002 + rayQueryGetIntersectionTEXT(bq, true))) : miss;
 	return mix(behind, c, h.opacity);
 }
 
@@ -1246,6 +1264,7 @@ vec3 ggxNormal(vec3 n, float alpha) {
 // Light a polished surface at pos reflects back along dir: a mirror ray, spread by roughness when stochastic.
 // n: the geometric normal (offsets, what's above the surface); shading: the normal-mapped one the lobe is around.
 vec3 specularRadiance(vec3 pos, vec3 n, vec3 shading, vec3 dir, float roughness) {
+	if ((off & OFF_SPECULAR) != 0u) return vec3(0.0);
 	vec3 r = reflect(dir, pc.stochastic != 0.0 ? ggxNormal(shading, roughness * roughness) : shading);
 	if (dot(r, n) <= 0.0) r = reflect(r, n); // below the real face: mirror back above it
 	return reflectionSeen(pos + n * 0.002, r, skyRadiance(r));
@@ -1560,6 +1579,7 @@ void main() {
 	caveFloor = frame.caveFloor;
 	nightFloor = frame.nightFloor;
 	wetness = frame.wetness;
+	off = frame.off;
 	normalStrength = frame.normalStrength;
 	hybrid = frame.hybrid != 0u;
 	cacheOn = frame.cache != uvec2(0u);

@@ -94,6 +94,30 @@ public final class PathTracer {
 	private static final Matrix4f lastViewProj = new Matrix4f();
 	private static boolean lastUpscaled, lastRr;
 	private static int jitterIndex, timedFrames;
+	/**
+	 * M7 bench (dev only): while config/helio-bench.txt exists, timings are logged every 120 frames and the
+	 * effects it names (any of {@link #OFF_NAMES}, space- or comma-separated) are switched off, for the cost
+	 * breakdown. Re-read every 120 frames, so a script can step through them in one session. Bits as
+	 * pathtrace.comp's OFF_*.
+	 */
+	private static final String[] OFF_NAMES = {"specular", "fog", "clouds", "block", "bounce", "sun", "caustics"};
+	private static boolean bench;
+	private static int benchOff;
+
+	private static void readBench() {
+		java.nio.file.Path file = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("helio-bench.txt");
+		bench = java.nio.file.Files.exists(file);
+		int was = benchOff;
+		benchOff = 0;
+		if (!bench) return;
+		try {
+			for (String word : java.nio.file.Files.readString(file).split("[\\s,]+"))
+				for (int i = 0; i < OFF_NAMES.length; i++) if (OFF_NAMES[i].equalsIgnoreCase(word)) benchOff |= 1 << i;
+		} catch (IOException e) {
+			Helio.LOG.warn("Couldn't read {}", file, e);
+		}
+		if (benchOff != was) Helio.LOG.info("Bench: effects off now {}", benchOff);
+	}
 	/** Auto exposure (log2 of the radiance scale before the tonemap), and when it last adapted. */
 	private static float autoEv;
 	private static long lastExposureNanos;
@@ -363,7 +387,7 @@ public final class PathTracer {
 				.putFloat(132, cloudTime).putFloat(136, cloudBottom).putFloat(140, cloudCover(mc))
 				.putFloat(144, mc.options.getEffectiveRenderDistance() * 16)
 				.putFloat(148, HelioConfig.current.nightBrightness / 100f)
-				.putFloat(152, updateWetness(mc));
+				.putFloat(152, updateWetness(mc)).putInt(156, benchOff);
 			lastViewProj.set(viewProj);
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			Sky.update(cmd, sun, moon, hasSky ? rainBrightness : 1, moonPhase, s);
@@ -433,6 +457,10 @@ public final class PathTracer {
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			vkCmdCopyBuffer(cmd, meters.buffer(), frame.buffer(),
 				VkBufferCopy.calloc(1, s).srcOffset(meters.offset() + slot * 16L).dstOffset(frame.offset() + METER).size(16));
+			if ((timedFrames + 1) % 120 == 0) readBench();
+			if (bench && (timedFrames + 1) % 120 == 0) Helio.LOG.info("Bench: off {}, path trace {}, DLSS {}, scene {}, fps {}", benchOff,
+				String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE)), String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS)),
+				String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.SCENE_BUILD)), mc.getFps());
 			if (++timedFrames % 600 == 0) Helio.LOG.info("GPU ms: path trace {}, DLSS {}", String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE)),
 				String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS)));
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
