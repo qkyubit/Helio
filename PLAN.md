@@ -879,7 +879,15 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      hand and item holding it, so the holder's own body still casts a shadow.
    - Vanilla's light levels don't know of them: sampling also runs where vanilla's block light is 0 but a
      held light is within 15 blocks. Hybrid lighting adds them unshadowed.
-10. [ ] Exit: side-by-side screenshots (vanilla / Helio) of the M3 scenes, at recorded coordinates.
+10. [x] Exit: side-by-side screenshots (vanilla / Helio) of the M3 scenes, at recorded coordinates.
+   - Scenes (save "New World"; feet position, yaw / pitch; noon, clear; SPBR, 1440p Balanced + RR):
+     - Daytime overworld: overworld 69.5 69 -202.5, -101 / 5 (east over the lake, from the glass platform).
+     - Torch cave: overworld 62.5 31 -195.5, 180 / 15 (torches at 59 31 -198, 66 32 -199, 62 32 -202).
+     - Water + glass: overworld 69.5 69 -202.5, 180 / 25 (glass platform, beacon, lake).
+     - Nether: the_nether 30.5 78 -20.5, -90 / 30 (fire-lit floor east of the portal at 13 77 -30; the
+       lava pools at that height are west of it, x -31..0, z -3..23).
+   - Taken by relaunching with rayTracing off, then on (config edit), from a posed save.
+   - User-checked (2026-11-14). M6 done.
 
 ### M7 — Performance pass
 
