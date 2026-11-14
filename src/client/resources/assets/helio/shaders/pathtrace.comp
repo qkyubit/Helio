@@ -598,6 +598,43 @@ vec4 clouds(vec3 origin, vec3 dir, float tMax) {
 	return vec4(radiance * fade, mix(1.0, transmittance, fade));
 }
 
+// Volumetric fog (M6 step 5): a thin haze, densest at sea level and thinning upwards, thicker in rain, lit by
+// the sun or moon where it reaches (a shadow ray per step: shafts through leaves, cave mouths and cloud gaps)
+// and by the sky as much as the ray's end sees it. FOG_STEPS jittered steps over the first FOG_FAR blocks;
+// RR smooths what one frame leaves noisy. Not underwater, and not in the Nether or End (no sun to make shafts).
+const float FOG_DENSITY = 0.0012;  // extinction per block at sea level on a clear day (0.0025 greyed the sky)
+const float FOG_HEIGHT = 80.0;     // blocks over which it thins by e
+const float FOG_FAR = 160.0;
+const int FOG_STEPS = 4;              // each a shadow ray: 6 cost 1.9 ms
+float fogSkyLight = 1.0; // vanilla's sky light where the primary ray ended (1 for the sky): the haze's sky fill
+
+vec4 fog(vec3 origin, vec3 dir, float tMax) {
+	if (pc.skyColor.w == 0.0 || pc.fogColor.w != 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+	float t1 = min(tMax, FOG_FAR), dt = t1 / float(FOG_STEPS), t = dt * rand();
+	bool day = pc.sunDir.y > 0.0;
+	vec3 l = day ? pc.sunDir.xyz : pc.moonDir.xyz;
+	vec3 light = l.y > 0.0 ? (day ? sunRadiance(l.y) : moonRadiance(l.y)) : vec3(0.0);
+	vec3 ambient = skyIrradiance(vec3(0.0, 1.0, 0.0)) * fogSkyLight * fogSkyLight;
+	float phase = mix(henyeyGreenstein(dot(dir, l), 0.6), 0.0796, 0.3);
+	float density = FOG_DENSITY * mix(4.0, 1.0, pc.moonDir.w);
+	vec3 radiance = vec3(0.0);
+	float transmittance = 1.0;
+	for (int i = 0; i < FOG_STEPS; i++, t += dt) {
+		vec3 x = origin + dir * t;
+		float sigma = density * exp(-max(x.y + anchorWorld.y - 63.0, 0.0) / FOG_HEIGHT);
+		vec3 inscatter = ambient;
+		if (l.y > 0.0) {
+			rayQueryEXT rq;
+			TRACE(rq, x, l, 512.0, MASK_OPAQUE_SCENE, gl_RayFlagsTerminateOnFirstHitEXT)
+			if (!HIT(rq)) inscatter += light * phase * cloudShadow(x, l);
+		}
+		float step = exp(-sigma * dt);
+		radiance += transmittance * inscatter * (1.0 - step);
+		transmittance *= step;
+	}
+	return vec4(radiance, transmittance);
+}
+
 // Block lights by resampled importance sampling: CANDIDATES lights drawn from the 27 sections around pos
 // (a section in proportion to its light count over its squared distance, then a light in it uniformly), one
 // kept in proportion to its unshadowed contribution, then a single shadow ray to a point inside its block
@@ -1054,6 +1091,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 	float t = rayQueryGetIntersectionTEXT(rq, true);
 	vec3 pos = camera + dir * t;
 	Hit h = shade(rq, dir);
+	fogSkyLight = h.light.y;
 	if (h.kind == KIND_TRANSLUCENT) {
 		// Vanilla still draws translucent sections past the RT distance (Scene.tracesTranslucent): look through.
 		ivec2 section = ivec2(floor((pos.xz - h.normal.xz * 0.01) / 16.0));
@@ -1236,8 +1274,9 @@ vec3 skyThrough(vec2 pixel, vec2 size) {
 	vec2 ndc = pixel / size * 2.0 - 1.0;
 	vec4 near = pc.invViewProj * vec4(ndc, 1.0, 1.0), mid = pc.invViewProj * vec4(ndc, 0.5, 1.0);
 	vec3 dir = normalize(mid.xyz / mid.w - near.xyz / near.w);
-	vec4 cloud = clouds(pc.cameraInScene.xyz + near.xyz / near.w, dir, 1e9);
-	vec3 c = skyRadiance(dir) * cloud.a + cloud.rgb;
+	vec3 eye = pc.cameraInScene.xyz + near.xyz / near.w;
+	vec4 cloud = clouds(eye, dir, 1e9), haze = fog(eye, dir, 1e9);
+	vec3 c = (skyRadiance(dir) * cloud.a + cloud.rgb) * haze.a + haze.rgb;
 	float l = luminance(c);
 	return l > SKY_SAMPLE ? c * (SKY_SAMPLE / l) : c;
 }
@@ -1321,9 +1360,10 @@ void main() {
 		feeding = pcg(gl_WorkGroupID.x + pcg(gl_WorkGroupID.y + pcg(pc.seed ^ 0xA511E9B3u))) % CACHE_FEED == 0u;
 	}
 	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size), uvec2(p));
-	if (current.a > 0.0) { // clouds between the camera and what it hit (flying above or through them)
-		vec4 cloud = clouds(pc.cameraInScene.xyz, normalize(guidePos), length(guidePos));
-		current.rgb = current.rgb * cloud.a + cloud.rgb;
+	if (current.a > 0.0) { // clouds (flying above or through them) and haze between the camera and what it hit
+		vec3 dir = normalize(guidePos);
+		vec4 cloud = clouds(pc.cameraInScene.xyz, dir, length(guidePos)), haze = fog(pc.cameraInScene.xyz, dir, length(guidePos));
+		current.rgb = (current.rgb * cloud.a + cloud.rgb) * haze.a + haze.rgb;
 	}
 	if (frame.denoise != 0u) {
 		meter(frame, p, current.rgb, current.a > 0.0);

@@ -810,6 +810,11 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      noise of no clouds at that spot (about 8.7 vs 8.2-9.4 ms).
 5. [ ] Volumetric fog and god rays: sun shafts through trees and cave mouths, from one shadow ray per step
    of a short march; underwater fog the same way.
+   - Done in code (air only): `pathtrace.comp` `fog()`: haze 0.0012 per block at sea level (0.0025 greyed the
+     sky), thinning by e every 80 blocks up, 4x in rain; 4 jittered steps over the first 160 blocks, each a
+     shadow ray to the sun or moon (cutout-tested, so leaves cut shafts) times `cloudShadow`, HG 0.6 phase, sky
+     fill by the primary hit's sky light. Over traced hits and sky pixels, after the clouds. Shafts show through
+     spruce next to the sun. Cost about 1 ms (6 steps: 1.9 ms). Underwater fog left for step 6 (water).
 6. [ ] Water: waves (normal from a procedural height or the pack's water normal map), caustics on what's
    under it, underwater look.
 7. [ ] Weather: rain wets surfaces (darker, smoother, by porosity) and fills puddles on flat ground.
@@ -829,6 +834,8 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
   scene with SPBR (11.7 -> 14.1 ms). Levers: a lower `SPECULAR_CUTOFF` (0.6), rough
   reflections from the radiance cache instead of a ray, reflection rays every other
   frame or at half resolution where RR hides it.
+- Volumetric fog (M6 step 5) costs about 1 ms: 4 shadow rays per pixel. Levers: half-resolution or
+  checkerboarded fog, fewer steps in open air, reusing the sun shadow of the primary hit for the last step.
 - Distance-scaled ray budget: fewer rays for far terrain (e.g. bounce, block light
   and glass/water secondary rays skipped or traced every other frame past a
   distance, with the radiance cache standing in), since far pixels are small and
@@ -864,6 +871,11 @@ Exit: compat table in README; crashes fixed or mod marked incompatible.
 
 - Modrinth page, Prism-friendly install (drop jar + Fabric API, done).
 - First-run wizard: pick preset, auto-download DLSS, show self-check result.
+- Advanced settings screen (user request, 2026-11-14): fine-tune anything a user may want, with today's values
+  as the defaults and a reset per value and for all: sky gain, sun / moon / star brightness, cloud cover,
+  thickness, wind and density, fog density, bloom, exposure key and range, water absorption and tint, foliage
+  transmission, specular cutoff, normal map strength, rain darkness, and the like. The shader constants behind
+  them move into the frame data so they change live.
 - Recommended JVM args / Prism settings documented.
 - CI build on tag.
 
