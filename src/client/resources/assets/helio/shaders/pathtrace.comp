@@ -491,31 +491,38 @@ vec3 skyIrradiance(vec3 n) {
 
 // Volumetric clouds (M6 step 4): a layer from vanilla's cloud height up CLOUD_THICKNESS blocks, shaped by the
 // noise volume (cloud_noise.comp: Perlin-Worley shapes, Worley detail on their edges, a low-frequency weather
-// pattern for where they gather), drifting like vanilla's. Lit by the sun or moon through a short march towards
-// it (Beer's law, a forward and a back lobe, a softer second octave for light scattered more than once) and the
-// sky's light.
+// pattern for where they gather), drifting with the wind while their edges churn. Cumulus-like: flat bases,
+// towers narrowing upward, wispy undersides and billowing tops. Lit by the sun or moon through a march towards
+// it (Beer's law with the powder darkening on edges facing it, a forward and a back lobe, two softer octaves for
+// light scattered more than once) and the sky's light, dimmer towards the base.
 float cloudTime, cloudBottom, cloudCover; // Frame
 vec3 anchorWorld;                          // the scene anchor's world position (Frame.anchor)
-const float CLOUD_THICKNESS = 90.0;
-const float CLOUD_EXTINCTION = 0.06;       // per block, at full density
+const float CLOUD_THICKNESS = 250.0;
+const float CLOUD_EXTINCTION = 0.05;       // per block, at full density
 const float CLOUD_FAR = 6000.0;            // blocks: past this the layer isn't marched
 // Few steps, jittered per pixel and frame: RR smooths what one frame's march leaves noisy (48 steps and 4
 // light steps cost 5 ms at 1440p Balanced).
-const int CLOUD_STEPS = 20, CLOUD_LIGHT_STEPS = 3;
-const float CLOUD_LIGHT_STEP = 16.0;
+const int CLOUD_STEPS = 24, CLOUD_LIGHT_STEPS = 4;
+const float CLOUD_LIGHT_STEP = 12.0;       // the first; each next one twice as long (12, 24, 48, 96 blocks)
 const float CLOUD_DETAIL_FAR = 2000.0;     // blocks: past this the edge detail is too small to see
-// Noise scales, blocks per tile: each divides the next, so the wind's wrap (Frame.cloudTime) is seamless.
+// Noise scales, blocks per tile: each divides the next, so the wind's wrap (Frame.cloudTime, every weather tile)
+// is seamless for every drift below.
 const float CLOUD_DETAIL_TILE = 250.0, CLOUD_SHAPE_TILE = 1500.0, CLOUD_WEATHER_TILE = 12000.0;
 
 float cloudDensity(vec3 w, bool detail) {
 	float h = (w.y - cloudBottom) / CLOUD_THICKNESS;
 	if (h <= 0.0 || h >= 1.0) return 0.0;
-	vec3 q = w + vec3(cloudTime, 0.0, 0.0);
-	float weather = textureLod(cloudNoise, vec3(q.x, 0.0, q.z) / CLOUD_WEATHER_TILE, 0.0).r;
-	float cover = clamp(cloudCover + (weather - 0.5) * 0.6, 0.0, 1.0);
-	float profile = smoothstep(0.0, 0.12, h) * smoothstep(1.0, 0.35, h); // flat-ish bottoms, wispy tops
-	float d = clamp((textureLod(cloudNoise, q / CLOUD_SHAPE_TILE, 0.0).r * profile - (1.0 - cover)) / max(cover, 0.05), 0.0, 1.0);
-	if (detail && d > 0.0) d = clamp(d - textureLod(cloudNoise, q / CLOUD_DETAIL_TILE, 0.0).g * 0.3 * (1.0 - d), 0.0, 1.0);
+	float weather = textureLod(cloudNoise, vec3(w.x + cloudTime, 0.0, w.z) / CLOUD_WEATHER_TILE, 0.0).r;
+	float cover = clamp(cloudCover + (weather - 0.5) * 0.6, 0.0, 1.0) * mix(1.0, 0.45, h); // towers narrow upward
+	float shape = textureLod(cloudNoise, (w + vec3(cloudTime, 0.0, cloudTime * 0.25)) / CLOUD_SHAPE_TILE, 0.0).r;
+	float profile = smoothstep(0.0, 0.05, h) * smoothstep(1.0, 0.8, h); // a flat base; tops fade before the layer ends
+	float d = clamp((shape * profile - (1.0 - cover)) / max(cover, 0.05), 0.0, 1.0);
+	if (detail && d > 0.0) {
+		// The detail churns as it drifts; wispy (inverted) at the base, billowing higher up; it eats the thin edges.
+		float n = textureLod(cloudNoise, (w + vec3(cloudTime * 1.5, cloudTime * 0.25, cloudTime * 0.5)) / CLOUD_DETAIL_TILE, 0.0).g;
+		n = mix(1.0 - n, n, clamp(h * 6.0, 0.0, 1.0)) * 0.35;
+		d = clamp((d - n) / (1.0 - n), 0.0, 1.0);
+	}
 	return d;
 }
 
@@ -556,7 +563,13 @@ vec4 clouds(vec3 origin, vec3 dir, float tMax) {
 	vec3 l = day ? pc.sunDir.xyz : pc.moonDir.xyz;
 	vec3 light = l.y > 0.0 ? (day ? sunRadiance(l.y) : moonRadiance(l.y)) : vec3(0.0);
 	vec3 ambient = skyIrradiance(vec3(0.0, 1.0, 0.0));
-	float c = dot(dir, l), phase = mix(henyeyGreenstein(c, 0.7), henyeyGreenstein(c, -0.2), 0.4);
+	float c = dot(dir, l);
+	float phase[3];
+	for (int o = 0; o < 3; o++) { // softer for each octave
+		float g = pow(0.5, float(o));
+		phase[o] = mix(henyeyGreenstein(c, 0.7 * g), henyeyGreenstein(c, -0.2 * g), 0.4);
+	}
+	float powderShare = 0.6 * (0.5 - 0.5 * c); // none looking towards the light: its edges glow there
 	float dt = (t1 - t0) / float(CLOUD_STEPS), t = t0 + dt * rand();
 	vec3 radiance = vec3(0.0);
 	float transmittance = 1.0;
@@ -564,11 +577,18 @@ vec4 clouds(vec3 origin, vec3 dir, float tMax) {
 		vec3 p = o + dir * t;
 		float d = cloudDensity(p, t < CLOUD_DETAIL_FAR);
 		if (d <= 0.0) continue;
-		float depth = 0.0; // towards the light
-		for (int k = 1; k <= CLOUD_LIGHT_STEPS; k++) depth += cloudDensity(p + l * (float(k) * CLOUD_LIGHT_STEP), false) * CLOUD_LIGHT_STEP;
+		float depth = 0.0, along = 0.0; // towards the light
+		for (int k = 0; k < CLOUD_LIGHT_STEPS; k++) {
+			float len = CLOUD_LIGHT_STEP * float(1 << k);
+			depth += cloudDensity(p + l * (along + len * 0.5), false) * len;
+			along += len;
+		}
 		depth *= CLOUD_EXTINCTION;
 		float h = (p.y - cloudBottom) / CLOUD_THICKNESS;
-		vec3 scattered = light * (exp(-depth) * phase + 0.5 * exp(-depth * 0.25) * 0.0796) + ambient * mix(0.5, 1.0, h);
+		vec3 direct = vec3(0.0);
+		for (int o = 0; o < 3; o++) direct += pow(0.5, float(o)) * exp(-depth * pow(0.4, float(o))) * phase[o];
+		direct *= mix(1.0, 2.0 * (1.0 - exp(-2.0 * depth)), powderShare);
+		vec3 scattered = light * direct + ambient * mix(0.35, 1.0, h);
 		float step = exp(-d * CLOUD_EXTINCTION * dt);
 		radiance += transmittance * scattered * (1.0 - step);
 		transmittance *= step;

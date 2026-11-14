@@ -797,11 +797,17 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      2000 blocks), 20 jittered steps with 3 towards the sun or moon (two HG lobes, a softer second octave, sky
      ambient), fading into the sky past ~3000 blocks. Over sky pixels, in front of traced hits the camera ray
      reaches through the layer (flying above them), and in reflections that escape. Sun and moon light get
-     `cloudShadow` (two samples through the layer). Drift 0.03 blocks a tick like vanilla's; cover 45%, up to
+     `cloudShadow` (two samples through the layer). Drift like vanilla's at first (see below); cover 45%, up to
      85% in rain; vanilla's Clouds Off turns them off; `CloudRendererMixin` skips vanilla's clouds while Helio
      draws the sky. Cost about 0.7 ms at the snowy lake (9.6 -> 10.3 ms): 48 steps were 0.5 ms more for little.
    - Shaders.compile now hands shaderc the source from the heap: the bigger shaders overflowed LWJGL's
      MemoryStack (the path tracer failed to start).
+   - User tweaks: wind 0.1 blocks a tick (vanilla's 0.03 looked still on clouds this size), the detail drifting
+     faster and rising so edges churn; layer 250 blocks thick; cumulus profile (flat base, cover shrinking to 45%
+     at the top so towers narrow, tops fading out); detail inverted at the base (wisps) and billowing above,
+     eroding by remap; light march 12/24/48/96 blocks; three scattering octaves; powder darkening on edges
+     facing the light (none when looking towards it); ambient 35% at the base. 24 steps. Cost still within
+     noise of no clouds at that spot (about 8.7 vs 8.2-9.4 ms).
 5. [ ] Volumetric fog and god rays: sun shafts through trees and cave mouths, from one shadow ray per step
    of a short march; underwater fog the same way.
 6. [ ] Water: waves (normal from a procedural height or the pack's water normal map), caustics on what's

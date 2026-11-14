@@ -115,8 +115,9 @@ public final class PathTracer {
 	/** Start of the level render. */
 	public static void beginFrame(CameraRenderState camera, LevelRenderState level) {
 		SkyRenderState sky = level.skyRenderState;
-		// Clouds drift 0.03 blocks a tick along +x, as vanilla's; wrapped where the noise tiles (pathtrace.comp).
-		cloudTime = (float) (((level.gameTime % 400_000L) + level.worldPartialTicks) * 0.03);
+		// The wind: 0.1 blocks a tick along +x (vanilla's clouds go 0.03, too slow to see on clouds this big);
+		// wrapped every 12000 blocks, where all the cloud noise tiles (pathtrace.comp).
+		cloudTime = (float) (((level.gameTime % 120_000L) + level.worldPartialTicks) * 0.1);
 		cloudBottom = level.cloudHeight;
 		cameraPos = camera.pos;
 		viewRotation.set(camera.viewRotationMatrix);
