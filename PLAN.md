@@ -815,6 +815,11 @@ Test pack: SPBR (memory: rotrBLOCKS only when a test needs it).
      shadow ray to the sun or moon (cutout-tested, so leaves cut shafts) times `cloudShadow`, HG 0.6 phase, sky
      fill by the primary hit's sky light. Over traced hits and sky pixels, after the clouds. Shafts show through
      spruce next to the sun. Cost about 1 ms (6 steps: 1.9 ms). Underwater fog left for step 6 (water).
+   - Render distance edge (user): vanilla faded its last chunks into its pale fog colour, a bright rim against
+     Helio's below-horizon sky (dark navy). `FogRendererMixin` turns vanilla's distance and weather fog off
+     while Helio draws the sky (not in water, lava, powder snow, blindness, darkness); `edgeFade` in
+     pathtrace.comp fades vanilla's terrain into Helio's sky over the last 20% of the render distance; below
+     the horizon the sky continues the horizon's haze, darkening to 45% about 20 degrees down.
 6. [ ] Water: waves (normal from a procedural height or the pack's water normal map), caustics on what's
    under it, underwater look.
 7. [ ] Weather: rain wets surfaces (darker, smoother, by porosity) and fills puddles on flat ground.

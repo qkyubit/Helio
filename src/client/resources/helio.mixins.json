@@ -5,6 +5,7 @@
 	"client": [
 		"BlockModelLighterMixin",
 		"CloudRendererMixin",
+		"FogRendererMixin",
 		"FluidRendererMixin",
 		"GameRendererMixin",
 		"HudMixin",
