@@ -683,7 +683,7 @@ in the Radiance Test instance) plus its add-ons (emission, glowing ore, mirror).
      cubes barely helped (78.0M -> 75.9M) and was reverted.
    - Scene memory has no budget; a heavier pack or a longer RT distance can run out
      of VRAM. Moved to M7 (VRAM budget).
-8. [ ] Exit check: SPBR + one more LabPBR pack + one 3D pack; F3+T reload; performance
+8. [x] Exit check: SPBR + one more LabPBR pack + one 3D pack; F3+T reload; performance
    against M4 numbers.
    - rotrBLOCKS V88 [3D Foliage] 128x (Modrinth, 26.3): renders right; PBR atlases
      16384x8192 (1096 normal, 1043 specular maps) in 0.6 s. Same spot as SPBR: path
@@ -714,6 +714,16 @@ in the Radiance Test instance) plus its add-ons (emission, glowing ore, mirror).
      bit, and the any-hit skips water in mixed ones.
    - First-person body: reflection rays skip it too (`reflectionRay`); a shiny floor
      showed the head the camera sits in.
+   - F3+T (user, 2026-11-14): SPBR reloads clean; switching to rotrBLOCKS and back too.
+   - Performance (user, SPBR, 1440p Balanced + RR, FG off): overworld 72 (M4 72), torch
+     cave 100 (97), Nether 89 (97), water + glass 45 (95). The water + glass number was
+     taken at another view than M4's: at the saved spot, every build since M4 measured
+     back to back gives path trace 11.6-11.8 ms (M4) -> 14.1 (step 3) -> 14.0-15.1 ms now
+     (DLSS 4.4 ms on top). The ~2.5 ms is step 3's specular reflection rays (SPBR makes
+     many surfaces smooth enough for one); moved to M7. Scene coordinates were never
+     written down: record them (F3) at the next performance check.
+   - Packs checked: SPBR 22 (+ BlockEmission, GlowingOre), rotrBLOCKS V88 3D Foliage
+     (LabPBR, 3D), 3D Vanilla v1.20 (3D). M5 done.
 
 Fixed along the way: weather, clouds and translucent particles vanished in front of
 traced water and glass with classic transparency. The entity composite (traced colour
@@ -749,6 +759,10 @@ Exit: side-by-side screenshots you're proud of; HDR verified on your monitor.
   memory has no cap yet: 3D Vanilla took it from 0.95 to 6.2 GB (VRAM 13.2 / 14.9 GB,
   M5 step 7). Shrink the RT distance when the scene nears its share of VRAM.
 - CPU: mesh → BLAS input off the render thread; minimise FFM calls per frame.
+- Specular reflection rays (M5 step 3) cost ~2.5 ms path trace in the water + glass
+  scene with SPBR (11.7 -> 14.1 ms). Levers: a lower `SPECULAR_CUTOFF` (0.6), rough
+  reflections from the radiance cache instead of a ray, reflection rays every other
+  frame or at half resolution where RR hides it.
 - Distance-scaled ray budget: fewer rays for far terrain (e.g. bounce, block light
   and glass/water secondary rays skipped or traced every other frame past a
   distance, with the radiance cache standing in), since far pixels are small and
