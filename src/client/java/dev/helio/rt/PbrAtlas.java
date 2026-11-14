@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class PbrAtlas {
 	/** Flat normal (128, 128), AO 1, no height; ARGB as NativeImage takes it. */
-	private static final int FLAT_NORMAL = 0xFFFF8080;
+	private static final int FLAT_NORMAL = 0xFF8080FF;
 
 	public static GpuTexture normal, specular;
 	public static GpuTextureView normalView, specularView;

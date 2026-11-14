@@ -252,10 +252,10 @@ bool cutoutHit(rayQueryEXT rq) {
 	cameraRay = true; TRACE(rq, origin, dir, tMax, mask, gl_RayFlagsNoneEXT) cameraRay = false;
 #define HIT(rq) (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT)
 
-// The colour a translucent surface a shadow ray crosses lets through: stained glass and ice filter by their
-// colour, as strongly as the texture is opaque. Water nothing (ponytail: no absorption on the way down to the
-// seabed yet).
-vec3 candidateTint(rayQueryEXT rq) {
+// The colour a translucent surface a shadow ray crosses lets through: stained glass filters by its
+// colour, as strongly as the texture is opaque. Water and ice nothing here; the nearest water surface crossed is
+// kept in waterT / waterTint (its linear biome tint) for the absorption on the way up to it.
+vec3 candidateTint(rayQueryEXT rq, inout float waterT, inout vec3 waterTint) {
 	Instance inst = InstanceInfo(pc.instanceInfo).i[rayQueryGetIntersectionInstanceIdEXT(rq, false)];
 	Vertices vb = Vertices(inst.vertices);
 	uint stride = strideOf(inst.kind);
@@ -263,13 +263,24 @@ vec3 candidateTint(rayQueryEXT rq) {
 	vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, false);
 	vec2 uv = uvAt(vb, t.x, stride) * (1.0 - b.x - b.y) + uvAt(vb, t.y, stride) * b.x + uvAt(vb, t.z, stride) * b.y;
 	vec4 vertex = tintAt(vb, t.x, stride);
-	if (round((1.0 - vertex.a) * 255.0) == 1.0) return vec3(1.0); // Scene.WATER_MARK
+	float level = round((1.0 - vertex.a) * 255.0);
+	if (level == 1.0) { // Scene.WATER_MARK
+		float t = rayQueryGetIntersectionTEXT(rq, false);
+		if (t < waterT) {
+			waterT = t;
+			waterTint = pow(vertex.rgb, vec3(2.2));
+		}
+		return vec3(1.0);
+	}
+	if (level == 2.0) return vec3(1.0); // Scene.ICE_MARK: clear (its blue texture tinted the lakebed under every tile)
 	vec4 tex = texel(vb, inst.kind, t.x, uv);
 	return pow(max(pow(tex.rgb * vertex.rgb, vec3(2.2)), vec3(0.001)), vec3(tex.a));
 }
 
-// Light that gets from origin along dir: none past anything opaque, else coloured by the stained glass and
-// ice it crosses (a second, translucent-only trace, where every surface counts).
+// Light that gets from origin along dir: none past anything opaque, else coloured by the stained glass
+// it crosses (a second, translucent-only trace, where every surface counts), and absorbed by the water it rises
+// through. ponytail: water is taken to fill the way up to its nearest surface; light shining down into water from
+// above isn't absorbed.
 vec3 shadowTransmittance(vec3 origin, vec3 dir, float tMax) {
 	rayQueryEXT rq;
 	TRACE(rq, origin, dir, tMax, MASK_OPAQUE_SCENE, gl_RayFlagsTerminateOnFirstHitEXT)
@@ -277,7 +288,11 @@ vec3 shadowTransmittance(vec3 origin, vec3 dir, float tMax) {
 	vec3 tint = vec3(1.0);
 	rayQueryEXT tq;
 	rayQueryInitializeEXT(tq, scene, gl_RayFlagsNoneEXT, MASK_TRANSLUCENT, origin, 0.0, dir, tMax);
-	while (rayQueryProceedEXT(tq)) tint *= candidateTint(tq);
+	float waterT = tMax;
+	vec3 waterTint = vec3(1.0);
+	while (rayQueryProceedEXT(tq)) tint *= candidateTint(tq, waterT, waterTint);
+	// As throughWater(): per block, the tint to the power WATER_ABSORPTION.
+	if (dir.y > 0.0 && waterT < tMax) tint *= pow(max(waterTint, vec3(0.01)), vec3(WATER_ABSORPTION * waterT));
 	return tint;
 }
 

@@ -719,6 +719,13 @@ Fixed along the way: weather, clouds and translucent particles vanished in front
 traced water and glass with classic transparency. The entity composite (traced colour
 back wherever vanilla's depth lies behind the water) ran after the replayed classic
 translucents, which write no depth; it now runs between solid features and translucents.
+Also: with no PBR pack, lakebeds and leaves showed a block-by-block light/dark checker. `PbrAtlas.FLAT_NORMAL`
+(the normal map of sprites a pack doesn't cover) was in ABGR order where NativeImage.setPixel takes ARGB:
+every such texture got a normal lying flat along its U axis (x3 by Normal Map Strength) and AO 0.5, so faces
+whose textures vanilla rotates at random turned bright or dark per block. Found on the way: sun and block
+light reached lakebeds through water unabsorbed (shadow rays rising through water are now absorbed up to its
+nearest surface by the biome's water tint, as view rays are), and ice (`Scene.ICE_MARK`) no longer tints the
+light under it (vanilla's texture made it a strong blue filter).
 
 ### M6 — Visuals beyond ray tracing
 

@@ -194,10 +194,10 @@ public final class Scene {
 	/**
 	 * Water's vertices claim emission 1, which no translucent block has: the path tracer reads it as water.
 	 * Foliage does the same in the cutout layer (whose only real emission-1 block, the brewing stand, loses it),
-	 * and plain glass claims 2, so the tracer refracts through its clear parts. Polished metal and gem blocks
-	 * get levels past 15, which no block emits.
+	 * and plain glass claims 2, so the tracer refracts through its clear parts. Ice claims 2 in the translucent
+	 * layer: shadows pass it untinted. Polished metal and gem blocks get levels past 15, which no block emits.
 	 */
-	public static final int WATER_MARK = 1, FOLIAGE_MARK = 1, GLASS_MARK = 2, METAL_MARK = 32, GEM_MARK = 33;
+	public static final int WATER_MARK = 1, FOLIAGE_MARK = 1, GLASS_MARK = 2, ICE_MARK = 2, METAL_MARK = 32, GEM_MARK = 33;
 
 	/** Polished blocks, by registry name: copper until it weathers. */
 	private static final class Polished {
@@ -218,6 +218,7 @@ public final class Scene {
 	public static int mark(BlockState state) {
 		if (isFoliage(state)) return FOLIAGE_MARK;
 		if (isGlass(state)) return GLASS_MARK;
+		if (state.is(Blocks.ICE) || state.is(Blocks.FROSTED_ICE)) return ICE_MARK;
 		int emission = state.getLightEmission();
 		if (emission > 0) return emission;
 		return Polished.METAL.contains(state.getBlock()) ? METAL_MARK : Polished.GEM.contains(state.getBlock()) ? GEM_MARK : 0;
