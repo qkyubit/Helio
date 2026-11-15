@@ -688,14 +688,15 @@ vec4 clouds(vec3 origin, vec3 dir, float tMax) {
 
 // Volumetric fog (M6 step 5): a thin haze, densest at sea level and thinning upwards, thicker in rain, lit by
 // the sun or moon where it reaches (a shadow ray per step: shafts through leaves, cave mouths and cloud gaps)
-// and by the sky as much as the ray's end sees it. FOG_STEPS jittered steps over the first FOG_FAR blocks;
-// RR smooths what one frame leaves noisy. Not underwater, and not in the Nether or End (no sun to make shafts).
+// and by the sky as much as the ray's end sees it. FOG_STEPS jittered steps over the first FOG_FAR blocks, longer
+// with distance (boundaries at FOG_FAR (i / FOG_STEPS)^2: shafts near the eye are the ones that show); RR smooths
+// what one frame leaves noisy. Not underwater, and not in the Nether or End (no sun to make shafts).
 const float FOG_DENSITY = 0.0012;  // extinction per block at sea level on a clear day (0.0025 greyed the sky)
 const float FOG_HEIGHT = 80.0;     // blocks over which it thins by e
 const float FOG_FAR = 160.0;
 const float FOG_RAIN = 15.0;       // density in full rain, over a clear day's: about 170 blocks' visibility at sea level
 const float FOG_TAIL = 1200.0;     // blocks: rain's fog past FOG_FAR, integrated in one go (unshadowed)
-const int FOG_STEPS = 4;              // each a shadow ray: 6 cost 1.9 ms
+const int FOG_STEPS = 2;              // each a shadow ray: 6 cost 1.9 ms, 4 about 1 ms (M7 step 3: 2, spaced as above)
 float fogSkyLight = 1.0; // vanilla's sky light where the primary ray ended (1 for the sky): the haze's sky fill
 
 // Underwater, the haze is the water's own: light shafts from the surface (through its waves: caustics) over the
@@ -718,7 +719,7 @@ vec4 waterShafts(vec3 origin, vec3 dir, float tMax) {
 vec4 fog(vec3 origin, vec3 dir, float tMax) {
 	if (pc.skyColor.w == 0.0 || (off & OFF_FOG) != 0u) return vec4(0.0, 0.0, 0.0, 1.0);
 	if (pc.fogColor.w != 0.0) return waterShafts(origin, dir, tMax);
-	float t1 = min(tMax, FOG_FAR), dt = t1 / float(FOG_STEPS), t = dt * rand();
+	float t1 = min(tMax, FOG_FAR), jitter = rand();
 	bool day = pc.sunDir.y > 0.0;
 	vec3 l = day ? pc.sunDir.xyz : pc.moonDir.xyz;
 	vec3 light = l.y > 0.0 ? (day ? sunRadiance(l.y) : moonRadiance(l.y)) : vec3(0.0);
@@ -727,8 +728,10 @@ vec4 fog(vec3 origin, vec3 dir, float tMax) {
 	float density = FOG_DENSITY * mix(FOG_RAIN, 1.0, pc.moonDir.w);
 	vec3 radiance = vec3(0.0);
 	float transmittance = 1.0;
-	for (int i = 0; i < FOG_STEPS; i++, t += dt) {
-		vec3 x = origin + dir * t;
+	for (int i = 0; i < FOG_STEPS; i++) {
+		float a = float(i) / float(FOG_STEPS), b = float(i + 1) / float(FOG_STEPS);
+		float t0 = t1 * a * a, dt = t1 * b * b - t0;
+		vec3 x = origin + dir * (t0 + dt * jitter);
 		float sigma = density * exp(-max(x.y + anchorWorld.y - 63.0, 0.0) / FOG_HEIGHT);
 		vec3 inscatter = ambient;
 		if (l.y > 0.0) {

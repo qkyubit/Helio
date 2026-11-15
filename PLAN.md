@@ -945,7 +945,15 @@ everywhere; Performance (Hybrid, RR Performance) >= 90. Proposed by Claude; the 
      water + glass 10.26 -> 9.75, Nether 6.74 -> 5.12, cave unchanged; FPS 63 -> 66, 60.5 -> 62, 74.5 -> 83.5.
      Specular now costs 0.3-0.45 ms where it was 0.55-1.75. Screenshots against the M6 exit shots: no visible
      change. SPECULAR_CUTOFF stays 0.6.
-3. [ ] Volumetric fog: cheaper steps (half resolution or checkerboard, fewer shadow rays).
+3. [x] Volumetric fog: cheaper steps (half resolution or checkerboard, fewer shadow rays).
+   - FOG_STEPS 4 -> 2 (a shadow ray each), the steps' boundaries at FOG_FAR (i / N)^2 instead of evenly
+     spaced: the near step covers the first 40 blocks, where shafts show. Underwater shafts (waterShafts)
+     share FOG_STEPS: also 2, evenly spaced over 48 blocks.
+   - Fog's cost: 0.9-1.0 -> 0.45-0.6 ms (overworld noon and dawn). Overworld path trace 9.18 -> 8.79 ms
+     (same session; runs a day apart differ by ~0.5 ms with the clouds' drift). Dawn screenshot against 4
+     steps: the haze reads the same.
+   - Bench tooling lives in the scratchpad and was lost once to a reboot; recreated (nbt.py, pose.py,
+     bench.sh). Bench scenes gained "dawn": the overworld pose at day tick 500, facing the sunrise.
 4. [ ] Distance-scaled ray budget.
 5. [ ] Ray budgets per preset; half-res GI where RR hides it. Shader execution reordering:
    VK_EXT_ray_tracing_invocation_reorder is exposed, but only for ray tracing pipelines (Helio traces with
