@@ -981,7 +981,7 @@ everywhere; Performance (Hybrid, RR Performance) >= 90. Proposed by Claude; the 
      Nether unchanged (5.29 -> 5.28, 5.30 -> 5.39); readings move about 0.3 ms run to run, so a small gain in
      open scenes at best. Screenshots identical.
    - Left: the ray itself (~1 ms; half-resolution bounce in its own pass, step 5).
-5. [ ] Ray budgets per preset; half-res GI where RR hides it. Shader execution reordering:
+5. [x] Ray budgets per preset; half-res GI where RR hides it. Shader execution reordering:
    VK_EXT_ray_tracing_invocation_reorder is exposed, but only for ray tracing pipelines (Helio traces with
    ray queries in compute); worth it only if the breakdown shows divergence-bound shading.
    - Ray budget into the frame data (2026-11-15), set per preset and tunable in an early advanced settings
@@ -1000,10 +1000,28 @@ everywhere; Performance (Hybrid, RR Performance) >= 90. Proposed by Claude; the 
      Path trace with each budget under Balanced's other settings (overworld / water + glass / cave / Nether, ms):
      Balanced 8.41 / 9.48 / 5.36 / 5.37; Performance's 7.93 / 9.32 / 5.06 / 5.19; Ultra's 10.24 / 11.52 /
      7.10 / 6.39.
-   - Still to do here: half-resolution bounce in its own pass (the bounce ray's ~1 ms).
+   - Half-resolution bounce (2026-11-15): tried, removed. Under RR the main pass left out the bounce of each
+     pixel's opaque surface and wrote where it was; pathtrace.comp compiled again twice (`HELIO_BOUNCE_TRACE`,
+     `HELIO_BOUNCE_COMPOSITE`) traced one bounce per 2x2 quad and spread them back by distance, normal and plane.
+     - A sample shared over several pixels is noise RR keeps as detail. Seen, in turn: blurred bright blobs on
+       distant leaves (neighbours' samples taken where none matched), bright green squares on near leaves (light
+       through foliage), pink and orange specks on shallow water and bark (rare bounces onto the end portal or a
+       glowing bush; user-spotted). Fixed by tracing foliage inline, clamping each sample to 4x the others'
+       average, and tracing a pixel's own bounce where fewer than two samples matched.
+     - The fixes ate the gain. Before the last two: 0.15-0.5 ms path trace. After, back to back (off -> on;
+       shore / overworld / water + glass / cave / Nether): 9.63 -> 9.96, 8.64 -> 8.57, 9.68 -> 9.61,
+       5.37 -> 5.29, 5.42 -> 5.22 ms: within the ~0.3 ms run-to-run spread. Removed (code not committed).
+     - Bench scene added: "shore" (71.57 70.1 -193.19, yaw -20.46, pitch 17.12, tick 553000), the user's view
+       of the specks.
+   - Step 5 closes with the per-preset ray budget only.
 6. [ ] VRAM budget: cap scene memory, shrink the RT distance near it; RAM budget.
 7. [ ] CPU: mesh -> BLAS input off the render thread; fewer FFM calls per frame.
-8. [ ] Exit: targets met, no regressions against step 1's baseline.
+8. [ ] Frame generation troubleshooting (user, 2026-11-15: "frame gen still doesn't look right"; a recurring
+   issue, so it gets its own step at the end of M7). Start from what the user sees now, then go through the M4
+   fixes (pacing from the first image's readiness, `hud_keep.comp`, vignette skip) and the open pacer crash
+   (step 3: `PacedPresenter.prepare` in `vkCmdCopyImage`). Check generated frames by readback, as in M4, and
+   pacing with present timing at 2x / 3x / 4x.
+9. [ ] Exit: targets met, no regressions against step 1's baseline.
 
 ### M8 — Optimisation-mod compatibility
 
