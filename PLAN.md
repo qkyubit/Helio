@@ -954,7 +954,19 @@ everywhere; Performance (Hybrid, RR Performance) >= 90. Proposed by Claude; the 
      steps: the haze reads the same.
    - Bench tooling lives in the scratchpad and was lost once to a reboot; recreated (nbt.py, pose.py,
      bench.sh). Bench scenes gained "dawn": the overworld pose at day tick 500, facing the sunrise.
+   - Crashes (investigated 2026-11-15): every `libnvidia-gpucomp` crash log since 2026-11-14 (14 of them,
+     driver 620.70.06) was written with the JVM "at safepoint (shutting down)": the bench and measure
+     scripts killing the game, not play. Intermittent (none in 3 kills, 30 s after joining; about 1 in 3
+     bench kills). The game's own quit: 0 in 3. Bench word "quit" now calls `Minecraft.stop()` and bench.sh
+     quits that way, killing only after 60 s.
+   - One real crash mid-play (2026-11-14 17:10, 9 minutes in, frame generation on): the "Helio FG pacer"
+     thread in `vkCmdCopyImage` (`PacedPresenter.prepare`, staging -> swapchain image), in
+     `libnvidia-glcore`. Not seen again; suspect a race with swapchain recreation. Open.
 4. [ ] Distance-scaled ray budget.
+   - Tried (2026-11-15), reverted: past 24 blocks, trace a pixel's bounce with probability 24 / distance (at
+     least 1/4), weighted by its inverse. Per-pixel draws saved nothing (a warp waits for any lane that traces);
+     one draw per 8x8 group saved nothing either in the four scenes (bounce is mostly spent on near pixels), and
+     left shaded faces far off mottled in 8x8 patches RR couldn't smooth (user-spotted on the lake island's box).
 5. [ ] Ray budgets per preset; half-res GI where RR hides it. Shader execution reordering:
    VK_EXT_ray_tracing_invocation_reorder is exposed, but only for ray tracing pipelines (Helio traces with
    ray queries in compute); worth it only if the breakdown shows divergence-bound shading.

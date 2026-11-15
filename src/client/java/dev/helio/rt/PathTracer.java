@@ -98,7 +98,7 @@ public final class PathTracer {
 	 * M7 bench (dev only): while config/helio-bench.txt exists, timings are logged every 120 frames and the
 	 * effects it names (any of {@link #OFF_NAMES}, space- or comma-separated) are switched off, for the cost
 	 * breakdown. Re-read every 120 frames, so a script can step through them in one session. Bits as
-	 * pathtrace.comp's OFF_*.
+	 * pathtrace.comp's OFF_*. The word "quit" closes the game the way its Quit button does.
 	 */
 	private static final String[] OFF_NAMES = {"specular", "fog", "clouds", "block", "bounce", "sun", "caustics"};
 	private static boolean bench;
@@ -111,8 +111,12 @@ public final class PathTracer {
 		benchOff = 0;
 		if (!bench) return;
 		try {
-			for (String word : java.nio.file.Files.readString(file).split("[\\s,]+"))
+			for (String word : java.nio.file.Files.readString(file).split("[\\s,]+")) {
 				for (int i = 0; i < OFF_NAMES.length; i++) if (OFF_NAMES[i].equalsIgnoreCase(word)) benchOff |= 1 << i;
+				// Quit as the game's own Quit button does: killing the process mid-session crashes NVIDIA's shader
+				// compiler threads on the way out (driver 620.70.06).
+				if (word.equalsIgnoreCase("quit")) Minecraft.getInstance().stop();
+			}
 		} catch (IOException e) {
 			Helio.LOG.warn("Couldn't read {}", file, e);
 		}
