@@ -68,7 +68,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	uint denoise;       // 1: trace at DLSS's render size and write its inputs; DLSS and rr_resolve.comp finish
 	float lightFloor;   // least light anything gets, from vanilla's Brightness setting
 	uint hybrid;        // 1: block light from vanilla's light levels, no shadow rays for it (HelioConfig.Lighting)
-	uvec2 cache;        // RadianceCache, zero when off (only under Ray Reconstruction)
+	uvec2 cache;        // CacheCells, then CacheSums; zero when off (only under Ray Reconstruction)
 	ivec3 anchor;       // the scene anchor's world block position (a section corner)
 	float caveFloor;    // share of lightFloor left where there's no sky light (HelioConfig.caveBrightness)
 	float normalStrength; // how far normal maps tilt the surface, 1 = as the pack made them (HelioConfig)
@@ -93,14 +93,20 @@ layout(buffer_reference, scalar, buffer_reference_align = 4) buffer Meter { int 
 // at the faces in it (direct and bounced, without the face's own albedo). A bounce ray that lands in a cell
 // takes its light from there instead of tracing on: every bounce after the first for the cost of one lookup.
 // A few pixels a frame (feeding) follow longer paths and add what they find; radiance_cache.comp averages.
-struct CacheEntry {
+// Two arrays in one buffer (M7 step 4): what lookups read, 16 bytes a cell (a key's 8 probes share one 128-byte
+// line), then the samples feeding pixels add, CACHE_SIZE * 16 bytes on. One 32-byte entry made lookups touch
+// twice the memory, in a table four times the size of the L2 cache.
+struct CacheCell {
 	uint check;  // second hash of the cell's key, 0 = free
 	uint age;    // frames since a sample last came in (radiance_cache.comp)
-	uvec3 sum;   // this frame's samples, fixed point (CACHE_FIXED)
-	uint count;
 	uvec2 value; // running average (rgb) and the samples behind it, as halves
 };
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer RadianceCache { CacheEntry e[]; };
+struct CacheSum {
+	uvec3 sum;   // this frame's samples, fixed point (CACHE_FIXED)
+	uint count;
+};
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer CacheCells { CacheCell c[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer CacheSums { CacheSum s[]; };
 // Per TLAS instance. kind: section layer (0 solid, 1 cutout, 2 translucent) or 3 = entities.
 struct Instance { uvec2 vertices; uint triangles; uint kind; };
 layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer InstanceInfo { Instance i[]; };
@@ -952,7 +958,8 @@ vec3 glow(Hit h) {
 }
 
 bool cacheOn, feeding; // Frame.cache set; this pixel feeds the cache (its first surface's path only)
-RadianceCache cache;
+CacheCells cells;
+CacheSums sums;
 ivec3 anchor;
 
 // A cache cell's two hashes: where it sits and a check. Cells are 1/4 block, doubling every time the distance
@@ -972,10 +979,10 @@ void cacheKey(vec3 pos, vec3 n, out uint slot, out uint check) {
 int cacheEntry(uint slot, uint check, bool insert) {
 	uint base = slot & (CACHE_SIZE - 1u) & ~(CACHE_PROBES - 1u);
 	for (uint i = 0u; i < CACHE_PROBES; i++)
-		if (cache.e[base + i].check == check) return int(base + i);
+		if (cells.c[base + i].check == check) return int(base + i);
 	if (!insert) return -1;
 	for (uint i = 0u; i < CACHE_PROBES; i++) {
-		uint previous = atomicCompSwap(cache.e[base + i].check, 0u, check);
+		uint previous = atomicCompSwap(cells.c[base + i].check, 0u, check);
 		if (previous == 0u || previous == check) return int(base + i);
 	}
 	return -1;
@@ -987,10 +994,10 @@ void cacheAdd(vec3 pos, vec3 n, vec3 irradiance) {
 	int i = cacheEntry(slot, check, true);
 	if (i < 0 || any(isnan(irradiance))) return;
 	uvec3 fixedPoint = uvec3(min(irradiance, vec3(CACHE_MAX)) * CACHE_FIXED + 0.5);
-	atomicAdd(cache.e[i].sum.x, fixedPoint.x);
-	atomicAdd(cache.e[i].sum.y, fixedPoint.y);
-	atomicAdd(cache.e[i].sum.z, fixedPoint.z);
-	atomicAdd(cache.e[i].count, 1u);
+	atomicAdd(sums.s[i].sum.x, fixedPoint.x);
+	atomicAdd(sums.s[i].sum.y, fixedPoint.y);
+	atomicAdd(sums.s[i].sum.z, fixedPoint.z);
+	atomicAdd(sums.s[i].count, 1u);
 }
 
 bool cacheLookup(vec3 pos, vec3 n, out vec3 irradiance) {
@@ -998,7 +1005,7 @@ bool cacheLookup(vec3 pos, vec3 n, out vec3 irradiance) {
 	cacheKey(pos, n, slot, check);
 	int i = cacheEntry(slot, check, false);
 	if (i < 0) return false;
-	uvec2 v = cache.e[i].value;
+	uvec2 v = cells.c[i].value;
 	vec2 bn = unpackHalf2x16(v.y);
 	irradiance = vec3(unpackHalf2x16(v.x), bn.x);
 	return bn.y > 0.0; // averaged at least once
@@ -1587,7 +1594,9 @@ void main() {
 	hybrid = frame.hybrid != 0u;
 	cacheOn = frame.cache != uvec2(0u);
 	if (cacheOn) {
-		cache = RadianceCache(frame.cache);
+		cells = CacheCells(frame.cache);
+		uint lo = frame.cache.x + CACHE_SIZE * 16u; // the sums array's address (64-bit add)
+		sums = CacheSums(uvec2(lo, frame.cache.y + (lo < frame.cache.x ? 1u : 0u)));
 		anchor = frame.anchor;
 		// Whole 8x8 groups feed, not scattered pixels: the GPU runs 32 pixels in lockstep, and one feeding pixel
 		// among them made all wait for its longer path.

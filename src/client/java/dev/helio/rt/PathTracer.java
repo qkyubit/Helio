@@ -668,6 +668,7 @@ public final class PathTracer {
 	/** Creates the radiance cache on first use, empty, and empties it for a new level. */
 	private static void ensureCache(VkCommandBuffer cmd, Minecraft mc, MemoryStack s) {
 		if (radianceCache != null && cacheLevel == mc.level) return;
+		// 16-byte cells, then 16-byte sums (pathtrace.comp's CacheCells, CacheSums).
 		if (radianceCache == null) radianceCache = Memory.buffer((long) CACHE_ENTRIES * 32, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
 		cacheLevel = mc.level;
 		vkCmdFillBuffer(cmd, radianceCache.buffer(), radianceCache.offset(), radianceCache.size(), 0);

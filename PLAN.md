@@ -962,11 +962,25 @@ everywhere; Performance (Hybrid, RR Performance) >= 90. Proposed by Claude; the 
    - One real crash mid-play (2026-11-14 17:10, 9 minutes in, frame generation on): the "Helio FG pacer"
      thread in `vkCmdCopyImage` (`PacedPresenter.prepare`, staging -> swapchain image), in
      `libnvidia-glcore`. Not seen again; suspect a race with swapchain recreation. Open.
-4. [ ] Distance-scaled ray budget.
+4. [x] Distance-scaled ray budget. Closed without one (no gain, see below); the bounce profiled and the
+   radiance cache's layout split instead.
    - Tried (2026-11-15), reverted: past 24 blocks, trace a pixel's bounce with probability 24 / distance (at
      least 1/4), weighted by its inverse. Per-pixel draws saved nothing (a warp waits for any lane that traces);
      one draw per 8x8 group saved nothing either in the four scenes (bounce is mostly spent on near pixels), and
      left shaded faces far off mottled in 8x8 patches RR couldn't smooth (user-spotted on the lake island's box).
+   - Bounce cost split (2026-11-15, bench switches since removed; path trace ms saved, overworld / water + glass
+     / cave / Nether): whole bounce 1.9 / 2.6 / 1.6 / 1.3; non-feeding pixels' bounce about all of it (the
+     feeding paths, 1 group in 16, are cheap); shading where the bounce lands plus the cache lookup 1.0 / 1.0 /
+     0.4 / 0.5, of which the lookup alone 0.5 / 0.9 (overworld, water + glass); direct light on cache misses
+     0.1-0.3. The ray itself is the other ~1 ms. Cutting the feeding paths to one step made it 3 ms slower: the
+     cache then misses at bounce hits and every miss pays for direct light.
+   - Tried, no gain, reverted: a lighter shade() for cached bounce hits (normal, colour, glow only).
+   - Radiance cache split into two arrays in its buffer: 16-byte cells (check, age, average: all a lookup reads,
+     a key's 8 probes on one 128-byte line) and 16-byte sums (what feeding adds). Same 64 MB. Back to back
+     against the committed build, path trace: overworld 8.88 -> 8.65 ms, water + glass 10.21 -> 9.79, cave and
+     Nether unchanged (5.29 -> 5.28, 5.30 -> 5.39); readings move about 0.3 ms run to run, so a small gain in
+     open scenes at best. Screenshots identical.
+   - Left: the ray itself (~1 ms; half-resolution bounce in its own pass, step 5).
 5. [ ] Ray budgets per preset; half-res GI where RR hides it. Shader execution reordering:
    VK_EXT_ray_tracing_invocation_reorder is exposed, but only for ray tracing pipelines (Helio traces with
    ray queries in compute); worth it only if the breakdown shows divergence-bound shading.
