@@ -1046,7 +1046,38 @@ everywhere; Performance (Hybrid, RR Performance) >= 90. Proposed by Claude; the 
    - Bench lines now also log scene MB, VRAM, sections, instances and heap; bench.sh takes OPTS (sed on
      options.txt: render distance, packs) and SETTLE (seconds after joining).
    - Flying around checked by the user (2026-11-15): sections entering the RT range come back.
-7. [ ] CPU: mesh -> BLAS input off the render thread; fewer FFM calls per frame.
+7. [x] CPU: mesh -> BLAS input off the render thread; fewer FFM calls per frame.
+   - The mesh copy into BLAS input already ran on the compile workers (`Scene.submit`). What the render thread
+     spent was rewriting, every frame, things that rarely change. JFR (built into the JDK: `jcmd <pid> JFR.start`)
+     on the running game put Helio at ~38% of the render thread's samples: the light table, the TLAS instance list,
+     and the scan of the view area for sections to compile.
+   - Bench: a "Bench CPU ms per frame" line (render thread CPU time from ThreadMXBean, and Scene's parts), and the
+     bench word "fly" (the player flies along +x at 20 blocks a second, for terrain coming into range).
+   - Changes:
+     - Light table (`Lights.upload`): rewritten only when a section's lights, the camera's section, the distance or
+       held lights change; otherwise last frame's is traced again. Writes take the 4 buffers in turn, so a buffer is
+       rewritten only after 4 others. sRGB to linear through a 256-entry table, not 3 `Math.pow` per light.
+     - TLAS instances: when no section, BLAS address (compaction), camera section or distance changed since the
+       frame before, the GPU copies last frame's section instances (`vkCmdCopyBuffer`); only the entity instance is
+       written. Reading the mapped buffer back on the CPU would be slow: it's write-combined VRAM.
+     - Section scan (`withHiddenSections`): the list of sections in range is kept and offered again; the scan runs on
+       a camera-section or distance change and every 32 frames (sections dropped since get asked for again then).
+   - Results (render distance 12, SPBR; CPU ms per frame, render thread / Helio's scene update + section scan):
+
+     | Scene | Before | After |
+     |---|---|---|
+     | Overworld | 4.23 / 1.60 | 2.48 / 0.18 |
+     | Water + glass | 4.09 / 1.54 | 2.43 / 0.18 |
+     | Torch cave | 3.86 / 1.64 | 2.62 / 0.16 |
+     | Nether | 6.73 / 4.09 (lights 3.39: lava) | 2.59 / 0.16 |
+     | Overworld, flying | - | 3.18 / 0.35 (with the changes off: 3.85 / 1.42) |
+     | Nether, flying | - | 3.46 / 0.32 (with the changes off: 3.06 / 1.08) |
+
+     Flying readings vary with the terrain flown over (each run flies further), so the render thread totals there
+     are noisy; Helio's own share is not. GPU times and FPS unchanged (GPU-bound: the render thread now waits in Reflex's frame start most of the frame).
+     Screenshot at the user's spot: torches, shadows, entities and water as before.
+   - FFM calls: after the changes, JFR shows no Helio native call worth cutting. The render thread's native time is
+     Reflex's wait, acquire and DLSS evaluate; builds while flying cost ~0.2 ms in all. Left as is.
 8. [ ] Frame generation troubleshooting (user, 2026-11-15: "frame gen still doesn't look right"; a recurring
    issue, so it gets its own step at the end of M7). Start from what the user sees now, then go through the M4
    fixes (pacing from the first image's readiness, `hud_keep.comp`, vignette skip) and the open pacer crash

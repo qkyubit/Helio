@@ -54,6 +54,20 @@ public final class Lights {
 	private static final Long2ObjectOpenHashMap<int[]> bySection = new Long2ObjectOpenHashMap<>();
 	private static final Buf[] buffers = new Buf[RING];
 	public static int count;
+	/** sRGB byte to linear. */
+	private static final float[] LINEAR = new float[256];
+	static {
+		for (int i = 0; i < 256; i++) LINEAR[i] = (float) Math.pow(i / 255f, 2.2);
+	}
+	/**
+	 * M7 step 7: the table is rewritten only when something in it changed (a section's lights, the camera's
+	 * section, the distance, held lights); otherwise the last one is traced again. Writes take the buffers in turn,
+	 * so one is rewritten only after {@value #RING} others, by when no frame in flight reads it.
+	 */
+	private static boolean dirty = true;
+	private static int written = -1, lastX, lastY, lastZ, lastR, lastHeld;
+	private static Object lastLevel;
+	private static long lastAddress;
 
 	private Lights() {}
 
@@ -126,8 +140,7 @@ public final class Lights {
 
 	/** Render thread, with the scene's section updates. */
 	static void put(long node, int[] lights) {
-		if (lights == null) bySection.remove(node);
-		else bySection.put(node, lights);
+		if (lights == null ? bySection.remove(node) != null : bySection.put(node, lights) != lights) dirty = true;
 	}
 
 	/**
@@ -161,11 +174,21 @@ public final class Lights {
 	}
 
 	/** Uploads this frame's table; returns its device address (0: no lights). */
-	static long upload(int slot, Vec3 cameraPos, int r, int anchorX, int anchorY, int anchorZ) {
+	static long upload(Vec3 cameraPos, int r, int anchorX, int anchorY, int anchorZ) {
 		var level = Minecraft.getInstance().level;
 		if (level == null) return 0;
 		SectionPos camera = SectionPos.of(cameraPos);
 		float[][] held = heldLights(cameraPos);
+		if (!dirty && held.length == 0 && lastHeld == 0 && level == lastLevel && r == lastR
+			&& camera.x() == lastX && camera.y() == lastY && camera.z() == lastZ) return lastAddress;
+		dirty = false;
+		lastHeld = held.length;
+		lastLevel = level;
+		lastR = r;
+		lastX = camera.x();
+		lastY = camera.y();
+		lastZ = camera.z();
+		int slot = written = (written + 1) % RING;
 		int minY = level.getMinSectionY(), height = level.getSectionsCount();
 		int w = 2 * r + 1, cells = w * height * w;
 		int total = held.length;
@@ -210,7 +233,7 @@ public final class Lights {
 		memPutLong(p + 32, buf.address() + lightsOffset);
 		memPutLong(p + 40, 0);
 		count = n;
-		return n == 0 ? 0 : buf.address();
+		return lastAddress = n == 0 ? 0 : buf.address();
 	}
 
 	private static void putLight(long q, float x, float y, float z, float emission, int rgb, float held) {
@@ -218,19 +241,23 @@ public final class Lights {
 		memPutFloat(q + 4, y);
 		memPutFloat(q + 8, z);
 		memPutFloat(q + 12, emission);
-		memPutFloat(q + 16, (float) Math.pow((rgb >> 16 & 255) / 255f, 2.2));
-		memPutFloat(q + 20, (float) Math.pow((rgb >> 8 & 255) / 255f, 2.2));
-		memPutFloat(q + 24, (float) Math.pow((rgb & 255) / 255f, 2.2));
+		memPutFloat(q + 16, LINEAR[rgb >> 16 & 255]);
+		memPutFloat(q + 20, LINEAR[rgb >> 8 & 255]);
+		memPutFloat(q + 24, LINEAR[rgb & 255]);
 		memPutFloat(q + 28, held);
 	}
 
 	/** Resource packs changed: texture colours may have too. */
 	public static void clearColours() {
 		colours.clear();
+		dirty = true;
 	}
 
 	static void destroy() {
-		for (Buf b : buffers) if (b != null) b.free();
+		for (int i = 0; i < RING; i++) if (buffers[i] != null) buffers[i].free();
+		java.util.Arrays.fill(buffers, null);
 		bySection.clear();
+		dirty = true;
+		written = -1;
 	}
 }

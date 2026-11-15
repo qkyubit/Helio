@@ -106,6 +106,13 @@ public final class Scene {
 	private static int quadIndexCapacity, tlasCapacity;
 	private static long tlasHandle;
 	private static final Buf[] instanceBufs = new Buf[RING];
+	/**
+	 * M7 step 7: what the last TLAS's instances were built from. With no section, BLAS address, camera section or
+	 * distance change since the frame before, its section instances are copied on the GPU instead of rewritten.
+	 */
+	private static boolean instancesDirty = true, tlasDynamic;
+	private static long tlasFrame;
+	private static int tlasR, tlasX, tlasY, tlasZ, tlasCount, tlasStatic;
 	private static long compactionQueries;
 	@SuppressWarnings("unchecked")
 	private static final List<Blas>[] builtInSlot = new List[RING];
@@ -126,6 +133,9 @@ public final class Scene {
 	/** A section within 2 sections of the camera was rebuilt this frame (a block changed nearby). */
 	public static boolean nearbyRebuild;
 	public static long tlasTriangles, dynamicTriangles;
+	/** Bench (M7 step 7): render-thread nanoseconds summed since the last bench line, per CPU_* part. */
+	public static final long[] cpuNanos = new long[4];
+	public static final int CPU_UPDATE = 0, CPU_HIDDEN = 1, CPU_LIGHTS = 2, CPU_TLAS = 3;
 
 	private Scene() {}
 
@@ -255,6 +265,11 @@ public final class Scene {
 	 * (drawn when it's off, and translucent blocks always) gets its baked shading back, or loses it.
 	 */
 	public static void tick(Minecraft mc) {
+		if (PathTracer.benchFly && mc.player != null) {
+			mc.player.getAbilities().flying = true;
+			mc.player.setDeltaMovement(Vec3.ZERO);
+			mc.player.setPos(mc.player.getX() + 1, mc.player.getY(), mc.player.getZ());
+		}
 		boolean want = Helio.rayTracing && HelioConfig.current.rayTracing;
 		if (want == unshaded) return;
 		unshaded = want;
@@ -264,27 +279,44 @@ public final class Scene {
 	/**
 	 * Vanilla only compiles sections that are in view. Also offer it every section within the RT
 	 * distance; its own dirty check then compiles those that need it, once.
+	 * <p>
+	 * M7 step 7: the scan over the view area runs when the camera's section or the distance changes, and every
+	 * {@value #RESCAN_FRAMES} frames for sections dropped since; in between the last list of sections in range is
+	 * offered again.
 	 */
-	private static final ObjectArrayList<RenderSection> toCompile = new ObjectArrayList<>();
+	private static final ObjectArrayList<RenderSection> toCompile = new ObjectArrayList<>(), inRange = new ObjectArrayList<>();
+	private static final int RESCAN_FRAMES = 32;
+	private static int scanX, scanZ, scanR = -1, scanAge;
+	private static Object scanArea;
 
 	public static ObjectArrayList<RenderSection> withHiddenSections(ViewArea area, ObjectArrayList<RenderSection> visible) {
 		if (!ready || area == null) return visible;
-		toCompile.clear();
-		toCompile.addAll(visible);
+		long t0 = System.nanoTime();
 		SectionPos c = area.getCameraSectionPos();
 		int r = rtDistance();
 		keepX = c.x();
 		keepZ = c.z();
 		keepRadius = r + KEEP_MARGIN;
-		var extractor = Minecraft.getInstance().levelExtractor;
-		// ponytail: scans the whole view area each frame (~0.1 ms at 12 chunks); keep a dirty set if it shows up in profiles.
-		for (RenderSection section : ((ViewAreaAccessor) area).helio$sections()) {
-			long n = section.getSectionNode();
-			if (Math.abs(SectionPos.x(n) - c.x()) > keepRadius || Math.abs(SectionPos.z(n) - c.z()) > keepRadius) continue;
-			// Compiled while out of range (or dropped since): vanilla thinks it's done, so ask again, once.
-			if (!held.contains(n) && requested.add(n)) extractor.setSectionDirty(SectionPos.x(n), SectionPos.y(n), SectionPos.z(n));
-			if (Math.abs(SectionPos.x(n) - c.x()) <= r && Math.abs(SectionPos.z(n) - c.z()) <= r) toCompile.add(section);
+		if (++scanAge >= RESCAN_FRAMES || c.x() != scanX || c.z() != scanZ || r != scanR || area != scanArea) {
+			scanAge = 0;
+			scanX = c.x();
+			scanZ = c.z();
+			scanR = r;
+			scanArea = area;
+			inRange.clear();
+			var extractor = Minecraft.getInstance().levelExtractor;
+			for (RenderSection section : ((ViewAreaAccessor) area).helio$sections()) {
+				long n = section.getSectionNode();
+				if (Math.abs(SectionPos.x(n) - c.x()) > keepRadius || Math.abs(SectionPos.z(n) - c.z()) > keepRadius) continue;
+				// Compiled while out of range (or dropped since): vanilla thinks it's done, so ask again, once.
+				if (!held.contains(n) && requested.add(n)) extractor.setSectionDirty(SectionPos.x(n), SectionPos.y(n), SectionPos.z(n));
+				if (Math.abs(SectionPos.x(n) - c.x()) <= r && Math.abs(SectionPos.z(n) - c.z()) <= r) inRange.add(section);
+			}
 		}
+		toCompile.clear();
+		toCompile.addAll(visible);
+		toCompile.addAll(inRange);
+		cpuNanos[CPU_HIDDEN] += System.nanoTime() - t0;
 		return toCompile;
 	}
 
@@ -393,6 +425,15 @@ public final class Scene {
 	 * false (ray tracing toggled off) only the queue is drained: no GPU work.
 	 */
 	public static void update(VkCommandBuffer cmd, Vec3 cameraPos, boolean build) {
+		long t0 = System.nanoTime();
+		try {
+			updateTimed(cmd, cameraPos, build);
+		} finally {
+			cpuNanos[CPU_UPDATE] += System.nanoTime() - t0;
+		}
+	}
+
+	private static void updateTimed(VkCommandBuffer cmd, Vec3 cameraPos, boolean build) {
 		SectionPos camera = SectionPos.of(cameraPos);
 		frame++;
 		while (!deferred.isEmpty() && deferred.peek().frame + RING <= frame) deferred.poll().free.run();
@@ -415,8 +456,12 @@ public final class Scene {
 			compact(cmd, slot, s);
 			buildPending(cmd, slot, camera, s);
 			buildDynamic(cmd, slot, s);
+			long t1 = System.nanoTime();
 			buildTlas(cmd, slot, camera, cameraPos, s);
-			lights = Lights.upload(slot, cameraPos, rtDistance(), anchorX, anchorY, anchorZ);
+			long t2 = System.nanoTime();
+			lights = Lights.upload(cameraPos, rtDistance(), anchorX, anchorY, anchorZ);
+			cpuNanos[CPU_TLAS] += t2 - t1;
+			cpuNanos[CPU_LIGHTS] += System.nanoTime() - t2;
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
 			GpuTimers.end(cmd, GpuTimers.Pass.SCENE_BUILD);
 		}
@@ -436,7 +481,10 @@ public final class Scene {
 				Geo[] stale = pending.remove(u.node);
 				if (stale != null) freeGeos(stale);
 				Geo[] live = sections.remove(u.node);
-				if (live != null) deferFree(live);
+				if (live != null) {
+					deferFree(live);
+					instancesDirty = true;
+				}
 			} else {
 				Geo[] stale = pending.put(u.node, u.layers);
 				if (stale != null) freeGeos(stale); // never reached the GPU
@@ -457,6 +505,7 @@ public final class Scene {
 				deferFree(e.getValue());
 				Lights.put(n, null);
 				it.remove();
+				instancesDirty = true;
 			}
 		}
 		var queued = pending.long2ObjectEntrySet().fastIterator(); // never reached the GPU
@@ -491,6 +540,7 @@ public final class Scene {
 				b.handle = createAs(s, b.storage, size, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
 				b.address = asAddress(s, b.handle);
 				vkCmdCopyAccelerationStructureKHR(cmd, copy.src(oldHandle).dst(b.handle));
+				instancesDirty = true;
 				defer(() -> {
 					vkDestroyAccelerationStructureKHR(vk, oldHandle, null);
 					oldStorage.free();
@@ -524,6 +574,7 @@ public final class Scene {
 		}
 		lastBuilds = batch.size();
 		if (batch.isEmpty()) return;
+		instancesDirty = true;
 		ensureQuadIndices(maxQuads);
 		buildMicromaps(cmd, slot, batch, s);
 
@@ -677,9 +728,23 @@ public final class Scene {
 		int r = rtDistance();
 		rtDistanceBlocks = r * 16;
 
-		int count = 0;
-		for (Geo[] geos : sections.values()) for (Geo g : geos) if (g != null) count++;
-		if (dynamicBuilt) count++;
+		Buf prev = instanceBufs[(slot + RING - 1) % RING];
+		boolean reuse = !instancesDirty && tlasFrame == frame - 1 && prev != null && r == tlasR
+			&& camera.x() == tlasX && camera.y() == tlasY && camera.z() == tlasZ && dynamicBuilt == tlasDynamic;
+		instancesDirty = false;
+		tlasFrame = frame;
+		tlasR = r;
+		tlasX = camera.x();
+		tlasY = camera.y();
+		tlasZ = camera.z();
+		tlasDynamic = dynamicBuilt;
+		int count = tlasCount;
+		if (!reuse) {
+			count = 0;
+			for (Geo[] geos : sections.values()) for (Geo g : geos) if (g != null) count++;
+			if (dynamicBuilt) count++;
+			tlasCount = count;
+		}
 		Buf buf = instanceBufs[slot];
 		long bytes = (long) count * (VkAccelerationStructureInstanceKHR.SIZEOF + INFO_SIZE);
 		if (buf == null || buf.size() < bytes) {
@@ -691,8 +756,21 @@ public final class Scene {
 		long infoBase = (long) count * VkAccelerationStructureInstanceKHR.SIZEOF;
 		int n = 0;
 		long triangles = 0;
+		if (reuse) {
+			// Nothing but the entities changed: the GPU copies last frame's section instances (reading the mapped
+			// buffer back here would be slow: it's write-combined VRAM).
+			n = tlasStatic;
+			triangles = tlasTriangles;
+			if (n > 0) {
+				VkBufferCopy.Buffer regions = VkBufferCopy.calloc(2, s);
+				regions.get(0).srcOffset(prev.offset()).dstOffset(buf.offset()).size((long) n * VkAccelerationStructureInstanceKHR.SIZEOF);
+				regions.get(1).srcOffset(prev.offset() + infoBase).dstOffset(buf.offset() + infoBase).size((long) n * INFO_SIZE);
+				vkCmdCopyBuffer(cmd, prev.buffer(), buf.buffer(), regions);
+				VulkanCommandEncoder.memoryBarrier(cmd, s);
+			}
+		}
 		var it = sections.long2ObjectEntrySet().fastIterator();
-		while (it.hasNext()) {
+		while (!reuse && it.hasNext()) {
 			Long2ObjectMap.Entry<Geo[]> e = it.next();
 			long node = e.getLongKey();
 			int sx = SectionPos.x(node), sy = SectionPos.y(node), sz = SectionPos.z(node);
@@ -704,6 +782,7 @@ public final class Scene {
 				triangles += g.quads * 2L;
 			}
 		}
+		tlasStatic = n;
 		// Entity positions are relative to the camera.
 		if (dynamicBuilt) putInstance(buf, infoBase, n++, (float) (cameraPos.x - anchorX), (float) (cameraPos.y - anchorY),
 			(float) (cameraPos.z - anchorZ), MASK_DYNAMIC, dynamicBlas[slot].address, dynamicVertices[slot].address(), Entities.quads * 2, KIND_DYNAMIC);

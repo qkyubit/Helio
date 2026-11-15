@@ -104,12 +104,15 @@ public final class PathTracer {
 	private static final String[] OFF_NAMES = {"specular", "fog", "clouds", "block", "bounce", "sun", "caustics"};
 	private static boolean bench;
 	private static int benchOff;
+	/** Bench word "fly": the player flies along +x at 20 blocks a second (Scene.tick), for the CPU cost of terrain coming into range. */
+	public static boolean benchFly;
 
 	private static void readBench() {
 		java.nio.file.Path file = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("helio-bench.txt");
 		bench = java.nio.file.Files.exists(file);
 		int was = benchOff;
 		benchOff = 0;
+		benchFly = false;
 		if (!bench) return;
 		try {
 			for (String word : java.nio.file.Files.readString(file).split("[\\s,]+")) {
@@ -117,6 +120,7 @@ public final class PathTracer {
 				// Quit as the game's own Quit button does: killing the process mid-session crashes NVIDIA's shader
 				// compiler threads on the way out (driver 620.70.06).
 				if (word.equalsIgnoreCase("quit")) Minecraft.getInstance().stop();
+				if (word.equalsIgnoreCase("fly")) benchFly = true;
 			}
 		} catch (IOException e) {
 			Helio.LOG.warn("Couldn't read {}", file, e);
@@ -178,6 +182,8 @@ public final class PathTracer {
 	public static boolean drawsSky() {
 		return active() && hasSky && !underwater;
 	}
+
+	private static long benchCpu;
 
 	public static boolean active() {
 		return !failed && Helio.rayTracing && HelioConfig.current.rayTracing && Helio.device != null && Minecraft.getInstance().level != null;
@@ -473,6 +479,13 @@ public final class PathTracer {
 					String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.SCENE_BUILD)), mc.getFps(), Memory.allocated.get() >> 20,
 					PerfOverlay.vramUsed >> 20, PerfOverlay.vramBudget >> 20, Scene.sectionCount, Scene.instanceCount,
 					(Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) >> 20);
+				long cpu = java.lang.management.ManagementFactory.getThreadMXBean().getCurrentThreadCpuTime();
+				Helio.LOG.info("Bench CPU ms per frame: render thread {}, scene update {} (TLAS {}, lights {}), hidden sections {}",
+					String.format("%.3f", (cpu - benchCpu) / 120e6), String.format("%.3f", Scene.cpuNanos[Scene.CPU_UPDATE] / 120e6),
+					String.format("%.3f", Scene.cpuNanos[Scene.CPU_TLAS] / 120e6), String.format("%.3f", Scene.cpuNanos[Scene.CPU_LIGHTS] / 120e6),
+					String.format("%.3f", Scene.cpuNanos[Scene.CPU_HIDDEN] / 120e6));
+				benchCpu = cpu;
+				java.util.Arrays.fill(Scene.cpuNanos, 0);
 			}
 			if (++timedFrames % 600 == 0) Helio.LOG.info("GPU ms: path trace {}, DLSS {}", String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE)),
 				String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS)));
