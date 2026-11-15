@@ -79,6 +79,13 @@ public final class HelioConfig {
 	/** Stops added to the auto exposure (brighter above 0). */
 	public float exposure = 0;
 	/**
+	 * Ray budget (M7 step 5): set by the preset, tunable in the advanced settings (HelioAdvancedScreen). The
+	 * defaults are Balanced's. Volumetric fog steps, a shadow ray each (0: no light shafts); steps through the
+	 * clouds; block lights weighed per shading point; how rough a surface may be and still get a reflection ray,
+	 * in percent (LabPBR perceptual roughness); one 8x8 pixel group in this many feeds the radiance cache.
+	 */
+	public int fogSteps = 2, cloudSteps = 24, lightCandidates = 4, specularCutoff = 60, cacheFeed = 16;
+	/**
 	 * Not in the UI; applies at startup. Bounce rays through foliage trace about 30% faster (6.4 vs 9.5 ms
 	 * in a dense forest) for about 40% more scene memory (1219 vs 869 MB). Single shadow rays don't care.
 	 */
@@ -90,15 +97,35 @@ public final class HelioConfig {
 		preset = p;
 		switch (p) {
 			case OFF -> { rayTracing = false; frameGeneration = 1; reflex = ReflexMode.ON; }
-			case PERFORMANCE -> { rayTracing = true; lighting = Lighting.HYBRID; dlssQuality = DlssQuality.PERFORMANCE; frameGeneration = 2; reflex = ReflexMode.BOOST; }
+			case PERFORMANCE -> { rayTracing = true; lighting = Lighting.HYBRID; dlssQuality = DlssQuality.PERFORMANCE; frameGeneration = 2; reflex = ReflexMode.BOOST;
+				budget(1, 16, 4, 40, 16); }
 			// Heavier presets render fewer frames, so they generate more (multi frame generation where offered).
-			case BALANCED -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.BALANCED; frameGeneration = 3; reflex = ReflexMode.ON; }
-			case QUALITY -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.QUALITY; frameGeneration = 3; reflex = ReflexMode.ON; }
-			case ULTRA -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.DLAA; frameGeneration = 4; reflex = ReflexMode.ON; }
+			case BALANCED -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.BALANCED; frameGeneration = 3; reflex = ReflexMode.ON;
+				budget(DEFAULTS); }
+			case QUALITY -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.QUALITY; frameGeneration = 3; reflex = ReflexMode.ON;
+				budget(3, 32, 6, 60, 16); }
+			case ULTRA -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.DLAA; frameGeneration = 4; reflex = ReflexMode.ON;
+				budget(4, 32, 8, 70, 12); }
 			// Screenshots: no generated frames (they're slightly soft), no latency trade-offs needed.
-			case PHOTO -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.DLAA; frameGeneration = 1; reflex = ReflexMode.OFF; }
+			case PHOTO -> { rayTracing = true; lighting = Lighting.PATH_TRACED; dlssQuality = DlssQuality.DLAA; frameGeneration = 1; reflex = ReflexMode.OFF;
+				budget(4, 32, 8, 70, 12); }
 			case CUSTOM -> {}
 		}
+	}
+
+	/** Every field's default (Balanced's ray budget): what the advanced settings reset to. */
+	public static final HelioConfig DEFAULTS = new HelioConfig();
+
+	private void budget(int fog, int clouds, int candidates, int specular, int feed) {
+		fogSteps = fog;
+		cloudSteps = clouds;
+		lightCandidates = candidates;
+		specularCutoff = specular;
+		cacheFeed = feed;
+	}
+
+	private void budget(HelioConfig c) {
+		budget(c.fogSteps, c.cloudSteps, c.lightCandidates, c.specularCutoff, c.cacheFeed);
 	}
 
 	public static void load() {
@@ -115,6 +142,11 @@ public final class HelioConfig {
 		if (current.debugView == null) current.debugView = DebugView.OFF;
 		current.frameGeneration = Math.clamp(current.frameGeneration, 1, 6);
 		current.rayTracingDistance = Math.clamp(current.rayTracingDistance, 2, 32);
+		current.fogSteps = Math.clamp(current.fogSteps, 0, 8);
+		current.cloudSteps = Math.clamp(current.cloudSteps, 8, 64);
+		current.lightCandidates = Math.clamp(current.lightCandidates, 1, 16);
+		current.specularCutoff = Math.clamp(current.specularCutoff, 0, 100);
+		current.cacheFeed = Math.clamp(current.cacheFeed, 4, 64);
 	}
 
 	public static String toJson() {

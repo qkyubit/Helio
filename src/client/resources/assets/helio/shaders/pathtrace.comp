@@ -81,6 +81,12 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	float nightFloor;   // share of lightFloor left outdoors at night (HelioConfig.nightBrightness)
 	float wetness;      // how wet the open air leaves things: rain where the camera is, drying after (PathTracer)
 	uint off;           // effects switched off, OFF_* bits: M7's cost breakdown (PathTracer.benchOff), 0 normally
+	// Ray budget (M7 step 5; HelioConfig, set by the preset, tunable in the advanced settings):
+	int fogSteps;         // volumetric fog steps, a shadow ray each (0: no shafts)
+	int cloudSteps;       // steps through the cloud layer
+	uint lightCandidates; // block lights weighed per shading point when stochastic (RR, reference); 8 otherwise
+	float specularCutoff; // surfaces smoother than this (perceptual roughness) get a reflection ray
+	uint cacheFeed;       // one 8x8 group in this many feeds the radiance cache each frame
 };
 // M7 bench: effects the cost breakdown can switch off one at a time (config/helio-bench.txt).
 const uint OFF_SPECULAR = 1u, OFF_FOG = 2u, OFF_CLOUDS = 4u, OFF_BLOCK = 8u, OFF_BOUNCE = 16u, OFF_SUN = 32u, OFF_CAUSTICS = 64u;
@@ -130,7 +136,8 @@ const vec3 BLOCK_LIGHT = vec3(1.0, 0.68, 0.38) * 1.6;
 const float LIGHT = 8.0;        // intensity of an emission-15 block light
 const float EMISSIVE = 4.0;     // radiance of an emission-15 block's own surface, times its texture (M6 bloom keys off it)
 const float PACK_GLOW = 0.5;    // emission of a resource pack's glowing texels on blocks that give no light (ores), as a share of EMISSIVE
-const uint CANDIDATES = 8u;     // lights considered per shading point (RIS)
+uint lightCandidates;           // Frame.lightCandidates (4)
+const uint CANDIDATES = 8u;     // lights considered per shading point (RIS) when not stochastic
 const int MAX_HELD = 8;         // held lights (torches in hand...) sampled at most (Lights.MAX_HELD)
 const float HELD_CLEAR = 0.5;   // a held light's shadow ray stops this far short of it: past the hand and item holding it
 const float SUN_COS = 0.99994;  // 0.6 degree disc radius: soft-shadow penumbra
@@ -155,7 +162,7 @@ const float SSS_TRANSMISSION = 1.0;     // the same at a pack's full subsurface 
 const float METAL_ROUGHNESS = 0.2, METAL_DIFFUSE = 0.3, GEM_ROUGHNESS = 0.05, GEM_F0 = 0.08;
 // LabPBR specular: surfaces smoother than this (perceptual roughness) get a reflection ray; rougher dielectrics
 // stay diffuse. Metals always get one (they have no diffuse).
-const float SPECULAR_CUTOFF = 0.6;
+float specularCutoff;           // Frame.specularCutoff (0.6 by default)
 // LabPBR's hardcoded metals (_s green 230-237): reflectance at normal incidence, linear.
 const vec3 HARDCODED_F0[8] = vec3[](
 	vec3(0.531, 0.512, 0.496), // iron
@@ -173,7 +180,7 @@ const uint CACHE_PROBES = 8u;      // slots a key may sit in, from its hash on
 const float CACHE_FIXED = 4096.0;  // samples' fixed-point scale (atomic sums)
 const float CACHE_MAX = 64.0;      // brightest sample kept, per channel
 const int CACHE_PATH = 3;          // bounces a feeding pixel follows
-const uint CACHE_FEED = 16u;       // one 8x8 group in this many feeds the cache each frame       // translucent surfaces a view ray passes before the next one counts as opaque
+uint cacheFeed;                   // Frame.cacheFeed: one 8x8 group in this many feeds the cache each frame (16)       // translucent surfaces a view ray passes before the next one counts as opaque
 
 layout(push_constant) uniform Push {
 	mat4 invViewProj;   // inverse(projection * viewRotation): NDC -> camera-relative world
@@ -453,7 +460,7 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 		h.gem = false;
 		h.f0 = g < 230.0 ? vec3(g / 255.0) : g < 238.0 ? HARDCODED_F0[int(g) - 230] : h.albedo;
 		h.diffuse = h.metal ? 0.0 : 1.0;
-		h.specular = h.metal || h.roughness < SPECULAR_CUTOFF;
+		h.specular = h.metal || h.roughness < specularCutoff;
 	} else if (h.metal || h.gem) {
 		h.f0 = h.metal ? h.albedo : vec3(GEM_F0);
 		h.roughness = h.metal ? METAL_ROUGHNESS : GEM_ROUGHNESS;
@@ -481,7 +488,7 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 			h.shading = normalize(mix(h.shading, h.normal, puddle));
 			h.albedo *= mix(1.0, 0.7, puddle);
 		}
-		h.specular = h.metal || h.roughness < SPECULAR_CUTOFF;
+		h.specular = h.metal || h.roughness < specularCutoff;
 	}
 	h.emission = inst.kind == KIND_DYNAMIC || h.water || h.foliage || h.glass || level > 15.0 ? 0.0 : level / 15.0;
 	h.listed = h.emission > 0.0;
@@ -594,7 +601,8 @@ const float CLOUD_EXTINCTION = 0.05;       // per block, at full density
 const float CLOUD_FAR = 6000.0;            // blocks: past this the layer isn't marched
 // Few steps, jittered per pixel and frame: RR smooths what one frame's march leaves noisy (48 steps and 4
 // light steps cost 5 ms at 1440p Balanced).
-const int CLOUD_STEPS = 24, CLOUD_LIGHT_STEPS = 4;
+int cloudSteps;                            // Frame.cloudSteps (24)
+const int CLOUD_LIGHT_STEPS = 4;
 const float CLOUD_LIGHT_STEP = 12.0;       // the first; each next one twice as long (12, 24, 48, 96 blocks)
 const float CLOUD_DETAIL_FAR = 2000.0;     // blocks: past this the edge detail is too small to see
 // Noise scales, blocks per tile: each divides the next, so the wind's wrap (Frame.cloudTime, every weather tile)
@@ -664,10 +672,10 @@ vec4 clouds(vec3 origin, vec3 dir, float tMax) {
 		phase[o] = mix(henyeyGreenstein(c, 0.7 * g), henyeyGreenstein(c, -0.2 * g), 0.4);
 	}
 	float powderShare = 0.6 * (0.5 - 0.5 * c); // none looking towards the light: its edges glow there
-	float dt = (t1 - t0) / float(CLOUD_STEPS), t = t0 + dt * rand();
+	float dt = (t1 - t0) / float(cloudSteps), t = t0 + dt * rand();
 	vec3 radiance = vec3(0.0);
 	float transmittance = 1.0;
-	for (int i = 0; i < CLOUD_STEPS && transmittance > 0.02; i++, t += dt) {
+	for (int i = 0; i < cloudSteps && transmittance > 0.02; i++, t += dt) {
 		vec3 p = o + dir * t;
 		float d = cloudDensity(p, t < CLOUD_DETAIL_FAR);
 		if (d <= 0.0) continue;
@@ -694,15 +702,15 @@ vec4 clouds(vec3 origin, vec3 dir, float tMax) {
 
 // Volumetric fog (M6 step 5): a thin haze, densest at sea level and thinning upwards, thicker in rain, lit by
 // the sun or moon where it reaches (a shadow ray per step: shafts through leaves, cave mouths and cloud gaps)
-// and by the sky as much as the ray's end sees it. FOG_STEPS jittered steps over the first FOG_FAR blocks, longer
-// with distance (boundaries at FOG_FAR (i / FOG_STEPS)^2: shafts near the eye are the ones that show); RR smooths
+// and by the sky as much as the ray's end sees it. fogSteps jittered steps over the first FOG_FAR blocks, longer
+// with distance (boundaries at FOG_FAR (i / fogSteps)^2: shafts near the eye are the ones that show); RR smooths
 // what one frame leaves noisy. Not underwater, and not in the Nether or End (no sun to make shafts).
 const float FOG_DENSITY = 0.0012;  // extinction per block at sea level on a clear day (0.0025 greyed the sky)
 const float FOG_HEIGHT = 80.0;     // blocks over which it thins by e
 const float FOG_FAR = 160.0;
 const float FOG_RAIN = 15.0;       // density in full rain, over a clear day's: about 170 blocks' visibility at sea level
 const float FOG_TAIL = 1200.0;     // blocks: rain's fog past FOG_FAR, integrated in one go (unshadowed)
-const int FOG_STEPS = 2;              // each a shadow ray: 6 cost 1.9 ms, 4 about 1 ms (M7 step 3: 2, spaced as above)
+int fogSteps;                      // Frame.fogSteps, each a shadow ray: 6 cost 1.9 ms, 4 about 1 ms (M7 step 3: 2 by default)
 float fogSkyLight = 1.0; // vanilla's sky light where the primary ray ended (1 for the sky): the haze's sky fill
 
 // Underwater, the haze is the water's own: light shafts from the surface (through its waves: caustics) over the
@@ -713,9 +721,9 @@ vec4 waterShafts(vec3 origin, vec3 dir, float tMax) {
 	vec3 l = day ? pc.sunDir.xyz : pc.moonDir.xyz;
 	if (l.y <= 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
 	vec3 light = (day ? sunRadiance(l.y) : moonRadiance(l.y)) * henyeyGreenstein(dot(dir, l), 0.8);
-	float t1 = min(tMax, 48.0), dt = t1 / float(FOG_STEPS), t = dt * rand();
+	float t1 = min(tMax, 48.0), dt = t1 / float(max(fogSteps, 1)), t = dt * rand();
 	vec3 radiance = vec3(0.0);
-	for (int i = 0; i < FOG_STEPS; i++, t += dt) {
+	for (int i = 0; i < fogSteps; i++, t += dt) {
 		vec3 x = origin + dir * t;
 		radiance += shadowTransmittance(x, l, 512.0) * light * WATER_SHAFTS * dt * exp(-waterSigma * t);
 	}
@@ -734,8 +742,8 @@ vec4 fog(vec3 origin, vec3 dir, float tMax) {
 	float density = FOG_DENSITY * mix(FOG_RAIN, 1.0, pc.moonDir.w);
 	vec3 radiance = vec3(0.0);
 	float transmittance = 1.0;
-	for (int i = 0; i < FOG_STEPS; i++) {
-		float a = float(i) / float(FOG_STEPS), b = float(i + 1) / float(FOG_STEPS);
+	for (int i = 0; i < fogSteps; i++) {
+		float a = float(i) / float(fogSteps), b = float(i + 1) / float(fogSteps);
 		float t0 = t1 * a * a, dt = t1 * b * b - t0;
 		vec3 x = origin + dir * (t0 + dt * jitter);
 		float sigma = density * exp(-max(x.y + anchorWorld.y - 63.0, 0.0) / FOG_HEIGHT);
@@ -832,7 +840,7 @@ vec3 blockLight(vec3 pos, vec3 n, vec3 shading) {
 	uint chosen = 0u;
 	vec3 chosenContribution = vec3(0.0);
 	// Fewer candidates when stochastic: the denoiser (or accumulation) absorbs the extra noise.
-	uint candidates = pc.stochastic != 0.0 ? CANDIDATES / 2u : CANDIDATES;
+	uint candidates = pc.stochastic != 0.0 ? lightCandidates : CANDIDATES;
 	for (uint m = 0u; m < candidates; m++) {
 		float u = rand() * total, below = 0.0;
 		int i = 0, hi = buckets - 1; // the first bucket whose cdf passes u, by bisection
@@ -1590,6 +1598,11 @@ void main() {
 	nightFloor = frame.nightFloor;
 	wetness = frame.wetness;
 	off = frame.off;
+	fogSteps = frame.fogSteps;
+	cloudSteps = frame.cloudSteps;
+	lightCandidates = frame.lightCandidates;
+	specularCutoff = frame.specularCutoff;
+	cacheFeed = max(frame.cacheFeed, 1u);
 	normalStrength = frame.normalStrength;
 	hybrid = frame.hybrid != 0u;
 	cacheOn = frame.cache != uvec2(0u);
@@ -1600,7 +1613,7 @@ void main() {
 		anchor = frame.anchor;
 		// Whole 8x8 groups feed, not scattered pixels: the GPU runs 32 pixels in lockstep, and one feeding pixel
 		// among them made all wait for its longer path.
-		feeding = pcg(gl_WorkGroupID.x + pcg(gl_WorkGroupID.y + pcg(pc.seed ^ 0xA511E9B3u))) % CACHE_FEED == 0u;
+		feeding = pcg(gl_WorkGroupID.x + pcg(gl_WorkGroupID.y + pcg(pc.seed ^ 0xA511E9B3u))) % cacheFeed == 0u;
 	}
 	vec4 current = radiance(vec2(p) + 0.5 + pc.jitter, vec2(size), uvec2(p));
 	if (current.a > 0.0) { // clouds (flying above or through them) and haze between the camera and what it hit

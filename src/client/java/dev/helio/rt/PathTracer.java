@@ -391,7 +391,10 @@ public final class PathTracer {
 				.putFloat(132, cloudTime).putFloat(136, cloudBottom).putFloat(140, cloudCover(mc))
 				.putFloat(144, mc.options.getEffectiveRenderDistance() * 16)
 				.putFloat(148, HelioConfig.current.nightBrightness / 100f)
-				.putFloat(152, updateWetness(mc)).putInt(156, benchOff);
+				.putFloat(152, updateWetness(mc)).putInt(156, benchOff)
+				.putInt(160, HelioConfig.current.fogSteps).putInt(164, HelioConfig.current.cloudSteps)
+				.putInt(168, HelioConfig.current.lightCandidates).putFloat(172, HelioConfig.current.specularCutoff / 100f)
+				.putInt(176, HelioConfig.current.cacheFeed);
 			lastViewProj.set(viewProj);
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			Sky.update(cmd, sun, moon, hasSky ? rainBrightness : 1, moonPhase, s);

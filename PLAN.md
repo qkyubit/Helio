@@ -984,6 +984,23 @@ everywhere; Performance (Hybrid, RR Performance) >= 90. Proposed by Claude; the 
 5. [ ] Ray budgets per preset; half-res GI where RR hides it. Shader execution reordering:
    VK_EXT_ray_tracing_invocation_reorder is exposed, but only for ray tracing pipelines (Helio traces with
    ray queries in compute); worth it only if the breakdown shows divergence-bound shading.
+   - Ray budget into the frame data (2026-11-15), set per preset and tunable in an early advanced settings
+     screen (user: "make the M9 menu early with just the tweaks for this"): fog steps, cloud steps, light
+     candidates, specular cutoff (percent roughness), cache feed (1 group in N). `HelioAdvancedScreen`, from an
+     "Advanced..." button in Helio's settings: a slider per value, a reset to its default beside it, Reset All;
+     changing one makes the preset Custom. Defaults (`HelioConfig.DEFAULTS`) are Balanced's, today's values.
+
+     | Preset | Fog | Clouds | Candidates | Specular | Feed |
+     |---|---|---|---|---|---|
+     | Performance (Hybrid) | 1 | 16 | 4 | 40% | 16 |
+     | Balanced | 2 | 24 | 4 | 60% | 16 |
+     | Quality | 3 | 32 | 6 | 60% | 16 |
+     | Ultra, Photo | 4 | 32 | 8 | 70% | 12 |
+
+     Path trace with each budget under Balanced's other settings (overworld / water + glass / cave / Nether, ms):
+     Balanced 8.41 / 9.48 / 5.36 / 5.37; Performance's 7.93 / 9.32 / 5.06 / 5.19; Ultra's 10.24 / 11.52 /
+     7.10 / 6.39.
+   - Still to do here: half-resolution bounce in its own pass (the bounce ray's ~1 ms).
 6. [ ] VRAM budget: cap scene memory, shrink the RT distance near it; RAM budget.
 7. [ ] CPU: mesh -> BLAS input off the render thread; fewer FFM calls per frame.
 8. [ ] Exit: targets met, no regressions against step 1's baseline.
@@ -1021,6 +1038,7 @@ Exit: compat table in README; crashes fixed or mod marked incompatible.
   thickness, wind and density, fog density, bloom, exposure key and range, water absorption and tint, foliage
   transmission, specular cutoff, normal map strength, rain darkness, and the like. The shader constants behind
   them move into the frame data so they change live.
+  - Started early (M7 step 5): `HelioAdvancedScreen` holds the ray budget only; the rest joins it here.
 - Recommended JVM args / Prism settings documented.
 - CI build on tag.
 

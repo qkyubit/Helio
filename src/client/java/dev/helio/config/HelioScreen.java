@@ -119,7 +119,7 @@ public class HelioScreen extends OptionsSubScreen {
 	}
 
 	/** An integer slider from min to max, labelled "name: n" + suffix, with name's tooltip. */
-	private static AbstractWidget slider(String key, int value, int min, int max, String suffix, java.util.function.IntConsumer set) {
+	static AbstractWidget slider(String key, int value, int min, int max, String suffix, java.util.function.IntConsumer set) {
 		AbstractSliderButton slider = new AbstractSliderButton(0, 0, 150, 20, Component.empty(), (value - min) / (double) (max - min)) {
 			{
 				updateMessage();
@@ -163,6 +163,8 @@ public class HelioScreen extends OptionsSubScreen {
 	@Override
 	protected void addFooter() {
 		LinearLayout footer = layout.addToFooter(LinearLayout.horizontal().spacing(8));
+		footer.addChild(Button.builder(Component.translatable("helio.advanced"), b -> minecraft.gui.setScreen(new HelioAdvancedScreen(this)))
+			.width(100).build());
 		footer.addChild(Button.builder(Component.translatable("helio.copy_report"), b -> {
 			minecraft.keyboardHandler.setClipboard(SelfCheck.debugReport());
 			b.setMessage(Component.translatable("helio.copied"));
