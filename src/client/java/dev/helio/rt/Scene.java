@@ -4,6 +4,7 @@ import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.MeshData;
 import com.mojang.renderpearl.backend.vulkan.VulkanCommandEncoder;
 import dev.helio.Helio;
+import dev.helio.PerfOverlay;
 import dev.helio.config.HelioConfig;
 import dev.helio.mixin.ViewAreaAccessor;
 import dev.helio.vk.GpuTimers;
@@ -12,6 +13,7 @@ import dev.helio.vk.Memory.Buf;
 import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
 import net.minecraft.client.Minecraft;
@@ -83,8 +85,8 @@ public final class Scene {
 	/** ommPlan: cutout layers with micromaps on, worked out on the compile worker (Micromaps.plan). */
 	private record Geo(int layer, int mask, Buf vertices, int quads, Blas blas, Micromaps.Plan ommPlan) {}
 
-	/** layers null: remove the section. lights: Lights.collect output, null if none. */
-	private record Upload(long node, Geo[] layers, int[] lights) {}
+	/** layers null: the section has no geometry (reset: vanilla dropped it). lights: Lights.collect output, null if none. */
+	private record Upload(long node, Geo[] layers, int[] lights, boolean reset) {}
 
 	private record Deferred(long frame, Runnable free) {}
 
@@ -146,7 +148,8 @@ public final class Scene {
 
 	/** Compile worker thread: copy a freshly compiled section's layers. No layers means the section is empty now. */
 	public static void submit(long node, Map<ChunkSectionLayer, MeshData> meshes, int[] lights) {
-		if (!ready) return;
+		// Held back while memory is tight: the copies below are what fills it (withHiddenSections asks again after).
+		if (!ready || !inKeepRange(node) || memoryTight && !nearCamera(node)) return;
 		Geo[] geos = null;
 		for (Map.Entry<ChunkSectionLayer, MeshData> e : meshes.entrySet()) {
 			MeshData mesh = e.getValue();
@@ -174,12 +177,12 @@ public final class Scene {
 			}
 			geos[e.getKey().ordinal()] = new Geo(e.getKey().ordinal(), mask, vertices, quads, new Blas(), plan);
 		}
-		incoming.add(new Upload(node, geos, lights));
+		incoming.add(new Upload(node, geos, lights, false));
 	}
 
 	/** Vanilla reset a section (unloaded, moved out of range, or the renderer was rebuilt). Any thread. */
 	public static void remove(long node) {
-		if (ready) incoming.add(new Upload(node, null, null));
+		if (ready) incoming.add(new Upload(node, null, null, true));
 	}
 
 	/** True on a compile worker while it runs SectionCompiler.compile. */
@@ -270,9 +273,16 @@ public final class Scene {
 		toCompile.addAll(visible);
 		SectionPos c = area.getCameraSectionPos();
 		int r = rtDistance();
+		keepX = c.x();
+		keepZ = c.z();
+		keepRadius = r + KEEP_MARGIN;
+		var extractor = Minecraft.getInstance().levelExtractor;
 		// ponytail: scans the whole view area each frame (~0.1 ms at 12 chunks); keep a dirty set if it shows up in profiles.
 		for (RenderSection section : ((ViewAreaAccessor) area).helio$sections()) {
 			long n = section.getSectionNode();
+			if (Math.abs(SectionPos.x(n) - c.x()) > keepRadius || Math.abs(SectionPos.z(n) - c.z()) > keepRadius) continue;
+			// Compiled while out of range (or dropped since): vanilla thinks it's done, so ask again, once.
+			if (!held.contains(n) && requested.add(n)) extractor.setSectionDirty(SectionPos.x(n), SectionPos.y(n), SectionPos.z(n));
 			if (Math.abs(SectionPos.x(n) - c.x()) <= r && Math.abs(SectionPos.z(n) - c.z()) <= r) toCompile.add(section);
 		}
 		return toCompile;
@@ -287,7 +297,95 @@ public final class Scene {
 	}
 
 	private static int rtDistance() {
-		return Math.min(HelioConfig.current.rayTracingDistance, Minecraft.getInstance().options.getEffectiveRenderDistance());
+		return Math.min(Math.min(HelioConfig.current.rayTracingDistance, Minecraft.getInstance().options.getEffectiveRenderDistance()), vramDistance);
+	}
+
+	/**
+	 * M7 step 6: the scene holds sections within the RT distance and {@value #KEEP_MARGIN} more, not vanilla's whole
+	 * render distance (at 32 chunks with a 3D pack that overflowed VRAM). Sections coming into range that it doesn't
+	 * hold are marked dirty, so vanilla compiles them again (withHiddenSections).
+	 */
+	private static final int KEEP_MARGIN = 1;
+	/** Camera section and keep radius, for compile workers (submit). */
+	private static volatile int keepX, keepZ, keepRadius = Integer.MAX_VALUE;
+	/** Render thread: sections an upload arrived for (with or without geometry), and those asked for since. */
+	private static final LongOpenHashSet held = new LongOpenHashSet(), requested = new LongOpenHashSet();
+
+	private static boolean inKeepRange(long node) {
+		return Math.abs(SectionPos.x(node) - keepX) <= keepRadius && Math.abs(SectionPos.z(node) - keepZ) <= keepRadius;
+	}
+
+	private static boolean nearCamera(long node) {
+		return Math.abs(SectionPos.x(node) - keepX) <= MIN_DISTANCE && Math.abs(SectionPos.z(node) - keepZ) <= MIN_DISTANCE;
+	}
+
+	/**
+	 * VRAM guard: past {@value #VRAM_HIGH} of the device-local budget (VK_EXT_memory_budget: everything on the GPU,
+	 * vanilla's own meshes and other programs included) the RT distance shrinks, in one step, to what should bring it
+	 * to {@value #VRAM_TARGET} (scene memory goes with the distance squared), down to {@value #MIN_DISTANCE}, and the
+	 * sections past it go at once. It starts at {@value #START_DISTANCE} chunks (joining a level, changing the setting)
+	 * and grows a chunk at a time, once the last ring is built, below {@value #VRAM_LOW}, and short of a distance that
+	 * overflowed: shrinking after a burst was too late at 24 chunks with a 3D pack (the burst of compiles had already
+	 * filled system memory). The margins leave room for vanilla, still loading its own.
+	 * Each change waits {@value #GUARD_NANOS} ns for evictions to free memory and the readings to follow. Meanwhile
+	 * (and whenever VRAM is past {@value #VRAM_HIGH}) only sections within {@value #MIN_DISTANCE} chunks get built:
+	 * loading a 3D pack at 24 chunks overshot the budget before the guard could act, the driver spilled into system
+	 * memory, and the kernel's OOM killer took the game (2026-11-15).
+	 * System memory counts too: under
+	 * {@value #RAM_RESERVE_MB} MB available (Linux MemAvailable) is tight as well, and shrinks like an overflow.
+	 */
+	private static final float VRAM_HIGH = 0.85f, VRAM_TARGET = 0.75f, VRAM_LOW = 0.65f;
+	private static final int MIN_DISTANCE = 4, START_DISTANCE = 8;
+	private static final long GUARD_NANOS = 3_000_000_000L;
+	public static int vramDistance = START_DISTANCE;
+	private static int overflowedAt = Integer.MAX_VALUE, guardSetting;
+	private static long lastGuardChange;
+	private static Object guardLevel;
+	private static final long RAM_RESERVE_MB = 3072;
+	/** VRAM past VRAM_HIGH, or system memory short, at the last reading: uploads and builds held to the nearest sections. */
+	private static volatile boolean memoryTight;
+	private static boolean ramTight, evictNow;
+	private static final java.nio.file.Path MEMINFO = java.nio.file.Path.of("/proc/meminfo");
+
+	private static void readMemory() {
+		PerfOverlay.readVram();
+		if (frame % 64 == 0 && java.nio.file.Files.isReadable(MEMINFO)) {
+			try {
+				for (String line : java.nio.file.Files.readAllLines(MEMINFO)) {
+					if (line.startsWith("MemAvailable:")) ramTight = Long.parseLong(line.replaceAll("\\D", "")) / 1024 < RAM_RESERVE_MB;
+				}
+			} catch (java.io.IOException | NumberFormatException ignored) {
+			}
+		}
+		boolean was = memoryTight;
+		memoryTight = ramTight || PerfOverlay.vramBudget > 0 && PerfOverlay.vramUsed > VRAM_HIGH * PerfOverlay.vramBudget;
+		if (was && !memoryTight) requested.clear(); // sections held back meanwhile: ask for them again
+	}
+
+	private static void guardVram(Minecraft mc) {
+		int setting = Math.min(HelioConfig.current.rayTracingDistance, mc.options.getEffectiveRenderDistance());
+		if (setting != guardSetting || mc.level != guardLevel) {
+			guardSetting = setting;
+			guardLevel = mc.level;
+			overflowedAt = Integer.MAX_VALUE;
+			vramDistance = setting > START_DISTANCE ? START_DISTANCE : Integer.MAX_VALUE;
+			lastGuardChange = System.nanoTime();
+		}
+		if (System.nanoTime() - lastGuardChange < GUARD_NANOS) return;
+		long used = PerfOverlay.vramUsed, budget = PerfOverlay.vramBudget, scene = Memory.allocated.get();
+		if (budget <= 0) return;
+		int r = rtDistance(), to = r;
+		if ((used > VRAM_HIGH * budget || ramTight) && r > MIN_DISTANCE) {
+			double keep = ramTight ? 0.75 : Math.max(scene - (used - VRAM_TARGET * budget), 0) / Math.max(scene, 1);
+			to = Math.max(MIN_DISTANCE, Math.min(r - 1, (int) ((r + KEEP_MARGIN) * Math.sqrt(keep)) - KEEP_MARGIN));
+			overflowedAt = r;
+		} else if (used < VRAM_LOW * budget && !ramTight && pending.isEmpty() && r < setting && r + 1 < overflowedAt) to = r + 1;
+		if (to == r) return;
+		vramDistance = to >= setting ? Integer.MAX_VALUE : to;
+		lastGuardChange = System.nanoTime();
+		evictNow = true;
+		Helio.LOG.info("VRAM {} / {} MB (scene {} MB, {} MB free in its blocks{}): RT distance {} -> {} chunks", used >> 20, budget >> 20,
+			scene >> 20, PerfOverlay.vramSlack >> 20, ramTight ? ", RAM short" : "", r, to);
 	}
 
 	/**
@@ -299,7 +397,12 @@ public final class Scene {
 		frame++;
 		while (!deferred.isEmpty() && deferred.peek().frame + RING <= frame) deferred.poll().free.run();
 		drainIncoming();
-		if (frame % 64 == 0) evictOutOfRange(camera);
+		if (frame % 64 == 0 || evictNow) evictOutOfRange(camera);
+		evictNow = false;
+		if (build && frame % 8 == 0) {
+			readMemory();
+			guardVram(Minecraft.getInstance());
+		}
 		pendingCount = pending.size();
 		sectionCount = sections.size();
 		tlas = 0;
@@ -321,6 +424,13 @@ public final class Scene {
 
 	private static void drainIncoming() {
 		for (Upload u; (u = incoming.poll()) != null; ) {
+			requested.remove(u.node);
+			if (u.reset) held.remove(u.node);
+			else if (inKeepRange(u.node)) held.add(u.node);
+			else { // out of range since it compiled
+				if (u.layers != null) freeGeos(u.layers);
+				continue;
+			}
 			Lights.put(u.node, u.lights);
 			if (u.layers == null) {
 				Geo[] stale = pending.remove(u.node);
@@ -334,9 +444,11 @@ public final class Scene {
 		}
 	}
 
-	/** Drops sections a removal raced past (compiled after vanilla reset them): anything beyond the view area. */
+	/** Drops sections past the keep range (and any a removal raced past). */
 	private static void evictOutOfRange(SectionPos camera) {
-		int r = Minecraft.getInstance().options.getEffectiveRenderDistance() + 2;
+		int r = keepRadius;
+		held.removeIf((long n) -> !inKeepRange(n));
+		requested.removeIf((long n) -> !inKeepRange(n));
 		var it = sections.long2ObjectEntrySet().fastIterator();
 		while (it.hasNext()) {
 			Long2ObjectMap.Entry<Geo[]> e = it.next();
@@ -345,6 +457,16 @@ public final class Scene {
 				deferFree(e.getValue());
 				Lights.put(n, null);
 				it.remove();
+			}
+		}
+		var queued = pending.long2ObjectEntrySet().fastIterator(); // never reached the GPU
+		while (queued.hasNext()) {
+			Long2ObjectMap.Entry<Geo[]> e = queued.next();
+			long n = e.getLongKey();
+			if (Math.abs(SectionPos.x(n) - camera.x()) > r || Math.abs(SectionPos.z(n) - camera.z()) > r) {
+				freeGeos(e.getValue());
+				Lights.put(n, null);
+				queued.remove();
 			}
 		}
 	}
@@ -386,6 +508,7 @@ public final class Scene {
 		var it = pending.long2ObjectEntrySet().fastIterator();
 		while (it.hasNext() && batch.size() < MAX_BUILDS - 2 && triangles < MAX_TRIANGLES) {
 			Long2ObjectMap.Entry<Geo[]> e = it.next();
+			if (memoryTight && !nearCamera(e.getLongKey())) continue;
 			for (Geo g : e.getValue()) {
 				if (g == null) continue;
 				batch.add(g);

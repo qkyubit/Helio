@@ -1014,7 +1014,38 @@ everywhere; Performance (Hybrid, RR Performance) >= 90. Proposed by Claude; the 
      - Bench scene added: "shore" (71.57 70.1 -193.19, yaw -20.46, pitch 17.12, tick 553000), the user's view
        of the specks.
    - Step 5 closes with the per-preset ray budget only.
-6. [ ] VRAM budget: cap scene memory, shrink the RT distance near it; RAM budget.
+6. [x] VRAM budget: cap scene memory, shrink the RT distance near it; RAM budget.
+   - Measured (2026-11-15, overworld scene, RT distance 12): the scene held every section vanilla compiled in its
+     render distance, not just the RT distance (the TLAS only used those). Render distance 12, SPBR: scene 676 MB,
+     VRAM 2.6 / 14.2 GB, game RSS 3.8 GB. 32: scene 1.1 GB, RSS 5.6. 32 with 3D Vanilla: scene 8.1 GB, VRAM full
+     (14.3 / 14.3), 17 FPS, RSS 7.9 GB.
+   - Keep range (`Scene`): only sections within the RT distance + 1 are copied, built and kept; the rest are dropped
+     (queued ones too). Those coming into range that the scene doesn't hold are marked dirty
+     (`LevelExtractor.setSectionDirty`), once, so vanilla compiles them again.
+   - Memory guard (`Scene.guardVram`, every 8 frames, changes 3 s apart): VK_EXT_memory_budget usage past 85% of the
+     budget, or under 3 GB of system memory available (Linux MemAvailable), shrinks the RT distance in one step to
+     aim at 75% (scene memory goes with distance squared; min 4) and evicts at once. While tight, only sections
+     within 4 chunks are copied or built. It starts at 8 chunks (joining, changing the setting) and grows a chunk
+     at a time once the last ring is built and usage is under 65%, never back to a distance that overflowed. The
+     overlay shows "RT distance N (memory guard)" while it holds the distance down.
+   - Two OOM kills on the way (render distance 32, 3D Vanilla, RT distance 24): the kernel killed the game, and once
+     Claude Desktop, with 9.4 GB of the game's memory in shared memory (VRAM spilled to system RAM). Causes, in turn:
+     - VMA kept its 256 MB blocks after the evicted sections' buffers were freed, so VRAM usage never fell and the
+       guard shrank to 4 chunks; and vanilla, still loading, couldn't use that space and spilled. Fixed: 16 MB
+       blocks, and buffers of 256 KB or more get memory of their own (`Memory.DEDICATED_BYTES`). Free space left in
+       VMA's blocks after shrinking: 11-200 MB (was gigabytes).
+     - Compile workers copy section vertices before any build, so holding back builds didn't stop growth: copies
+       are held back too while tight.
+     - Shrinking after the load burst was too late at 24 chunks (the compiles already queued filled system
+       memory): hence the slow start.
+     Tests since ran with a watchdog (scratchpad watchdog.sh) that kills the game under 2 GB available.
+   - Results (render distance 32 with 3D Vanilla): RT distance 12: settles at 6-9 chunks, 49-50 FPS, VRAM 11.3 GB.
+     RT distance 24: stays at 8 chunks (VRAM 70%, over the growth line), 50 FPS, scene 3.9 GB, RSS 4.2 GB, no
+     OOM. Render distance 12, SPBR: grows 8 -> 12 in 10 s after joining, then as before (8368 instances, scene
+     676 MB, VRAM 2.3 GB, 68 FPS overworld, 63 water + glass).
+   - Bench lines now also log scene MB, VRAM, sections, instances and heap; bench.sh takes OPTS (sed on
+     options.txt: render distance, packs) and SETTLE (seconds after joining).
+   - Flying around checked by the user (2026-11-15): sections entering the RT range come back.
 7. [ ] CPU: mesh -> BLAS input off the render thread; fewer FFM calls per frame.
 8. [ ] Frame generation troubleshooting (user, 2026-11-15: "frame gen still doesn't look right"; a recurring
    issue, so it gets its own step at the end of M7). Start from what the user sees now, then go through the M4

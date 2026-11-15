@@ -30,6 +30,13 @@ public final class Memory {
 	/** Bytes currently allocated through {@link #buffer}, for the overlay. */
 	public static final AtomicLong allocated = new AtomicLong();
 
+	/**
+	 * Buffers this big get memory of their own, back to the driver as soon as they're freed. In shared blocks, the
+	 * scene's evicted sections left blocks part-used: VMA kept them, and vanilla, needing VRAM, spilled into system
+	 * memory instead (M7 step 6).
+	 */
+	private static final long DEDICATED_BYTES = 256 << 10;
+
 	/** address and mapped are rounded up to 256 bytes; offset is how far that is into the VkBuffer. */
 	public record Buf(long buffer, long allocation, long address, long mapped, long size, long offset) {
 		public void free() {
@@ -46,6 +53,9 @@ public final class Memory {
 			PointerBuffer pVma = s.mallocPointer(1);
 			check(vmaCreateAllocator(VmaAllocatorCreateInfo.calloc(s)
 				.flags(VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT)
+				// 16 MB blocks (default 256): VMA hands a block back to the driver only once it's empty, and with big
+				// blocks evicted sections left them part-used, so the scene shrinking freed no VRAM (M7 step 6).
+				.preferredLargeHeapBlockSize(16L << 20)
 				.physicalDevice(vk.getPhysicalDevice()).device(vk).instance(vk.getPhysicalDevice().getInstance())
 				.vulkanApiVersion(VK_API_VERSION_1_2)
 				.pVulkanFunctions(VmaVulkanFunctions.calloc(s).set(vk.getPhysicalDevice().getInstance(), vk)), pVma), "vmaCreateAllocator");
@@ -70,7 +80,8 @@ public final class Memory {
 			check(vmaCreateBuffer(vma,
 				VkBufferCreateInfo.calloc(s).sType$Default().size(size + 255).usage(usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT),
 				VmaAllocationCreateInfo.calloc(s).usage(VMA_MEMORY_USAGE_AUTO)
-					.flags(hostVisible ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT : 0),
+					.flags((hostVisible ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT : 0)
+						| (size >= DEDICATED_BYTES ? VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT : 0)),
 				pBuf, pAlloc, info), "vmaCreateBuffer");
 			long raw = vkGetBufferDeviceAddress(vk, VkBufferDeviceAddressInfo.calloc(s).sType$Default().buffer(pBuf.get(0)));
 			long offset = (256 - (raw & 255)) & 255;

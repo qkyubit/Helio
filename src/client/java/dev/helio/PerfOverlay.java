@@ -14,6 +14,7 @@ import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.util.vma.VmaBudget;
 import org.lwjgl.vulkan.VkPhysicalDeviceMemoryBudgetPropertiesEXT;
 import org.lwjgl.vulkan.VkPhysicalDeviceMemoryProperties;
 import org.lwjgl.vulkan.VkPhysicalDeviceMemoryProperties2;
@@ -21,6 +22,8 @@ import org.lwjgl.vulkan.VkPhysicalDeviceMemoryProperties2;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.lwjgl.util.vma.Vma.vmaGetHeapBudgets;
+import static org.lwjgl.vulkan.VK11.VK_MAX_MEMORY_HEAPS;
 import static org.lwjgl.vulkan.VK11.VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
 import static org.lwjgl.vulkan.VK11.vkGetPhysicalDeviceMemoryProperties2;
 
@@ -28,7 +31,12 @@ import static org.lwjgl.vulkan.VK11.vkGetPhysicalDeviceMemoryProperties2;
 public final class PerfOverlay {
 	private static long lastSlowUpdate;
 	private static double latencyMs = Double.NaN;
-	private static long vramUsed, vramBudget;
+	/**
+	 * Device-local heaps' usage and budget (VK_EXT_memory_budget), refreshed by {@link #readVram}; vramSlack: what
+	 * Helio's allocator holds but has free inside its blocks (VMA keeps blocks after their buffers are freed, so
+	 * usage doesn't fall when the scene shrinks; new buffers reuse that space first).
+	 */
+	public static long vramUsed, vramBudget, vramSlack;
 
 	private PerfOverlay() {}
 
@@ -49,7 +57,8 @@ public final class PerfOverlay {
 		else if (!c.rayTracing) lines.add("Ray tracing: off");
 		else {
 			lines.add("Scene " + Scene.instanceCount + " BLAS, " + Scene.tlasTriangles / 1000 + "k tris + " + Scene.dynamicTriangles / 1000 + "k entity, " + Scene.sectionCount + " sections, "
-				+ Scene.pendingCount + " queued, build " + ms(Pass.SCENE_BUILD) + ", " + (Memory.allocated.get() >> 20) + " MB");
+				+ Scene.pendingCount + " queued, build " + ms(Pass.SCENE_BUILD) + ", " + (Memory.allocated.get() >> 20) + " MB"
+				+ (Scene.vramDistance < Integer.MAX_VALUE ? ", RT distance " + Scene.vramDistance + " (memory guard)" : ""));
 			lines.add((c.lighting == HelioConfig.Lighting.HYBRID ? "Hybrid tracing " : "Path tracing ") + ms(Pass.PATH_TRACE) + ", " + Lights.count + " lights"
 				+ (c.accumulate ? ", " + PathTracer.frameIndex + " frames accumulated"
 					: Dlss.available() ? ", DLSS " + (Dlss.rayReconstruction() ? "RR " : "SR ") + Dlss.renderWidth + "x" + Dlss.renderHeight + " " + ms(Pass.DLSS) : ""));
@@ -76,21 +85,25 @@ public final class PerfOverlay {
 	}
 
 	/** VK_EXT_memory_budget numbers for device-local heaps (zero if the driver doesn't report them). */
-	private static void readVram() {
+	public static void readVram() {
 		if (Helio.device == null) return;
 		try (MemoryStack s = MemoryStack.stackPush()) {
 			VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = VkPhysicalDeviceMemoryBudgetPropertiesEXT.calloc(s).sType$Default();
 			VkPhysicalDeviceMemoryProperties2 props = VkPhysicalDeviceMemoryProperties2.calloc(s).sType$Default().pNext(budget.address());
 			vkGetPhysicalDeviceMemoryProperties2(Helio.device.vkDevice().getPhysicalDevice(), props);
 			VkPhysicalDeviceMemoryProperties mem = props.memoryProperties();
-			long used = 0, total = 0;
+			VmaBudget.Buffer vma = VmaBudget.calloc(VK_MAX_MEMORY_HEAPS, s);
+			if (Memory.vma != 0) vmaGetHeapBudgets(Memory.vma, vma);
+			long used = 0, total = 0, slack = 0;
 			for (int i = 0; i < mem.memoryHeapCount(); i++) {
 				if ((mem.memoryHeaps(i).flags() & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) continue;
 				used += budget.heapUsage(i);
 				total += budget.heapBudget(i);
+				slack += vma.get(i).statistics().blockBytes() - vma.get(i).statistics().allocationBytes();
 			}
 			vramUsed = used;
 			vramBudget = total;
+			vramSlack = slack;
 		}
 	}
 }

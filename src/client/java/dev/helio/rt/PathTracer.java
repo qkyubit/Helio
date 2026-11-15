@@ -7,6 +7,7 @@ import com.mojang.renderpearl.backend.vulkan.VulkanCommandEncoder;
 import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView;
 import dev.helio.Helio;
+import dev.helio.PerfOverlay;
 import dev.helio.config.HelioConfig;
 import dev.helio.mixin.VulkanCommandEncoderAccessor;
 import dev.helio.ngx.Dlss;
@@ -465,9 +466,14 @@ public final class PathTracer {
 			vkCmdCopyBuffer(cmd, meters.buffer(), frame.buffer(),
 				VkBufferCopy.calloc(1, s).srcOffset(meters.offset() + slot * 16L).dstOffset(frame.offset() + METER).size(16));
 			if ((timedFrames + 1) % 120 == 0) readBench();
-			if (bench && (timedFrames + 1) % 120 == 0) Helio.LOG.info("Bench: off {}, path trace {}, DLSS {}, scene {}, fps {}", benchOff,
-				String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE)), String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS)),
-				String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.SCENE_BUILD)), mc.getFps());
+			if (bench && (timedFrames + 1) % 120 == 0) {
+				PerfOverlay.readVram();
+				Helio.LOG.info("Bench: off {}, path trace {}, DLSS {}, scene {}, fps {}, scene MB {}, VRAM MB {} / {}, sections {}, instances {}, heap MB {}",
+					benchOff, String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE)), String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS)),
+					String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.SCENE_BUILD)), mc.getFps(), Memory.allocated.get() >> 20,
+					PerfOverlay.vramUsed >> 20, PerfOverlay.vramBudget >> 20, Scene.sectionCount, Scene.instanceCount,
+					(Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) >> 20);
+			}
 			if (++timedFrames % 600 == 0) Helio.LOG.info("GPU ms: path trace {}, DLSS {}", String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE)),
 				String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS)));
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
