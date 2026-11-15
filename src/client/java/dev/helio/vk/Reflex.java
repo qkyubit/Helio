@@ -20,11 +20,18 @@ import static org.lwjgl.vulkan.VK12.*;
 public final class Reflex {
 	private static VkDevice device;
 	private static long swapchain, timeline, frameId, lastPresentId;
+	/**
+	 * Frame IDs go up in steps of this, so frame generation can give its generated presents the IDs just below the
+	 * real frame's (DisplayClock waits on every present).
+	 */
+	public static final int ID_STRIDE = 8;
 	private static boolean inFrame;
 	private static HelioConfig.ReflexMode appliedMode;
 
 	/** Render thread time in Reflex's sleep, for frame generation's pacing log (it resets it). */
 	public static volatile long sleepNanos;
+	/** When this frame started, after the sleep (input is read from here on). */
+	public static volatile long frameStartNanos;
 
 	private Reflex() {}
 
@@ -94,7 +101,7 @@ public final class Reflex {
 	public static void frameStart() {
 		if (!active()) return;
 		if (presentsPerFrame != appliedPresentsPerFrame || HelioConfig.current.reflex != appliedMode) applySleepMode();
-		frameId++;
+		frameId += ID_STRIDE;
 		if (appliedMode != HelioConfig.ReflexMode.OFF && FrameGenSpike.takesOverSwapchain()) {
 			// The driver's latency sleep goes by the game's own acquires and presents: with frame generation's pacer
 			// presenting everything it slept the game to half speed (60 -> 40 fps at 2x). The same idea by hand.
@@ -111,6 +118,7 @@ public final class Reflex {
 			}
 		}
 		inFrame = true;
+		frameStartNanos = System.nanoTime();
 		marker(VK_LATENCY_MARKER_SIMULATION_START_NV);
 		marker(VK_LATENCY_MARKER_INPUT_SAMPLE_NV);
 	}
@@ -137,6 +145,14 @@ public final class Reflex {
 	 * Present ID for the present showing this frame's real image (0 = none). Loading screens can present
 	 * more than once per frame; IDs must strictly increase, so repeats go without one.
 	 */
+	/**
+	 * Present ID to tag this frame's queue submissions with (VkLatencySubmissionPresentIdNV), 0 = none. Doesn't use
+	 * up the ID: until M7 step 8 submissions took it through {@link #presentId}, so presents went out without one.
+	 */
+	public static long submissionId() {
+		return active() ? frameId : 0;
+	}
+
 	public static long presentId() {
 		if (!active() || frameId <= lastPresentId) return 0;
 		return lastPresentId = frameId;

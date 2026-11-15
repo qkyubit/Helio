@@ -113,6 +113,7 @@ public final class PathTracer {
 		int was = benchOff;
 		benchOff = 0;
 		benchFly = false;
+		dev.helio.vk.DisplayClock.logging = bench;
 		if (!bench) return;
 		try {
 			for (String word : java.nio.file.Files.readString(file).split("[\\s,]+")) {
@@ -121,6 +122,8 @@ public final class PathTracer {
 				// compiler threads on the way out (driver 620.70.06).
 				if (word.equalsIgnoreCase("quit")) Minecraft.getInstance().stop();
 				if (word.equalsIgnoreCase("fly")) benchFly = true;
+				// "togglefs": fullscreen on / off each read, recreating the swapchain (M7 step 8: the pacer crash).
+				if (word.equalsIgnoreCase("togglefs")) Minecraft.getInstance().execute(() -> { var o = Minecraft.getInstance().options.fullscreen(); o.set(!o.get()); });
 			}
 		} catch (IOException e) {
 			Helio.LOG.warn("Couldn't read {}", file, e);

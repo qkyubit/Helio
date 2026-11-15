@@ -144,10 +144,21 @@ public class VulkanGpuSurfaceMixin {
 		long id = Reflex.presentId();
 		try (MemoryStack s = MemoryStack.stackPush()) {
 			if (id != 0) info.pNext(VkPresentIdKHR.calloc(s).sType$Default().pNext(info.pNext()).swapchainCount(1).pPresentIds(s.longs(id)).address());
+			int r;
 			synchronized (FrameGenSpike.QUEUE_LOCK) {
-				return original.call(queue, info);
+				r = original.call(queue, info);
 			}
+			dev.helio.vk.DisplayClock.presented(queue.getDevice(), swapchain, id, -1, Reflex.frameStartNanos, 0, 1);
+			return r;
 		}
+	}
+
+	// Mojang destroys the swapchain after draining the queue (which waits for the pacer too, VulkanQueueMixin). A new
+	// swapchain can come back with the old one's handle, so frame generation must not go by the handle alone.
+	@Inject(method = "destroySwapchain", at = @At(value = "INVOKE",
+		target = "Lorg/lwjgl/vulkan/KHRSwapchain;vkDestroySwapchainKHR(Lorg/lwjgl/vulkan/VkDevice;JLorg/lwjgl/vulkan/VkAllocationCallbacks;)V"))
+	private void helio$swapchainGone(CallbackInfo ci) {
+		FrameGenSpike.swapchainDestroyed();
 	}
 
 	@Inject(method = "present", at = @At("TAIL"))

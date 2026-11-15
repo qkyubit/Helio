@@ -17,7 +17,7 @@ public class VulkanQueueSubmissionMixin {
 	@WrapOperation(method = "close", at = @At(value = "INVOKE",
 		target = "Lorg/lwjgl/vulkan/KHRSynchronization2;vkQueueSubmit2KHR(Lorg/lwjgl/vulkan/VkQueue;Lorg/lwjgl/vulkan/VkSubmitInfo2$Buffer;J)I"))
 	private int helio$tagFrame(VkQueue queue, VkSubmitInfo2.Buffer submits, long fence, Operation<Integer> original) {
-		long id = Reflex.presentId();
+		long id = Reflex.submissionId();
 		try (MemoryStack s = MemoryStack.stackPush()) {
 			if (id != 0) for (VkSubmitInfo2 submit : submits) {
 				submit.pNext(VkLatencySubmissionPresentIdNV.calloc(s).sType$Default().pNext(submit.pNext()).presentID(id).address());

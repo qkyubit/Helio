@@ -13,6 +13,7 @@ import dev.helio.vk.GpuTimers;
 import dev.helio.mixin.VulkanCommandEncoderAccessor;
 import dev.helio.rt.PathTracer;
 import dev.helio.vk.Shaders;
+import dev.helio.vk.DisplayClock;
 import dev.helio.vk.Reflex;
 import it.unimi.dsi.fastutil.longs.LongList;
 import net.minecraft.client.Minecraft;
@@ -138,6 +139,9 @@ public final class FrameGenSpike {
 	public static boolean takeFrame(VulkanCommandEncoder encoder, GpuTextureView mainView, long swapchain, LongList images,
 		int swapWidth, int swapHeight, long surface, int format, boolean mojangAcquired) {
 		generating = false;
+		// The frame's CPU part, for the limiter: up to here, not to Mojang's submit, which waits for the last frame.
+		long cpu = System.nanoTime() - lastFrameStart;
+		if (lastFrameStart > 0 && cpu < 100_000_000L) cpuNanos = cpuNanos == 0 ? cpu : cpuNanos * 0.9 + cpu * 0.1;
 		if (failed || !captured) {
 			reset = true; // menus / no world: history is stale
 			Reflex.setPresentsPerFrame(1);
@@ -199,21 +203,62 @@ public final class FrameGenSpike {
 	}
 
 	/**
-	 * Start of a frame while frame generation presents (in place of Reflex's sleep): at most one frame queued ahead
-	 * of the GPU (the last must be done before the one after it starts), and no faster than the display shows
-	 * frames: refresh / presents per frame, 5% under (the pacer keeps presents a refresh apart).
+	 * Start of a frame while frame generation presents (in place of Reflex's sleep): late enough that its GPU work
+	 * begins as the last frame's ends, and, clocked by the display, that it's ready for its first refresh (frames
+	 * lock to the refresh). Unclocked: no faster than refresh / presents per frame, 5% under.
 	 */
 	public static void limitFrameStart() {
-		long due = lastFrameStart + (long) (refreshNanos * (generated + 1) * 1.05);
-		for (long wait; (wait = due - System.nanoTime()) > 0 && wait < 100_000_000L; ) LockSupport.parkNanos(wait);
-		if (frameDoneValue > 1) try (MemoryStack s = MemoryStack.stackPush()) {
+		if (!displayClocked) {
+			long due = lastFrameStart + (long) (refreshNanos * (generated + 1) * 1.05);
+			for (long wait; (wait = due - System.nanoTime()) > 0 && wait < 100_000_000L; ) LockSupport.parkNanos(wait);
+		}
+		long n = frameDoneValue; // the last frame handed to the GPU
+		if (n > 1) try (MemoryStack s = MemoryStack.stackPush()) {
 			vkWaitSemaphores(device.vkDevice(), VkSemaphoreWaitInfo.calloc(s).sType$Default().semaphoreCount(1)
-				.pSemaphores(s.longs(frameDone)).pValues(s.longs(frameDoneValue - 1)), 100_000_000L);
+				.pSemaphores(s.longs(frameDone)).pValues(s.longs(n - 1)), 100_000_000L);
+			// M7 step 8: waiting for the frame before last let Mojang's own limit (two frames ahead) decide, and
+			// frames queued up: 87 ms from frame start to the screen at 2x (29 ms with frame generation off). Like
+			// Reflex, start when this frame's GPU work can begin right as the last frame's ends: frame n starts
+			// on the GPU once n - 1 is done and n is submitted, takes the GPU time measured, and this frame's CPU
+			// part (frame start to submit) runs meanwhile.
+			long nowDone = doneAt(n - 1), prevDone = doneAt(n - 2);
+			if (nowDone == 0) nowDone = System.nanoTime(); // the pacer hasn't noted it yet: it's just done
+			if (submitAt[(int) (n % 16)] > 0) {
+				long sub = submitAt[(int) (n % 16)];
+				if (prevDone > 0) {
+					long busy = nowDone - Math.max(prevDone, submitAt[(int) ((n - 1) % 16)]);
+					if (busy > 0 && busy < 100_000_000L) gpuNanos = gpuNanos == 0 ? busy : gpuNanos * 0.9 + busy * 0.1;
+				}
+				long target = Math.max(nowDone, sub) + (long) gpuNanos - (long) cpuNanos - START_MARGIN;
+				for (long wait; (wait = target - System.nanoTime()) > 0 && wait < 50_000_000L; ) LockSupport.parkNanos(wait);
+			}
+			// Clocked by the display: ready no sooner than the frame's first present goes out (slotNanos), so frames
+			// lock to the refresh: n presents per frame, `hold` refreshes each.
+			if (displayClocked && refreshNanos > 0) {
+				chooseHold(generated + 1);
+				long slot = slotNanos(presentsAssigned, refreshNanos);
+				if (slot > 0) {
+					long target = slot - DisplayClock.presentLatencyNanos - refreshNanos / 2
+						- (long) copyDelayNanos - (long) gpuNanos - (long) cpuNanos - START_MARGIN;
+					for (long wait; (wait = target - System.nanoTime()) > 0 && wait < 100_000_000L; ) LockSupport.parkNanos(wait);
+				}
+			}
 		}
 		lastFrameStart = System.nanoTime();
 	}
 
 	private static long lastFrameStart;
+	/** Limiter: when each frame (frameDone value % 16) was submitted, its GPU time and the CPU time before submit, smoothed. */
+	private static final long[] submitAt = new long[16];
+	private static double gpuNanos, cpuNanos;
+	private static final long START_MARGIN = 1_500_000;
+	/** Pacer thread: when frameDone reached each value (% 16). */
+	private static final java.util.concurrent.atomic.AtomicLongArray doneNanos = new java.util.concurrent.atomic.AtomicLongArray(16), doneValue = new java.util.concurrent.atomic.AtomicLongArray(16);
+
+	private static long doneAt(long value) {
+		int i = (int) (value % 16);
+		return value > 0 && doneValue.get(i) == value ? doneNanos.get(i) : 0;
+	}
 
 	/** Whether a paced present found the swapchain suboptimal or out of date since the last call. */
 	public static boolean swapchainSuboptimal() {
@@ -221,6 +266,17 @@ public final class FrameGenSpike {
 	}
 
 	private static int stagedCount;
+
+	/**
+	 * Mojang is destroying the swapchain (render thread, queues drained, pacer idle). The next one may reuse its handle:
+	 * the pacer then copied into destroyed images, in vkCmdCopyImage (crash, M7 step 3 / 8).
+	 */
+	public static void swapchainDestroyed() {
+		awaitPacedPresent();
+		stagedSwapchain = 0;
+		PacedPresenter.forgetSwapchain();
+		DisplayClock.forgetSwapchain();
+	}
 
 	private static void awaitPacer(long frame) {
 		long start = System.nanoTime(), deadline = start + 1_000_000_000L;
@@ -258,7 +314,7 @@ public final class FrameGenSpike {
 	/** Pacer thread only: when its last present went out. */
 	private static long lastPresentNanos, behindFrames;
 	/** The display's refresh period; 0 if unknown. Presents keep this far apart, plus a margin for wake-up jitter. */
-	private static volatile long refreshNanos;
+	public static volatile long refreshNanos;
 	private static final long MIN_GAP_MARGIN = 100_000;
 
 	/**
@@ -273,9 +329,12 @@ public final class FrameGenSpike {
 		long now = System.nanoTime();
 		if (pendingCount > 0) {
 			int set = pendingSet, count = pendingCount;
-			long id = Reflex.presentId(), value = frameDoneValue;
-			long gap = refreshNanos;
-			pacedPresent = pacer.submit(() -> presentPaced(queue, set, count, id, value, gap));
+			long id = Reflex.presentId(), value = frameDoneValue, start = Reflex.frameStartNanos;
+			submitAt[(int) (value % 16)] = now; // Mojang's submit went just before its present
+			long gap = refreshNanos, base = presentsAssigned;
+			presentsAssigned += count;
+			boolean clocked = displayClocked = id != 0 && DisplayClock.available(device.vkDevice());
+			pacedPresent = pacer.submit(() -> presentPaced(set, count, id, value, gap, start, base, clocked));
 			presents += count - 1;
 			pendingCount = 0;
 		}
@@ -292,11 +351,12 @@ public final class FrameGenSpike {
 	}
 
 	/**
-	 * A frame's presents: Mojang's (the first generated image) as the GPU finishes, then the rest k / n of a frame
-	 * later. Never closer than one refresh: without vsync the compositor shows the newest image each refresh
-	 * (mailbox), and two presents in one refresh lose the first, a visible hitch at 3x and 4x on a ~180 Hz screen.
+	 * A frame's presents, generated ones first, then the real one. Clocked by the display (DisplayClock), each is
+	 * timed for its own refresh. Otherwise: the first as the GPU finishes, the rest k / n of a frame later, never
+	 * closer than one refresh (without vsync the compositor shows the newest image each refresh, and two presents in
+	 * one refresh lose the first, a visible hitch at 3x and 4x on a ~180 Hz screen).
 	 */
-	private static void presentPaced(VkQueue mainQueue, int set, int n, long id, long frameValue, long minGap) {
+	private static void presentPaced(int set, int n, long id, long frameValue, long minGap, long frameStart, long base, boolean clocked) {
 		try (MemoryStack s = MemoryStack.stackPush()) {
 			// Ahead of the frame: a swapchain image for each of its frames and the copy into it, queued on the GPU to
 			// run the moment the frame is staged. (Copying them all up front also matters to Reflex: it times the
@@ -313,6 +373,8 @@ public final class FrameGenSpike {
 			vkWaitSemaphores(device.vkDevice(), VkSemaphoreWaitInfo.calloc(s).sType$Default().semaphoreCount(1)
 				.pSemaphores(s.longs(frameDone)).pValues(s.longs(frameValue)), 1_000_000_000L);
 			long done = System.nanoTime();
+			doneNanos.set((int) (frameValue % 16), done);
+			doneValue.set((int) (frameValue % 16), frameValue);
 			if (lastDoneNanos != 0) {
 				long dt = Math.min(done - lastDoneNanos, 100_000_000L);
 				frameNanos = frameNanos == 0 ? dt : frameNanos * 0.9 + dt * 0.1;
@@ -333,30 +395,76 @@ public final class FrameGenSpike {
 					String.format("%.2f", minGap / 1e6), behindFrames, String.format("%.2f", pacerWaitNanos / 600e6), String.format("%.2f", acquireWaitNanos / 600e6),
 					String.format("%.2f", Reflex.sleepNanos / 600e6));
 				pacerWaitNanos = acquireWaitNanos = Reflex.sleepNanos = 0;
-				Helio.LOG.info("FG pacing: GPU ms: path trace {}, DLSS {}, FG motion {}, DLSS-G {}; first image ready {} ms after the frame (worst {} ms)",
+				Helio.LOG.info("FG pacing: GPU ms: path trace {}, DLSS {}, FG motion {}, DLSS-G {}; first image ready {} ms after the frame (worst {} ms); limiter: frame GPU {} ms, CPU {} ms",
 					String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.PATH_TRACE)), String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS)),
 					String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.FG_MOTION)), String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.DLSS_G)),
-					String.format("%.2f", copyDelayNanos / 1e6), String.format("%.2f", worstCopyDelay / 1e6));
+					String.format("%.2f", copyDelayNanos / 1e6), String.format("%.2f", worstCopyDelay / 1e6),
+					String.format("%.1f", gpuNanos / 1e6), String.format("%.1f", cpuNanos / 1e6));
 				worstCopyDelay = 0;
 				worstNanos = 0;
 				behindFrames = 0;
 			}
 			// Rendering faster than n presents a refresh apart (no Reflex cap): keeping the gap would fall further
 			// behind every frame, so let the compositor drop some instead.
-			long gap = lastPresentNanos - ready > frameNanos / 2 ? 0 : minGap + MIN_GAP_MARGIN;
-			if (gap == 0) behindFrames++;
+			long gap = clocked || lastPresentNanos - ready > frameNanos / 2 ? 0 : minGap + MIN_GAP_MARGIN;
+			if (gap == 0 && !clocked) behindFrames++;
 			for (int k = 0; k < n; k++) {
-				long due = Math.max(ready + (long) (frameNanos * k / n), lastPresentNanos + gap);
-				for (long wait; (wait = due - System.nanoTime()) > 0; ) LockSupport.parkNanos(wait);
+				// Clocked by the display: each present is timed for its own refresh, `hold` refreshes after the last
+				// (see refreshesPerPresent), from the last one seen on screen; it goes out the compositor's deadline plus
+				// half a refresh before it. Before, presents went out on a timer that drifted against the display and,
+				// 5% under refresh, repeated a frame every 20 refreshes; at a base rate the refresh doesn't divide,
+				// frames showed 1 or 2 refreshes each, unevenly.
+				long slot = clocked && minGap > 0 ? slotNanos(base + k, minGap) : 0;
+				long due = slot > 0 ? Math.max(ready, slot - DisplayClock.presentLatencyNanos - minGap / 2)
+					: Math.max(ready + (long) (frameNanos * k / n), lastPresentNanos + gap);
+				for (long wait; (wait = due - System.nanoTime()) > 0 && wait < 200_000_000L; ) LockSupport.parkNanos(wait);
 				lastPresentNanos = System.nanoTime();
-				// The real frame (last) goes out on Mojang's queue with the frame's Reflex present ID: Reflex paces
-				// the game by the presents it sees there.
+				// The real frame (last) carries the frame's Reflex present ID, the generated ones the IDs just below.
+				// All go out on the pacer's queue: on Mojang's the real one waited behind the next frame's rendering,
+				// queued there before it (present -> screen 37 ms at 2x instead of ~8; real frames landed late and
+				// bunched with the generated ones).
 				boolean real = k == n - 1;
-				if (images[k] >= 0) PacedPresenter.present(images[k], real ? id : 0, real ? mainQueue : null);
+				long pid = id == 0 ? 0 : id - (n - 1 - k);
+				if (images[k] < 0) continue;
+				PacedPresenter.present(images[k], pid, null);
+				DisplayClock.presented(device.vkDevice(), PacedPresenter.swapchain(), pid, base + k, real ? frameStart : 0, real ? done : 0, n,
+					slot);
 			}
 			if (copied > 0) PacedPresenter.setDone.set(set, copied);
 			pacedThrough = frameValue;
 		}
+	}
+
+	/** Presents handed to the pacer so far (render thread): the next frame's first present has this number. */
+	private static long presentsAssigned;
+	private static volatile boolean displayClocked;
+	/**
+	 * Refreshes each present stays on screen when clocked: the fewest at which the GPU keeps up (n presents per
+	 * frame, so a frame every n * hold refreshes). At 180 Hz and 2x: 90 fps base shows 180 Hz, 45 shows 90 Hz evenly;
+	 * a base in between can't be even on a fixed refresh.
+	 */
+	private static volatile int hold = 1;
+
+	/** When present {@code index} should reach the screen: `hold` refreshes per present after the last one seen. */
+	private static long slotNanos(long index, long refresh) {
+		long last = DisplayClock.lastShownIndex;
+		if (last < 0) return 0;
+		long prev = DisplayClock.shownAt(index - 1);
+		return prev > 0 ? prev + hold * refresh : DisplayClock.lastShownNanos + (index - last) * hold * refresh;
+	}
+
+	/** Render thread: picks `hold` from the frame's GPU time, with a margin each way so it doesn't flip back and forth. */
+	private static void chooseHold(int presents) {
+		if (refreshNanos <= 0 || gpuNanos <= 0) return;
+		double frame = presents * refreshNanos;
+		int h = hold;
+		// Up to 20% short of a refresh per image still shows a new image at most refreshes (a repeat in ~6 at
+		// worst), smoother than an even half rate; further short, hold each image longer.
+		while (gpuNanos > frame * h * 1.2 && h < 4) h++;
+		while (h > 1 && gpuNanos < frame * (h - 1) * 1.05) h--;
+		if (h != hold) Helio.LOG.info("FG: each image now shows for {} refresh(es): {} fps base, GPU frame {} ms", h,
+			String.format("%.1f", 1e9 / (frame * h)), String.format("%.1f", gpuNanos / 1e6));
+		hold = h;
 	}
 
 	/** Before anything waits for the queue to drain (or FG shuts down): the pacer's presents go out first. */

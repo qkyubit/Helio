@@ -186,6 +186,15 @@ public final class PacedPresenter {
 		swapImages = images;
 	}
 
+	static long swapchain() {
+		return swapchain;
+	}
+
+	/** The swapchain was destroyed (pacer idle): the next {@link #useSwapchain} takes the new one even with the same handle. */
+	static void forgetSwapchain() {
+		swapchain = 0;
+	}
+
 	/** copyDone value of the last {@link #prepare}'s copy. */
 	static long lastCopy;
 

@@ -1078,11 +1078,54 @@ everywhere; Performance (Hybrid, RR Performance) >= 90. Proposed by Claude; the 
      Screenshot at the user's spot: torches, shadows, entities and water as before.
    - FFM calls: after the changes, JFR shows no Helio native call worth cutting. The render thread's native time is
      Reflex's wait, acquire and DLSS evaluate; builds while flying cost ~0.2 ms in all. Left as is.
-8. [ ] Frame generation troubleshooting (user, 2026-11-15: "frame gen still doesn't look right"; a recurring
+8. [x] Frame generation troubleshooting (user, 2026-11-15: "frame gen still doesn't look right"; a recurring
    issue, so it gets its own step at the end of M7). Start from what the user sees now, then go through the M4
    fixes (pacing from the first image's readiness, `hud_keep.comp`, vignette skip) and the open pacer crash
    (step 3: `PacedPresenter.prepare` in `vkCmdCopyImage`). Check generated frames by readback, as in M4, and
    pacing with present timing at 2x / 3x / 4x.
+   - User (2026-11-15): "a bit smoother, but not double FPS smooth", outweighed by stutter and input lag; some
+     ghosting.
+   - Measured with `DisplayClock` (VK_KHR_present_wait on each present's ID; bench logs "Present probe" lines: how many
+     refreshes apart real frames were shown, and frame start -> GPU done -> present call -> screen). 180 Hz, vsync
+     (FIFO), Balanced path traced, overworld bench pose. Before: frame start -> screen 29 ms with FG off, 87 ms at 2x,
+     97 ms at 3x; real frames 3 or 4 refreshes apart at 2x (uneven).
+   - Causes and fixes:
+     - Presents carried no present ID: every queue submit took the frame's ID (`Reflex.presentId`), so the present
+       found none. Submissions now tag with `Reflex.submissionId` (not used up).
+     - The real frame was presented on Mojang's queue, behind the next frame's rendering already queued there:
+       present -> screen 37 ms instead of ~9, and real frames landed late, bunched with the generated ones. All of a
+       frame's presents now go out on the pacer's queue (87 -> 59 ms at 2x).
+     - The FG limiter waited for the frame before last, so Mojang's own limit (its submit waits for the previous
+       frame) decided and two frames queued on the GPU. It now starts a frame so its GPU work begins as the last
+       frame's ends (GPU time per frame measured from frameDone times, CPU time to the blit), like Reflex
+       (59 -> 45 ms at 2x, 69 -> 51 at 3x; FPS unchanged). Reflex's driver sleep under FG instead: 58 ms but 51 -> 37 FPS.
+     - Pacing by the display: every present carries an ID (Reflex IDs step by 8; generated frames take the ones just
+       below the real frame's), `DisplayClock` notes when each reaches the screen, and the pacer times each present
+       for its own refresh (the last one shown plus `hold` refreshes per present), made the compositor's deadline
+       (shortest present -> screen of presents with nothing queued ahead, ~6-7 ms) plus half a refresh before it. The
+       limiter starts frames so they're ready for their first refresh. `hold` is the fewest refreshes per image the GPU
+       keeps up with (up to 20% short still counts: a repeat every few refreshes beats an even half rate). The old
+       timer pacing ran 5% under refresh (a repeated frame every 20 refreshes) and drifted against the display.
+       First try counted queued presents in the deadline: the pacer kept presenting early and the queue never drained
+       (70 ms at 3x); only presents with the previous one already shown count now.
+   - Results (frame start -> screen; real frames' spacing in refreshes):
+
+     | Setup | Before | After |
+     |---|---|---|
+     | Balanced 2x | 87 ms, 50 fps base, 3 or 4 apart | 45 ms, 45 fps base, 4 apart (even 90 Hz) |
+     | Balanced 3x | 97 ms, 45 fps base, mostly 4 apart (3 presents in 4 refreshes) | 57 ms, 30 base, 6 apart (90 Hz); 2x is the better choice here |
+     | Performance 3x | - | 37 ms, 60 base, 3 apart in 99% (even 180 Hz) |
+     | Performance 2x | - | 33 ms, ~84 base (GPU 11.6 ms, 90 needs 11.1), 2 apart 83%, 3 apart 17% |
+
+     On a fixed refresh, frame generation is only even when the base rate is refresh / (presents x hold); VRR would
+     take any rate (it flickered on this monitor in M4).
+   - Pacer crash (step 3, `vkCmdCopyImage` in `PacedPresenter.prepare`): Mojang recreates the swapchain after draining
+     the queues, and the new one can come back with the old handle; the "same swapchain?" check then kept the old,
+     destroyed images. Now the pacer forgets the swapchain when Mojang destroys it (`VulkanGpuSurfaceMixin`,
+     `destroySwapchain`). Bench word "togglefs" toggles fullscreen each read: the first run crashed in the new
+     `DisplayClock` (waiting on a destroyed swapchain's present, SIGFPE in the driver); it forgets that swapchain's
+     presents too now. 97 swapchain recreations at 3x after: no crash, frame generation kept running.
+   - User-checked (2026-11-15): "Smooth". Ghosting not raised again; readback of generated frames if it comes back.
 9. [ ] Exit: targets met, no regressions against step 1's baseline.
 
 ### M8 — Optimisation-mod compatibility

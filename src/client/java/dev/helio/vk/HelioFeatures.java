@@ -55,7 +55,12 @@ public final class HelioFeatures {
 		Set.of("VK_EXT_opacity_micromap"),
 		Set.of(new VulkanFeature(new VulkanPNextStruct(VkPhysicalDeviceOpacityMicromapFeaturesEXT.class), "micromap")));
 
-	public static final Set<FeatureSet> ALL = Set.of(RAY_TRACING, DLSS, REFLEX, OPACITY_MICROMAP);
+	// When each present reached the screen: frame generation paces by it (DisplayClock).
+	public static final FeatureSet PRESENT_WAIT = new FeatureSet("Helio present wait",
+		Set.of("VK_KHR_present_wait"),
+		Set.of(new VulkanFeature(new VulkanPNextStruct(org.lwjgl.vulkan.VkPhysicalDevicePresentWaitFeaturesKHR.class), "presentWait")));
+
+	public static final Set<FeatureSet> ALL = Set.of(RAY_TRACING, DLSS, REFLEX, OPACITY_MICROMAP, PRESENT_WAIT);
 
 	private HelioFeatures() {}
 }
