@@ -1162,6 +1162,8 @@ checking each has a 26.3 Fabric build on Modrinth:
 | Sodium | terrain renderer | replaces vanilla chunk meshes; needs a mesh adapter in `world/` |
 | ImmediatelyFast | immediate-mode rendering | touches the same Vulkan paths as us |
 | EntityCulling / More Culling | culling | can remove geometry RT needs (shadows/reflections) |
+| First-person Model | draws the player's own body in first person | Helio already extracts the body for shadows (`Entities.firstPersonBody`): double body, or camera rays hitting it |
+| Continuity | connected textures (CTM) | its sprites need the pack's PBR maps found; emissive overlays; Random Block Rotation must not turn connected faces |
 | Voxy | LODs (own GPU-driven renderer) | stretch: depth-composite its LOD pass first, then LOD sections as low-detail TLAS instances so far terrain casts shadows / shows in reflections |
 
 With Voxy, LOD terrain past a distance threshold (configurable, default around
@@ -1272,9 +1274,21 @@ netherrack normal map leans 0.14 one way on average (others under 0.03), x3 at N
 leaned the same way before, and with rotation each block its own way. `PbrAtlas.level` now takes each pack normal
 map's mean tilt out as the atlas is built (a tiling block's map should average flat).
 
-6. [ ] All together (minus Voxy): bench and a long play session.
-7. [ ] Voxy (stretch): depth-composite its LOD pass first; LOD sections as TLAS instances later.
-8. [ ] Exit: compatibility table in README.
+6. [ ] Night vision (added 2026-11-17, user's request): it does nothing with ray tracing on. Vanilla's effect
+   brightens the lightmap, which Helio doesn't use; give it a traced equivalent (lift the light floor / exposure
+   by the effect's strength, fading as vanilla's does in its last seconds).
+7. [ ] First-person Model: test it (one at a time, as steps 2-4). Its body vs Helio's own first-person body
+   (shadows, camera rays passing through the body, reflections).
+8. [ ] Continuity: test it. Connected-texture sprites with the pack's PBR maps, emissive overlays, Random Block
+   Rotation on connected faces.
+9. [ ] All together (minus Voxy): bench and a long play session.
+10. [ ] Voxy (stretch): depth-composite its LOD pass first; LOD sections as TLAS instances later. Blending, so
+    there's no abrupt change at the render distance:
+    - LOD chunks out to 1.5x the base render distance (a band of 50% of its radius past it) get reflections and
+      cheap water effects (Fresnel reflection of the sky and scene, waves, absorption tint).
+    - Farther LOD chunks get cheap effects too (fog, sky-tinted ambient, water tint and sky reflection, maybe
+      baked or approximate sun shadowing) to blend in.
+11. [ ] Exit: compatibility table in README.
 
 ### M9 — Release
 
