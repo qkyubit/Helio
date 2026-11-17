@@ -13,6 +13,7 @@ public class TextureAtlasMixin {
 	@Inject(method = "upload", at = @At("TAIL"))
 	private void helio$buildPbr(SpriteLoader.Preparations preparations, CallbackInfo ci) {
 		PbrAtlas.rebuild((TextureAtlas) (Object) this);
+		dev.helio.rt.FaceRotation.uploaded((TextureAtlas) (Object) this);
 	}
 
 	@Inject(method = "cycleAnimationFrames", at = @At("TAIL"))

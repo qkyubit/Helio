@@ -91,7 +91,10 @@ public class HelioScreen extends OptionsSubScreen {
 				.withValues(0, 100, 200, 300, 400, 600)
 				.withTooltip(n -> Tooltip.create(Component.translatable("helio.normal_strength.tooltip")))
 				.create(Component.translatable("helio.normal_strength"), (b, v) -> c.normalStrength = v)));
-		list.addSmall(unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", percentSlider("helio.night_brightness", c.nightBrightness, v -> c.nightBrightness = v)), null);
+		list.addSmall(unsupportedIf(!Helio.rayTracing, "no Vulkan ray tracing", percentSlider("helio.night_brightness", c.nightBrightness, v -> c.nightBrightness = v)),
+			CycleButton.onOffBuilder(c.randomRotation)
+				.withTooltip(v -> Tooltip.create(Component.translatable("helio.random_rotation.tooltip")))
+				.create(Component.translatable("helio.random_rotation"), (b, v) -> c.randomRotation = v));
 		// Grading: after DLSS, so not without it.
 		boolean noGrading = !Helio.rayTracing || Helio.ngxCaps == null;
 		list.addSmall(unsupportedIf(noGrading, "no DLSS", slider("helio.saturation", c.saturation, 0, 200, "%", v -> c.saturation = v)),

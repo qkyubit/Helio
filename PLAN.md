@@ -1254,6 +1254,24 @@ water around glow teal at night. Test poses `portal`, `portal_low`, `portal_nigh
 the user's look in motion; end gateways (none in the test world); Hybrid lighting still lights with vanilla's
 orange block-light colour.
 
+Random Block Rotation (setting, on by default; user's request): natural blocks get each face's texture turned by
+a random quarter turn (from block position and face), so wide areas stop looking like a grid (`FaceRotation`).
+All faces: dirt, coarse and rooted dirt, mud, clay, sand, red sand, gravel, moss, snow, snow block, powder snow,
+obsidian, crying obsidian, netherrack, soul sand and soil, magma, end stone, all leaves. Top only (sides have a
+direction): grass block, podzol, mycelium, dirt path, nylium. Still water's and lava's texture (top and bottom);
+flowing fluids keep their direction. Stone (and its variants) and ice were tried and dropped: turned, they looked
+odd (user-checked). UVs turn about the
+sprite's centre while sections compile, in Indigo (`AltModelBlockRendererImpl.transform`), Sodium (`bufferQuad`)
+and both fluid renderers, so vanilla's raster, Sodium's and the path tracer agree, partial faces included.
+Toggling remeshes. Checked: cave sand floor and shore grass / leaves differ block by block from off; Sodium's
+floor matches vanilla's with it on (mean pixel difference 1.2 vs 6.2 against off); no cost (cave 5.62 vs 5.63
+ms); water and lava vertices counted turning (temporary log). Found on the way: looking the block atlas up through
+the texture manager from a compile worker registered a plain texture under its name and crashed meshing; the atlas
+now comes from its upload. Also fixed (user-reported): netherrack lit in block-sized patches with rotation on. SPBR's
+netherrack normal map leans 0.14 one way on average (others under 0.03), x3 at Normal Map Strength 300%: every face
+leaned the same way before, and with rotation each block its own way. `PbrAtlas.level` now takes each pack normal
+map's mean tilt out as the atlas is built (a tiling block's map should average flat).
+
 6. [ ] All together (minus Voxy): bench and a long play session.
 7. [ ] Voxy (stretch): depth-composite its LOD pass first; LOD sections as TLAS instances later.
 8. [ ] Exit: compatibility table in README.

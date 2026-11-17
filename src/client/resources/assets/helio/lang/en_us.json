@@ -52,6 +52,8 @@
 	"helio.night_brightness": "Night Brightness",
 	"helio.night_brightness.tooltip": "Least light outdoors at night, as a share of the open-air minimum set by Brightness. Near 0 lets moonless nights go truly dark.",
 	"helio.normal_strength": "Normal Map Strength",
+	"helio.random_rotation": "Random Block Rotation",
+	"helio.random_rotation.tooltip": "Turns each face of natural blocks (dirt, sand, gravel, leaves, snow, obsidian, still water and lava, grass tops...) by a random quarter turn, so large areas look less like a grid. Building blocks and textures with a direction are left alone.",
 	"helio.bloom": "Bloom",
 	"helio.bloom.tooltip": "How much bright things (the sun, glowing blocks, reflections of light) glow onto their surroundings. Needs DLSS.",
 	"helio.saturation": "Saturation",

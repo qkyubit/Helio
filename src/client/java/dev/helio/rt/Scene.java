@@ -289,6 +289,7 @@ public final class Scene {
 	 * (drawn when it's off, and translucent blocks always) gets its baked shading back, or loses it.
 	 */
 	private static boolean sodiumRemeshed;
+	private static boolean rotated = HelioConfig.current.randomRotation;
 
 	public static void tick(Minecraft mc) {
 		if (PathTracer.benchFly && mc.player != null) {
@@ -301,6 +302,11 @@ public final class Scene {
 		if (ready && SodiumMeshes.SODIUM && !sodiumRemeshed && mc.level != null) {
 			sodiumRemeshed = true;
 			mc.levelExtractor.allChanged();
+		}
+		// Random Block Rotation changes every section's UVs.
+		if (HelioConfig.current.randomRotation != rotated) {
+			rotated = HelioConfig.current.randomRotation;
+			if (mc.level != null) mc.levelExtractor.allChanged();
 		}
 		boolean want = Helio.rayTracing && HelioConfig.current.rayTracing;
 		if (want == unshaded) return;

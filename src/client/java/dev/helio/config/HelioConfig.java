@@ -76,6 +76,8 @@ public final class HelioConfig {
 	public int saturation = 100, contrast = 100, warmth = 0, vignette = 0, filmGrain = 0;
 	/** The white balance follows biome, time of day and the light's colour, on top of Warmth. */
 	public boolean autoWarmth = false;
+	/** Natural blocks' faces get a random quarter turn each (FaceRotation); changing it remeshes the world. */
+	public boolean randomRotation = true;
 	/** Stops added to the auto exposure (brighter above 0). */
 	public float exposure = 0;
 	/**

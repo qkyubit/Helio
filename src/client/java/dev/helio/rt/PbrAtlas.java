@@ -176,6 +176,7 @@ public final class PbrAtlas {
 			int cols = Math.max(1, ((SpriteContentsAccessor) c).helio$originalImage().getWidth() / sw);
 			int fw = Math.max(1, src.getWidth() / cols), fh = Math.max(1, Math.min(src.getHeight(), fw * sh / sw));
 			int frames = cols * (src.getHeight() / fh);
+			if (suffix.equals("_n")) level(src);
 			for (int y = 0; y < sh; y++) for (int x = 0; x < sw; x++)
 				into.setPixel(x0 + x, y0 + y, src.getPixel(x * fw / sw, y * fh / sh));
 			if (anim != null && frames > 1) {
@@ -197,6 +198,27 @@ public final class PbrAtlas {
 		} catch (Exception e) {
 			Helio.LOG.warn("Couldn't read PBR map for {}{}: {}", name, suffix, e.toString());
 			return false;
+		}
+	}
+
+	/**
+	 * Takes a normal map's average tilt out (its XY mean back to flat, in place). A block's map should average flat
+	 * (it tiles); SPBR's netherrack leans 0.14 one way (x3 at Normal Map Strength 300%), so every netherrack face
+	 * looked lit from the same side, and with Random Block Rotation each block leaned its own way, in patches.
+	 */
+	private static void level(NativeImage map) {
+		long r = 0, g = 0, n = (long) map.getWidth() * map.getHeight();
+		for (int y = 0; y < map.getHeight(); y++) for (int x = 0; x < map.getWidth(); x++) {
+			int p = map.getPixel(x, y);
+			r += p >> 16 & 255;
+			g += p >> 8 & 255;
+		}
+		int dr = Math.round(128 - (float) r / n), dg = Math.round(128 - (float) g / n);
+		if (dr == 0 && dg == 0) return;
+		for (int y = 0; y < map.getHeight(); y++) for (int x = 0; x < map.getWidth(); x++) {
+			int p = map.getPixel(x, y);
+			int nr = Math.clamp((p >> 16 & 255) + dr, 0, 255), ng = Math.clamp((p >> 8 & 255) + dg, 0, 255);
+			map.setPixel(x, y, p & 0xFF0000FF | nr << 16 | ng << 8);
 		}
 	}
 
