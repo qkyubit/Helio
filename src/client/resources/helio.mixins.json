@@ -24,6 +24,7 @@
 		"SpriteContentsAccessor",
 		"StagedDrawAccessor",
 		"StagedVertexBufferMixin",
+		"SubmitNodeCollectionMixin",
 		"TextureAtlasAccessor",
 		"TextureAtlasMixin",
 		"TextureBindingAccessor",

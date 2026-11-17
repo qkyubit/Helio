@@ -107,6 +107,15 @@ public final class Entities {
 		spans.clear();
 	}
 
+	/**
+	 * Whether the path tracer draws surfaces of this render type itself. Vanilla puts blending ones (most mobs use
+	 * entity_translucent) in its translucent phase, drawn after the entity composite, so they covered the traced
+	 * colour with vanilla's shading; SubmitNodeCollectionMixin keeps them in the solid phase instead.
+	 */
+	public static boolean traced(RenderType type) {
+		return PathTracer.active() && SURFACES.contains(((RenderTypeAccessor) type).helio$name());
+	}
+
 	public static void tag(StagedVertexBuffer.Draw draw, RenderType type) {
 		String name = ((RenderTypeAccessor) type).helio$name();
 		boolean body = name.startsWith(BODY_PREFIX);

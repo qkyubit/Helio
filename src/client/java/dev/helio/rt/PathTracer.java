@@ -106,6 +106,7 @@ public final class PathTracer {
 	private static int benchOff;
 	/** Bench word "fly": the player flies along +x at 20 blocks a second (Scene.tick), for the CPU cost of terrain coming into range. */
 	public static boolean benchFly;
+	private static boolean benchSummoned;
 
 	private static void readBench() {
 		java.nio.file.Path file = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("helio-bench.txt");
@@ -122,6 +123,18 @@ public final class PathTracer {
 				// compiler threads on the way out (driver 620.70.06).
 				if (word.equalsIgnoreCase("quit")) Minecraft.getInstance().stop();
 				if (word.equalsIgnoreCase("fly")) benchFly = true;
+				// "unsummon": removes what "summon" made (it's saved with the world).
+				if (word.equalsIgnoreCase("unsummon") && benchSummoned && Minecraft.getInstance().player != null) {
+					benchSummoned = false;
+					Minecraft.getInstance().player.connection.sendCommand("kill @e[tag=helio_test]");
+				}
+				// "summon": once, a still zombified piglin 3 blocks ahead of the player (entity look checks).
+				if (word.equalsIgnoreCase("summon") && !benchSummoned && Minecraft.getInstance().player != null) {
+					benchSummoned = true;
+					var pl = Minecraft.getInstance().player;
+					Vec3 at = pl.position().add(pl.getLookAngle().multiply(1, 0, 1).normalize().scale(3));
+					pl.connection.sendCommand(String.format(java.util.Locale.ROOT, "summon minecraft:zombified_piglin %.2f %.2f %.2f {NoAI:1b,Silent:1b,DeathLootTable:\"minecraft:empty\",Tags:[\"helio_test\"]}", at.x, at.y, at.z));
+				}
 				// "togglefs": fullscreen on / off each read, recreating the swapchain (M7 step 8: the pacer crash).
 				if (word.equalsIgnoreCase("togglefs")) Minecraft.getInstance().execute(() -> { var o = Minecraft.getInstance().options.fullscreen(); o.set(!o.get()); });
 			}

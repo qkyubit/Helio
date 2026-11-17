@@ -1235,6 +1235,13 @@ Exit: compat table in README; crashes fixed or mod marked incompatible.
      No errors in the logs. Vanilla's renderer without Sodium unchanged by the adapter.
    - Not checked yet: the user's look in play (block edits, long sessions); MoreCulling with Sodium.
 
+Fixed along the way (long-standing, reported by the user): most mobs looked pasted in, with vanilla's flat
+shading, no grading or film grain, and drawn over glass unrefracted. Their render types blend (entity_translucent),
+so vanilla puts them in its translucent feature phase, which Helio replays after the entity composite: vanilla's
+entity covered the traced one. `SubmitNodeCollectionMixin` now keeps every render type Helio traces in the solid
+phase (`Entities.traced`), drawn before the composite. Checked with bench word "summon" (a still zombified piglin
+3 blocks ahead; "unsummon" removes it): torch-lit in the cave, refracted through the glass roof and floor.
+
 6. [ ] All together (minus Voxy): bench and a long play session.
 7. [ ] Voxy (stretch): depth-composite its LOD pass first; LOD sections as TLAS instances later.
 8. [ ] Exit: compatibility table in README.
