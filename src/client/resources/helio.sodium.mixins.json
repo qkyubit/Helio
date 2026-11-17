@@ -1,0 +1,17 @@
+{
+	"required": true,
+	"package": "dev.helio.sodium",
+	"plugin": "dev.helio.SodiumMixinPlugin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"BlockRendererMixin",
+		"ChunkBuilderMeshingTaskMixin",
+		"ChunkMeshBufferBuilderMixin",
+		"DefaultChunkRendererMixin",
+		"DefaultFluidRendererMixin",
+		"RenderSectionManagerMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

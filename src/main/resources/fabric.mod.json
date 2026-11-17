@@ -13,7 +13,8 @@
 		"modmenu": ["dev.helio.config.ModMenuEntry"]
 	},
 	"mixins": [
-		{ "config": "helio.mixins.json", "environment": "client" }
+		{ "config": "helio.mixins.json", "environment": "client" },
+		{ "config": "helio.sodium.mixins.json", "environment": "client" }
 	],
 	"depends": {
 		"fabricloader": ">=0.20.1",

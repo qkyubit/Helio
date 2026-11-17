@@ -1172,6 +1172,73 @@ Iris shader packs are out of scope: Helio is the shader.
 
 Exit: compat table in README; crashes fixed or mod marked incompatible.
 
+**M8 steps** (planned 2026-11-17):
+1. [x] Availability: 26.3 Fabric builds on Modrinth (checked 2026-11-17) for all but ModernFix:
+   Lithium 0.26.3 (release), FerriteCore 9.0.0 (release), C2ME 0.4.2-alpha.0.119 (alpha), Sodium 0.9.3-beta.5
+   (beta), ImmediatelyFast 1.17.1 (release), EntityCulling 1.12.1 (release), MoreCulling 1.9.2 (beta), Voxy
+   0.2.20-beta (beta). ModernFix: none yet; recheck at the exit.
+2. [x] The ones that should be transparent, one at a time: Lithium, FerriteCore, ImmediatelyFast. Each: the four
+   exit scenes benched against M7's exit numbers, screenshots, the log checked, a fly run.
+   - Balanced, FG off, FPS (overworld / torch cave / water + glass / Nether); M7 exit 64.5 / 83 / 60 / 80:
+     Lithium 67 / 84 / 64 / 80, FerriteCore 67 / 85 / 63 / 80, ImmediatelyFast 66 / 83 / 64 / 80. Path trace within
+     ~0.5 ms of M7's (lower, if anything). Fly runs (20 blocks/s) as without them. Screenshots as before. Logs: only
+     the warnings vanilla prints too.
+   - Lithium's first overworld run had 1471 sections (RT distance stuck at the memory guard's start of 8 chunks);
+     rerun: 4112, 67 FPS. Other programs held ~9.5 GB VRAM and much of the RAM that day; one slow start, not Lithium.
+   - All three together with frame generation 2x: locked pacing as in M7 step 8 (real frames 4 refreshes apart,
+     42 ms frame start -> screen), no errors.
+3. [x] C2ME: chunks arriving faster mean more BLAS builds per frame; bench flying, watch the memory guard.
+   - World backed up first (alpha, rewrites the chunk system and serializer): `helio-backups/` in the instance.
+   - 65.5 / 84.5 / 63.5 / 80.5 FPS (Balanced, FG off). Flying: sections kept up as without it (4552 in the
+     overworld); Helio's scene update 0.44 ms per frame flying in the overworld (0.3 without). Memory guard grew
+     8 -> 12 chunks as usual. Warnings: C2ME looking for optional mods' classes (Starlight, VulkanMod) only. The world
+     loads cleanly without C2ME afterwards.
+4. [x] Culling: EntityCulling and MoreCulling. Culled entities and block faces vanish from shadows and
+   reflections too, unless Helio's capture runs before their culling; fix, or document what's lost.
+   - EntityCulling: 67 / 83.5 / 64 / 82 FPS. It works, and as expected entities hidden behind blocks drop out of
+     Helio's capture too (scene build GPU time 0.37-0.40 -> 0.20-0.34 ms: fewer entities in the per-frame BLAS), so
+     they cast no shadow and show in no reflection. Same as entities outside the view today (vanilla's frustum
+     culling decides what's captured). Documented, not fixed: forcing them visible would undo the mod's point; worth
+     doing with off-screen entities generally (stretch).
+   - MoreCulling (needs Cloth Config): 66.5 / 84.5 / 63 / 80.5 FPS; scene memory identical (675 MB in the overworld),
+     so the section meshes Helio traces are unchanged on vanilla's renderer. Re-check with Sodium (step 5): its
+     block-face culling hooks Sodium's mesher.
+5. [ ] Sodium: replaces vanilla's section meshes (its own vertex format and compile path), so `Scene.submit`
+   never runs. Needs a mesh adapter feeding Sodium's meshes into the scene, plus Helio's block hooks (marks,
+   unshaded vertices) in Sodium's mesher. The biggest step.
+   - Trial (2026-11-17, Sodium 0.9.3-beta.5): runs on Mojang's Vulkan backend with Helio installed, no errors. Sodium
+     draws the terrain; Helio's scene stays empty (0 sections, only the entity BLAS), so the picture is Sodium's raster
+     with no path-traced lighting (110 FPS). As expected: the adapter is the work.
+   - Adapter (`rt/SodiumMeshes`, mixins in `dev.helio.sodium`, applied only when Sodium is loaded via
+     `SodiumMixinPlugin`; Sodium is a compile-only dependency from Modrinth's maven, read for its API only:
+     Polyform Shield):
+     - Every quad Sodium meshes is copied before Sodium encodes it (`ChunkMeshBufferBuilder.push`): position, colour,
+       UV and light come from Sodium's unencoded vertex, written in vanilla's BLOCK layout. Sodium keeps AO and face
+       shading apart (the vertex's "ao"), so the copy is unshaded as Helio wants; alpha takes `Scene.mark` of the
+       block (`BlockRenderer.renderModel`) or the fluid (water mark, lava emission); the layer comes from the quad's
+       material pass, foliage kept out of translucent. The section's lights come from Sodium's level slice. At the
+       end of the meshing task the section goes to `Scene.submitRaw` (shared with `submit` through `addLayer`).
+     - Sodium meshed everything before the scene was set up: once it is, Helio has Sodium rebuild all sections.
+     - Vanilla's view area sits empty under Sodium (its camera section a sentinel value), which put every section out
+       of the keep range: with Sodium the keep range follows the camera in `Scene.update`.
+     - Sodium builds only sections it finds visible; shadows and reflections need those out of view. After Sodium's
+       own submissions each frame, a slice of the RT-distance area is scanned and sections waiting for a build are
+       submitted like Sodium's deferred ones (up to 16 a frame).
+     - Sodium drew its translucent pass over the traced water and glass (flat raster blue where the bottom should
+       show): its draw commands skip translucent sections inside the RT distance, as vanilla's do.
+     - Section removal: `RenderSectionManager.onSectionRemoved`.
+   - Results (Balanced, FG off; VRAM budget 13.9 GB this run): Sodium 71 / 88 / 70 / 87 FPS (overworld / torch cave /
+     water + glass / Nether) against 66.5 / 83.5 / 63.5 / 79.5 on vanilla's renderer the same day: Sodium's raster
+     is cheaper; path trace times alike. Screenshots match vanilla's renderer in all four scenes (water bottoms,
+     refraction, glowstone, torch light). Sections in the scene: 3744 against 4112 (vanilla's also keep the 1-chunk
+     margin ring). Flying keeps up. FG 2x: locked pacing as without Sodium (real frames 4 refreshes apart, 36-40 ms).
+     No errors in the logs. Vanilla's renderer without Sodium unchanged by the adapter.
+   - Not checked yet: the user's look in play (block edits, long sessions); MoreCulling with Sodium.
+
+6. [ ] All together (minus Voxy): bench and a long play session.
+7. [ ] Voxy (stretch): depth-composite its LOD pass first; LOD sections as TLAS instances later.
+8. [ ] Exit: compatibility table in README.
+
 ### M9 — Release
 
 - Modrinth page, Prism-friendly install (drop jar + Fabric API, done).

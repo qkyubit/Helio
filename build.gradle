@@ -10,6 +10,10 @@ repositories {
 	// See https://docs.gradle.org/current/userguide/declaring_repositories.html
 	// for more information about repositories.
 	maven { url = "https://maven.terraformersmc.com/releases/" }
+	exclusiveContent { // Sodium, compile-only: the mesh adapter's mixins (M8 step 5)
+		forRepository { maven { url = "https://api.modrinth.com/maven" } }
+		filter { includeGroup "maven.modrinth" }
+	}
 }
 
 loom {
@@ -32,6 +36,7 @@ dependencies {
 	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 
 	compileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
+	compileOnly("maven.modrinth:sodium:${project.sodium_version}") { transitive = false }
 }
 
 processResources {

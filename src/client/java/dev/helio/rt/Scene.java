@@ -139,6 +139,11 @@ public final class Scene {
 
 	private Scene() {}
 
+	/** Set up and taking sections. */
+	static boolean ready() {
+		return ready;
+	}
+
 	public static void init(VkDevice device) {
 		vk = device;
 		try (MemoryStack s = MemoryStack.stackPush()) {
@@ -168,26 +173,45 @@ public final class Scene {
 				warnedFormat = true;
 				continue;
 			}
-			int quads = mesh.drawState().vertexCount() / 4;
-			if (quads == 0) continue;
-			long bytes = (long) quads * 4 * VERTEX_STRIDE;
-			Buf vertices = Memory.buffer(bytes, BUILD_INPUT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
-			memCopy(memAddress(mesh.vertexBuffer()), vertices.mapped(), bytes);
-			if (geos == null) geos = new Geo[ChunkSectionLayer.values().length];
-			Micromaps.Plan plan = Helio.omm && e.getKey() == ChunkSectionLayer.CUTOUT ? Micromaps.plan(vertices.mapped(), quads) : null;
-			int mask = LAYER_MASK[e.getKey().ordinal()];
-			if (e.getKey() == ChunkSectionLayer.TRANSLUCENT) {
-				// Vertex colour alpha is 255 - WATER_MARK on water (colour at byte 12, alpha its last byte).
-				for (int q = 0; q < quads; q++) {
-					if (memGetByte(vertices.mapped() + (long) q * 4 * VERTEX_STRIDE + 15) != (byte) (255 - WATER_MARK)) {
-						mask |= MASK_NOT_ONLY_WATER;
-						break;
-					}
-				}
-			}
-			geos[e.getKey().ordinal()] = new Geo(e.getKey().ordinal(), mask, vertices, quads, new Blas(), plan);
+			geos = addLayer(geos, e.getKey(), memAddress(mesh.vertexBuffer()), mesh.drawState().vertexCount() / 4);
 		}
 		incoming.add(new Upload(node, geos, lights, false));
+	}
+
+	/**
+	 * Compile worker thread: a section meshed by another renderer (Sodium, SodiumMeshes), as vertices already in
+	 * vanilla's BLOCK layout, one address and quad count per ChunkSectionLayer (0 quads: none).
+	 */
+	public static void submitRaw(long node, long[] layerVertices, int[] layerQuads, int[] lights) {
+		if (!ready || !inKeepRange(node) || memoryTight && !nearCamera(node)) return;
+		Geo[] geos = null;
+		for (ChunkSectionLayer layer : ChunkSectionLayer.values()) {
+			int i = layer.ordinal();
+			if (i < layerQuads.length) geos = addLayer(geos, layer, layerVertices[i], layerQuads[i]);
+		}
+		incoming.add(new Upload(node, geos, lights, false));
+	}
+
+	/** Copies one layer's vertices (BLOCK layout) into a buffer of ours; returns geos, created if needed. */
+	private static Geo[] addLayer(Geo[] geos, ChunkSectionLayer layer, long source, int quads) {
+		if (quads == 0) return geos;
+		long bytes = (long) quads * 4 * VERTEX_STRIDE;
+		Buf vertices = Memory.buffer(bytes, BUILD_INPUT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
+		memCopy(source, vertices.mapped(), bytes);
+		if (geos == null) geos = new Geo[ChunkSectionLayer.values().length];
+		Micromaps.Plan plan = Helio.omm && layer == ChunkSectionLayer.CUTOUT ? Micromaps.plan(vertices.mapped(), quads) : null;
+		int mask = LAYER_MASK[layer.ordinal()];
+		if (layer == ChunkSectionLayer.TRANSLUCENT) {
+			// Vertex colour alpha is 255 - WATER_MARK on water (colour at byte 12, alpha its last byte).
+			for (int q = 0; q < quads; q++) {
+				if (memGetByte(vertices.mapped() + (long) q * 4 * VERTEX_STRIDE + 15) != (byte) (255 - WATER_MARK)) {
+					mask |= MASK_NOT_ONLY_WATER;
+					break;
+				}
+			}
+		}
+		geos[layer.ordinal()] = new Geo(layer.ordinal(), mask, vertices, quads, new Blas(), plan);
+		return geos;
 	}
 
 	/** Vanilla reset a section (unloaded, moved out of range, or the renderer was rebuilt). Any thread. */
@@ -264,11 +288,19 @@ public final class Scene {
 	 * Client tick: when the path tracer turns on or off, recompile every section so vanilla's own terrain
 	 * (drawn when it's off, and translucent blocks always) gets its baked shading back, or loses it.
 	 */
+	private static boolean sodiumRemeshed;
+
 	public static void tick(Minecraft mc) {
 		if (PathTracer.benchFly && mc.player != null) {
 			mc.player.getAbilities().flying = true;
 			mc.player.setDeltaMovement(Vec3.ZERO);
 			mc.player.setPos(mc.player.getX() + 1, mc.player.getY(), mc.player.getZ());
+		}
+		// Sodium meshes sections as soon as they load, before the scene is set up, and only again when they change:
+		// once the scene takes sections, have it mesh them all again (SodiumMeshes copies them on the way).
+		if (ready && SodiumMeshes.SODIUM && !sodiumRemeshed && mc.level != null) {
+			sodiumRemeshed = true;
+			mc.levelExtractor.allChanged();
 		}
 		boolean want = Helio.rayTracing && HelioConfig.current.rayTracing;
 		if (want == unshaded) return;
@@ -290,7 +322,7 @@ public final class Scene {
 	private static Object scanArea;
 
 	public static ObjectArrayList<RenderSection> withHiddenSections(ViewArea area, ObjectArrayList<RenderSection> visible) {
-		if (!ready || area == null) return visible;
+		if (!ready || area == null || SodiumMeshes.SODIUM) return visible; // Sodium: vanilla's view area is unused (keep range: update)
 		long t0 = System.nanoTime();
 		SectionPos c = area.getCameraSectionPos();
 		int r = rtDistance();
@@ -328,6 +360,13 @@ public final class Scene {
 			&& Math.abs(SectionPos.z(node) - SectionPos.blockToSectionCoord(camera.z)) <= r;
 	}
 
+	/** Sodium (dev.helio.sodium): whether the path tracer draws this section's translucent blocks (around the camera's section). */
+	public static boolean tracesTranslucent(int sectionX, int sectionZ) {
+		if (!PathTracer.active()) return false;
+		int r = rtDistance();
+		return Math.abs(sectionX - keepX) <= r && Math.abs(sectionZ - keepZ) <= r;
+	}
+
 	private static int rtDistance() {
 		return Math.min(Math.min(HelioConfig.current.rayTracingDistance, Minecraft.getInstance().options.getEffectiveRenderDistance()), vramDistance);
 	}
@@ -342,6 +381,19 @@ public final class Scene {
 	private static volatile int keepX, keepZ, keepRadius = Integer.MAX_VALUE;
 	/** Render thread: sections an upload arrived for (with or without geometry), and those asked for since. */
 	private static final LongOpenHashSet held = new LongOpenHashSet(), requested = new LongOpenHashSet();
+
+	/** Sodium (dev.helio.sodium): the camera's section and how far around it sections are built for the scene (0: not yet). */
+	public static int sodiumCameraX() {
+		return keepX;
+	}
+
+	public static int sodiumCameraZ() {
+		return keepZ;
+	}
+
+	public static int sodiumBuildRadius() {
+		return ready && keepRadius != Integer.MAX_VALUE ? keepRadius - KEEP_MARGIN : 0;
+	}
 
 	private static boolean inKeepRange(long node) {
 		return Math.abs(SectionPos.x(node) - keepX) <= keepRadius && Math.abs(SectionPos.z(node) - keepZ) <= keepRadius;
@@ -436,6 +488,11 @@ public final class Scene {
 	private static void updateTimed(VkCommandBuffer cmd, Vec3 cameraPos, boolean build) {
 		SectionPos camera = SectionPos.of(cameraPos);
 		frame++;
+		if (SodiumMeshes.SODIUM) { // withHiddenSections sets it from vanilla's view area, which Sodium leaves empty
+			keepX = camera.x();
+			keepZ = camera.z();
+			keepRadius = rtDistance() + KEEP_MARGIN;
+		}
 		while (!deferred.isEmpty() && deferred.peek().frame + RING <= frame) deferred.poll().free.run();
 		drainIncoming();
 		if (frame % 64 == 0 || evictNow) evictOutOfRange(camera);
