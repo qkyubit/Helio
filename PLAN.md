@@ -1126,7 +1126,27 @@ everywhere; Performance (Hybrid, RR Performance) >= 90. Proposed by Claude; the 
      `DisplayClock` (waiting on a destroyed swapchain's present, SIGFPE in the driver); it forgets that swapchain's
      presents too now. 97 swapchain recreations at 3x after: no crash, frame generation kept running.
    - User-checked (2026-11-15): "Smooth". Ghosting not raised again; readback of generated frames if it comes back.
-9. [ ] Exit: targets met, no regressions against step 1's baseline.
+9. [x] Exit: targets met, no regressions against step 1's baseline.
+   - Run 2026-11-17, same conditions as step 1 (SPBR, 1440p, FG off, vsync on, noon, clear, render distance 12).
+     Other programs held ~9.5 GB of VRAM this time (a local LLM server, a speech model), so the budget the game
+     saw was 4.9 GB, not 14.2; scene and VRAM use stayed at ~48% of it and the memory guard didn't act.
+   - Balanced (RR Balanced, Path Traced), target >= 60 FPS. Path trace GPU ms and what each effect costs (ms saved
+     with it off), step 1's figures in brackets:
+
+     | Scene | FPS | path trace | DLSS | scene build | bounce | block | sun | fog | clouds | specular | caustics |
+     |---|---|---|---|---|---|---|---|---|---|---|---|
+     | Overworld | 64.5 (63) | 8.77 (9.73) | 4.71 | 0.39 | 1.9 (3.0) | 1.3 (1.7) | 1.1 (1.25) | 0.45 (1.0) | 0.9 (0.9) | 0.35 (0.9) | 0.25 (0.4) |
+     | Torch cave | 83 (83) | 5.39 (5.46) | 4.72 | 0.39 | 1.7 (1.4) | 2.0 (1.75) | 0.3 (0.1) | 0.4 (0.5) | 0 | 0 | 0 |
+     | Water + glass | 60 (60.5) | 10.04 (10.26) | 4.62 | 0.37 | 2.9 (3.0) | 1.3 (1.0) | 1.5 (1.2) | 0.8 (0.9) | 0.9 (0.7) | 0.1 (0.55) | 0 |
+     | Nether | 80 (74.5) | 5.44 (6.74) | 4.75 | 0.40 | 1.4 (2.9) | 2.0 (2.8) | 0 | 0 | 0 | 0.45 (1.75) | 0 |
+
+     Met everywhere; water + glass right at 60 (60.5 before, within the ~0.5 FPS run-to-run spread; its path trace is
+     0.2 ms faster). Single "off" readings move ~0.3 ms run to run (cave's bounce, sun).
+   - Performance (Hybrid, RR Performance), target >= 90 FPS: overworld 131, torch cave 173, water + glass 125,
+     Nether 172 (path trace 3.44 / 1.40 / 4.02 / 1.48 ms, DLSS ~2.0 ms). Met.
+   - No regressions: every scene's path trace time is the same or lower than step 1's; DLSS and scene build
+     unchanged. Render thread CPU 2.0-2.6 ms per frame (step 7), frame generation latency and pacing as in step 8.
+     M7 done.
 
 ### M8 — Optimisation-mod compatibility
 
