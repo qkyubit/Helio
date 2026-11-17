@@ -59,7 +59,12 @@ public final class Entities {
 	private static final Set<String> SURFACES = Set.of(
 		"entity_solid", "entity_solid_z_offset_forward", "entity_cutout", "entity_cutout_cull", "entity_cutout_z_offset",
 		"entity_translucent", "entity_translucent_cull_item_target", "armor_cutout_no_cull",
-		"item_cutout", "item_translucent", "solid_moving_block", "cutout_moving_block");
+		"item_cutout", "item_translucent", "solid_moving_block", "cutout_moving_block", "end_portal", "end_gateway");
+	/**
+	 * Texture-index flag on end portal and gateway faces (position-only quads): pathtrace.comp draws them as a window
+	 * into a starfield instead of a texture.
+	 */
+	private static final int PORTAL = 1 << 17;
 	private static final int FULL_SKY_LIGHT = 240 << 16;
 
 	/** Surface draws of this frame and the texture each samples. */
@@ -129,7 +134,7 @@ public final class Entities {
 			index = textures.size();
 			textures.add(texture);
 		}
-		surfaces.put(draw, body ? index | BODY : index);
+		surfaces.put(draw, body ? index | BODY : name.startsWith("end_") ? index | PORTAL : index);
 	}
 
 	/**
@@ -182,7 +187,8 @@ public final class Entities {
 		VertexFormat format = draw.helio$format();
 		VertexFormatElement pos = format.getElement("Position"), color = format.getElement("Color"),
 			uv = format.getElement("UV0"), light = format.getElement("UV2");
-		if (pos == null || pos.format() != GpuFormat.RGB32_FLOAT || uv == null || uv.format() != GpuFormat.RG32_FLOAT) return;
+		// End portals have positions only (PORTAL).
+		if (pos == null || pos.format() != GpuFormat.RGB32_FLOAT || uv != null && uv.format() != GpuFormat.RG32_FLOAT) return;
 		int stride = format.getVertexSize();
 		for (ByteBufferBuilder.Result slice : draw.helio$vertexBufferSlices()) {
 			ByteBuffer b = slice.byteBuffer();
@@ -196,7 +202,8 @@ public final class Entities {
 			for (int v = 0; v < count; v++, src += stride, dst += STRIDE) {
 				memCopy(src + pos.offset(), dst, 12);
 				memPutInt(dst + 12, color != null ? memGetInt(src + color.offset()) : -1);
-				memCopy(src + uv.offset(), dst + 16, 8);
+				if (uv != null) memCopy(src + uv.offset(), dst + 16, 8);
+				else memPutLong(dst + 16, 0);
 				memPutInt(dst + 24, light != null ? memGetInt(src + light.offset()) : FULL_SKY_LIGHT);
 				memPutInt(dst + 28, texture);
 				memPutFloat(dst + 32, Float.NaN); // motion: filled in by capture() if last frame matches

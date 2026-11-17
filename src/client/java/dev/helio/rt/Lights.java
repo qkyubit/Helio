@@ -18,6 +18,7 @@ import net.minecraft.world.entity.HumanoidArm;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.Arrays;
@@ -101,6 +102,8 @@ public final class Lights {
 	}
 
 	private static int colourOf(BlockState state) {
+		// End portals and gateways have obsidian's particle texture; their light is the starfield's teal (PORTAL_LIGHT in pathtrace.comp).
+		if (state.is(Blocks.END_PORTAL) || state.is(Blocks.END_GATEWAY)) return 0x5CE0D2;
 		float[] c = colours.computeIfAbsent(state, Lights::averageBrightTexels);
 		return (int) (c[0] * 255) << 16 | (int) (c[1] * 255) << 8 | (int) (c[2] * 255);
 	}

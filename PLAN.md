@@ -1242,6 +1242,18 @@ entity covered the traced one. `SubmitNodeCollectionMixin` now keeps every rende
 phase (`Entities.traced`), drawn before the composite. Checked with bench word "summon" (a still zombified piglin
 3 blocks ahead; "unsummon" removes it): torch-lit in the cave, refracted through the glass roof and floor.
 
+End portals and gateways (before step 6, user's request): vanilla draws them as a screen-space overlay of
+scrolling star layers. Now they're part of the traced scene: their faces are captured with the entities
+(position-only quads, `Entities.PORTAL` flag) and pathtrace.comp shows a window into deep space there
+(`portalView`): five layers of stars and teal-to-violet nebula (cloud noise) at 0.5-12 blocks behind the face,
+placed in world space so they shift with real parallax, stars at infinity behind those, slow drift and twinkle;
+unlit, with a faint glossy sheen (F0 0.03). They reflect in water, refract through glass and bloom like any
+emitter, and their block light is teal (`Lights.colourOf`, not obsidian's particle colour), so the frame and
+water around glow teal at night. Test poses `portal`, `portal_low`, `portal_night` (portal at 68-70, 63,
+-186..-184). Cost at the portal spot: path trace 17.6 ms vs 16.9 ms before (water-heavy view). Not checked yet:
+the user's look in motion; end gateways (none in the test world); Hybrid lighting still lights with vanilla's
+orange block-light colour.
+
 6. [ ] All together (minus Voxy): bench and a long play session.
 7. [ ] Voxy (stretch): depth-composite its LOD pass first; LOD sections as TLAS instances later.
 8. [ ] Exit: compatibility table in README.

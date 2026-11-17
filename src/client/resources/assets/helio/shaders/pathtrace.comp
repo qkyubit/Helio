@@ -119,6 +119,7 @@ layout(buffer_reference, scalar, buffer_reference_align = 8) readonly buffer Ins
 
 const uint MASK_SOLID = 1u, MASK_CUTOUT = 2u, MASK_TRANSLUCENT = 4u, MASK_DYNAMIC = 8u, MASK_NOT_ONLY_WATER = 16u;
 const uint MASK_OPAQUE_SCENE = MASK_SOLID | MASK_CUTOUT | MASK_DYNAMIC;
+const uint PORTAL_FLAG = 0x20000u; // Entities.PORTAL, in an entity vertex's texture index: end portal / gateway faces
 const uint KIND_CUTOUT = 1u, KIND_TRANSLUCENT = 2u, KIND_DYNAMIC = 3u;
 const uint DEBUG_INSTANCES = 1u, DEBUG_ALBEDO = 2u, DEBUG_NORMALS = 3u, DEBUG_TRIANGLE_DENSITY = 4u, DEBUG_MATERIALS = 5u,
 	DEBUG_PBR_NORMAL = 6u, DEBUG_PBR_SPECULAR = 7u;
@@ -213,6 +214,7 @@ struct Hit {
 	float emission; // glow of the surface, 0..1 of EMISSIVE: the block's light level (sections encode it in vertex alpha),
 	                // masked by the pack's emission map (LabPBR _s alpha) where it has one
 	bool listed;    // a light block (in Lights.java's table): light sampling counts its light, bounces mustn't again
+	bool portal;    // an end portal or gateway face (Entities.PORTAL): unlit, albedo * EMISSIVE * emission is its view
 	vec3 tint;      // linear vertex colour (biome tint)
 	float opacity;  // texture alpha: translucent surfaces let the rest through
 	bool water;     // marked by vertex alpha (Scene.WATER_MARK)
@@ -275,6 +277,7 @@ bool cutoutHit(rayQueryEXT rq) {
 	uint stride = strideOf(inst.kind);
 	uvec3 t = triangleVertices(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false));
 	if ((cameraRay || reflectionRay) && inst.kind == KIND_DYNAMIC && (floatBitsToUint(vb.v[t.x * 11u + 7u]) & 0x10000u) != 0u) return false;
+	if (inst.kind == KIND_DYNAMIC && (floatBitsToUint(vb.v[t.x * 11u + 7u]) & PORTAL_FLAG) != 0u) return true;
 	// Reflections pass through water (Scene.WATER_MARK) in sections that also hold glass, ice or portals (water-only
 	// sections are masked out): a water surface far off is a mirror of its own, not a wall.
 	if (reflectionRay && inst.kind == KIND_TRANSLUCENT && round((1.0 - tintAt(vb, t.x, stride).a) * 255.0) == 1.0) return false;
@@ -387,6 +390,49 @@ vec3 shadowTransmittance(vec3 origin, vec3 dir, float tMax) {
 	return tint;
 }
 
+// End portals and gateways (M8): a window into deep space instead of vanilla's screen-space layers. Behind the
+// face (n faces the viewer) lie layers of nebula and stars at growing depths, placed in world space, so they
+// shift with true parallax as the camera moves; the last stars are at infinity (placed by direction alone).
+// Everything drifts and twinkles slowly. The blocks' light is the same teal (Lights.colourOf).
+
+vec3 portalHash(vec2 p) { // Hoskins' hash without sine, 3 outputs in [0, 1)
+	vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+	q += dot(q, q.yxz + 33.33);
+	return fract((q.xxy + q.yzz) * q.zyx);
+}
+
+// One star in some cells of a grid over uv (cells per unit: density), of radius r (uv units), twinkling.
+vec3 portalStars(vec2 uv, float density, float r, float seed, float time) {
+	vec2 g = uv * density, cell = floor(g);
+	vec3 h = portalHash(mod(cell, 4096.0) + seed * 97.0);
+	if (h.z > 0.22) return vec3(0.0);
+	vec2 d = (g - cell - 0.2 - 0.6 * h.xy) / density;
+	float twinkle = 0.6 + 0.4 * sin(time * (1.3 + 3.0 * h.x) + 40.0 * h.y);
+	vec3 colour = mix(vec3(0.45, 1.0, 0.85), vec3(0.8, 0.65, 1.0), h.y * h.y);
+	return colour * (0.6 + 9.0 * h.x * h.x * h.x * h.x) * twinkle * exp(-dot(d, d) / (r * r));
+}
+
+vec3 portalView(vec3 world, vec3 dir, vec3 n) {
+	float facing = max(-dot(dir, n), 0.08);
+	vec3 ta = normalize(cross(n, abs(n.y) > 0.5 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0))), tb = cross(n, ta);
+	// ponytail: world coordinates in floats; star placement gets coarse past ~100k blocks out.
+	vec2 at = vec2(dot(world, ta), dot(world, tb)), slope = vec2(dot(dir, ta), dot(dir, tb)) / facing;
+	float time = cloudTime * 0.5; // seconds of game time (as the waves)
+	vec3 c = vec3(0.0006, 0.0015, 0.004); // the void
+	for (int k = 0; k < 5; k++) {
+		float depth = 0.5 * exp2(float(k) * 1.15); // 0.5 .. 12 blocks behind the face
+		float angle = float(k) * 2.4;
+		vec2 uv = at + slope * depth + time * 0.04 * vec2(cos(angle), sin(angle)); // the view ray there, drifting
+		float fade = exp(-depth * 0.05);
+		vec2 cloud = textureLod(cloudNoise, vec3(uv * (0.12 / (1.0 + 0.2 * depth)), 0.11 + 0.2 * float(k)), 0.0).rg;
+		float wisp = smoothstep(0.55, 0.9, cloud.r) * (0.3 + cloud.g);
+		c += mix(vec3(0.0, 0.3, 0.26), vec3(0.22, 0.02, 0.4), float(k) / 4.0) * wisp * 0.12 * fade;
+		c += portalStars(uv, 1.4, 0.014 * (1.0 + 0.12 * depth), float(k), time) * fade;
+	}
+	c += portalStars(slope, 22.0, 0.006, 7.0, time) * 0.6; // at infinity
+	return c;
+}
+
 Hit shade(rayQueryEXT rq, vec3 dir) {
 	Hit h;
 	Instance inst = InstanceInfo(pc.instanceInfo).i[rayQueryGetIntersectionInstanceIdEXT(rq, true)];
@@ -497,6 +543,21 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 	if (inst.kind < KIND_TRANSLUCENT && h.pbrSpecular != vec4(0.0)) {
 		float a = round(h.pbrSpecular.a * 255.0), texel = a < 255.0 ? a / 254.0 : 0.0;
 		h.emission = h.listed ? h.emission * texel : PACK_GLOW * texel;
+	}
+	h.portal = inst.kind == KIND_DYNAMIC && (floatBitsToUint(vb.v[t.x * 11u + 7u]) & PORTAL_FLAG) != 0u;
+	if (h.portal) {
+		vec3 world = rayQueryGetWorldRayOriginEXT(rq) + dir * rayQueryGetIntersectionTEXT(rq, true) + anchorWorld;
+		vec3 view = portalView(world, dir, h.normal);
+		// Its view as albedo (in 0..1, for RR's guide) times a glow; light sampling already counts its light.
+		h.emission = max(1.0, max(view.r, max(view.g, view.b)) / EMISSIVE);
+		h.albedo = view / (EMISSIVE * h.emission);
+		h.listed = true;
+		// A faint glossy sheen on the window, like glass.
+		h.f0 = vec3(0.03);
+		h.roughness = 0.05;
+		h.diffuse = 1.0;
+		h.specular = true;
+		h.metal = h.gem = false;
 	}
 	return h;
 }
@@ -1083,6 +1144,7 @@ float lightFloor, caveFloor, nightFloor; // Frame.lightFloor, Frame.caveFloor, F
 // Light leaving an opaque (or textured translucent) surface back along the ray: its emission and direct
 // light, plus bounce light (approximated, or followed when stochastic).
 vec3 surfaceRadiance(Hit h, vec3 pos) {
+	if (h.portal) return h.albedo * (EMISSIVE * h.emission);
 	// A floor (vanilla's Brightness, scaled down by Cave Brightness where no sky light reaches) so caves and dense
 	// foliage never go black; when stochastic, also a share of sky light by vanilla's sky level, for the bounces
 	// past the one followed (the radiance cache's job, when on).
@@ -1237,7 +1299,7 @@ float reflectionDistance; // set by reflectionSeen(): how far its ray went (SKY_
 // both, so no shadow or bounce rays), or where it has none yet, its direct light and the sky fill. ponytail:
 // shadows seen in reflections soften to the cache's cells (1/4 block near the camera, coarser far off).
 vec3 reflectedRadiance(Hit h, vec3 pos) {
-	if (!cacheOn) return surfaceRadiance(h, pos); // the reference (and no RR): in full
+	if (!cacheOn || h.portal) return surfaceRadiance(h, pos); // the reference (and no RR): in full
 	vec3 ambient = vec3(lightFloor * mix(caveFloor, mix(nightFloor, 1.0, pc.sunDir.w), h.light.y)) * h.ao;
 	vec3 e;
 	if (!cacheLookup(pos, h.normal, e))
