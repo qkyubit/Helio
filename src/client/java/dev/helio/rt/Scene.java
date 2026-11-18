@@ -223,6 +223,12 @@ public final class Scene {
 	public static final ThreadLocal<Boolean> COMPILING = ThreadLocal.withInitial(() -> Boolean.FALSE);
 	/** True on a compile worker while it meshes a foliage block for the path tracer (SectionCompilerMixin). */
 	public static final ThreadLocal<Boolean> TESSELATING_FOLIAGE = ThreadLocal.withInitial(() -> Boolean.FALSE);
+	/**
+	 * Plain glass being tesselated for the path tracer: kept in the translucent layer. Vanilla's glass texture
+	 * forces that layer (force_translucent); connected-texture tiles (Continuity) don't, so glass fell into cutout,
+	 * where its clear parts were cut away: no reflection or refraction there.
+	 */
+	public static final ThreadLocal<Boolean> TESSELATING_GLASS = ThreadLocal.withInitial(() -> Boolean.FALSE);
 	/** Sections are being compiled for the path tracer: no AO or face shading baked into vertex colours. */
 	public static volatile boolean unshaded;
 

@@ -35,15 +35,18 @@ public class SectionCompilerMixin {
 	private void helio$tesselate(ModelBlockRenderer renderer, BlockQuadOutput output, float x, float y, float z, BlockAndTintGetter level,
 		BlockPos pos, BlockState state, BlockStateModel model, long seed, Operation<Void> original) {
 		Scene.TESSELATING_FOLIAGE.set(Scene.compilingUnshaded() && Scene.isFoliage(state));
+		Scene.TESSELATING_GLASS.set(Scene.compilingUnshaded() && Scene.isGlass(state));
 		try {
 			original.call(renderer, output, x, y, z, level, pos, state, model, seed);
 		} finally {
 			Scene.TESSELATING_FOLIAGE.set(Boolean.FALSE);
+			Scene.TESSELATING_GLASS.set(Boolean.FALSE);
 		}
 	}
 
 	@ModifyVariable(method = "getOrBeginLayer", at = @At("HEAD"), argsOnly = true)
 	private ChunkSectionLayer helio$foliageCutout(ChunkSectionLayer layer) {
-		return layer == ChunkSectionLayer.TRANSLUCENT && Scene.TESSELATING_FOLIAGE.get() ? ChunkSectionLayer.CUTOUT : layer;
+		if (layer == ChunkSectionLayer.TRANSLUCENT && Scene.TESSELATING_FOLIAGE.get()) return ChunkSectionLayer.CUTOUT;
+		return layer == ChunkSectionLayer.CUTOUT && Scene.TESSELATING_GLASS.get() ? ChunkSectionLayer.TRANSLUCENT : layer;
 	}
 }

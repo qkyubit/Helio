@@ -1279,8 +1279,31 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
    by the effect's strength, fading as vanilla's does in its last seconds).
 7. [ ] First-person Model: test it (one at a time, as steps 2-4). Its body vs Helio's own first-person body
    (shadows, camera rays passing through the body, reflections).
-8. [ ] Continuity: test it. Connected-texture sprites with the pack's PBR maps, emissive overlays, Random Block
+8. [x] Continuity: test it. Connected-texture sprites with the pack's PBR maps, emissive overlays, Random Block
    Rotation on connected faces.
+   - Continuity 3.0.1+26.3 (release; needs only Fabric API), with its built-in "default" connected textures and
+     glass pane culling fix packs on above SPBR. Four scenes, Balanced, FG off: 67 / 86 / 62 / 83 FPS (fly 75 /
+     77 / 78.5 / 83), scene 676 MB, as without it (66.5 / 83.5 / 63.5 / 79.5 on the same build family). Log clean.
+   - Glass roof and floor connect into one sheet (borders only at the outer edge) in the traced picture too:
+     Continuity emits through Fabric's renderer (Indigo), so Helio's section copy gets its quads; glass stays
+     glass (Scene.mark goes by block state), stained colours and refraction intact.
+   - PBR maps: connected-texture tiles are Continuity's own sprites, so a pack's `_n`/`_s` for the plain block
+     don't apply to them (flat normal, no specular); SPBR's glass maps are mild, nothing visibly lost.
+   - Random Block Rotation: the default pack connects glass, panes and bookshelves, none of which turn.
+   - User-checked with 3D Vanilla on: no visible connection (3D Vanilla's glass is 3D frames; Continuity does
+     swap in its tiles, `continuity_reserved/ctm/default/20_glass/N`, but the frames hide it), and glass lost its
+     reflections. Cause: in 26.3 plain glass lands in the translucent layer only because vanilla's glass texture
+     forces it (force_translucent); Continuity's tiles don't, so glass fell into cutout, where Helio cuts its clear
+     parts away. Fix: plain glass tesselated for the path tracer stays translucent (`Scene.TESSELATING_GLASS`,
+     SectionCompilerMixin), as foliage is kept cutout. Not yet: with Sodium and Continuity together, Sodium's
+     cutout pass would still draw the glass over the traced one.
+   - User-checked after the fix: reflections and refraction right; glass connects with 3D Vanilla off. With 3D
+     Vanilla on it doesn't (its framed glass model), a clash between the two packs: note it in the README table.
+   - Not checked: emissive overlays (none in the default pack); packs that connect natural blocks (a connected
+     texture on a turned face would break the connection).
+   - Found on the way, in the bench scripts: they restored settings from a backup of 2026-11-15/17 after every
+     run, reverting the user's options, Helio settings, resource packs (3D Vanilla, enabled since), position and
+     time. They now snapshot the state at the start and put exactly that back.
 9. [ ] All together (minus Voxy): bench and a long play session.
 10. [ ] Voxy (stretch): depth-composite its LOD pass first; LOD sections as TLAS instances later. Blending, so
     there's no abrupt change at the render distance:
