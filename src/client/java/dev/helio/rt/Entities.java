@@ -53,6 +53,8 @@ public final class Entities {
 	 */
 	public static EntityRenderState firstPersonBody;
 	public static final String BODY_PREFIX = "helio_body/";
+	/** Another mod draws the first-person body (headless): {@link #firstPersonBody} is that mod's, submitted again for its head's shadow (ModelFeatureRendererMixin). */
+	public static boolean firstPersonHeadOnly;
 	private static final Map<RenderType, RenderType> bodyTypes = new IdentityHashMap<>();
 
 	/** Render types whose geometry is a solid surface. Glints, trims, eyes, shadows, outlines and text are overlays or decals. */

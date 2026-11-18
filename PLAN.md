@@ -1322,6 +1322,52 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
      run, reverting the user's options, Helio settings, resource packs (3D Vanilla, enabled since), position and
      time. They now snapshot the state at the start and put exactly that back.
 9. [ ] All together (minus Voxy): bench and a long play session.
+   - Bench (Balanced, FG off, path traced; SPBR plus Continuity's packs): the user's set (Chunky, Continuity,
+     First-person Model, Not Enough Animations) vs that plus Lithium, FerriteCore, ImmediatelyFast, C2ME,
+     EntityCulling (+ Cloth Config), MoreCulling and Sodium:
+
+     | Scene | User's set | All together |
+     |---|---|---|
+     | Overworld | 74 (fly 77) | 74.5 (fly 78.5) |
+     | Cave | 87 (81) | 91 (83) |
+     | Water + glass | 68.5 (79.5) | 72 (82.5) |
+     | Nether | 87.5 (85.5) | 91 (90.5) |
+
+     Scene ~470-500 MB, VRAM ~2 GB either way. The user's RT / render distance is lower than in earlier benches
+     (RT distance 8, was 12 in earlier benches: ~2400 sections, was ~4100), so these don't compare with older tables. Log: only the mods' own harmless
+     warnings (C2ME's optional Starlight hooks, a VulkanMod class probe, EntityCulling's refmap, Sodium's NVIDIA
+     workarounds). Pictures match apart from the auto exposure (the first-person body's pose differs per run).
+   - Sodium + Continuity: Helio's copy of Sodium's meshes keeps plain glass translucent too (`SodiumMeshes`),
+     the same rule as SectionCompilerMixin; Sodium's own cutout pass is drawn over by the traced picture.
+   - Found in the user's play session: with Sodium, terrain that loaded beyond the RT distance (RT distance 8 <
+     render distance 12; at join and as chunks arrive) had holes in the traced picture, caves showing through
+     the ground, even standing above it. Sodium builds a section once, when it loads; `Scene.submitRaw` dropped it
+     as out of range, and Sodium never built it again. RenderSectionManagerMixin's per-frame scan now also asks
+     Sodium to rebuild built sections in range the scene never got (`Scene.sodiumRequest`: once each, like the
+     vanilla path's requests; within the 16 builds a frame). Checked flying 600 blocks east, looking down: old
+     build full of holes, fixed solid (scene sections 1626 -> 2574; path trace 3.3 -> 3.6 ms for the terrain
+     now there).
+   - Found in the play session too (any renderer): another dimension's terrain showed as mirages (overworld forest in
+     the End, End pillars in the overworld). The scene keys sections by position only, and nothing dropped the old
+     level's sections within the keep range. `Scene.dropAll` now clears sections, pending uploads and lights when
+     the level changes. Checked with bench word `dim:<dimension>` (same coordinates, other dimension): old build
+     showed the overworld under the End's void, fixed shows only the End; back in the overworld, clean.
+   - User-reported (long-standing, any mods): block light cut off in a stepped edge. The shader sampled block
+     lights only where vanilla's block light level was above 0, which ends at a Manhattan distance (a torch's
+     at 14 blocks along an axis, 8 on the diagonal) while Helio's lights fade out over 15 blocks. Seen surfaces
+     (camera, through glass or water, reflections) now sample past it wherever a light is in the 27 sections
+     around (`Lights.NEAR`, a flag on each light-table cell); bounces and the cache's paths keep vanilla's gate.
+     Cost at night by the portal: path trace 15.2 -> 16.9 ms (cave: none). Tried and dropped, all ~17 ms:
+     sampling past the gate on every path, a quarter of the time (random per pixel: a warp pays whenever one
+     thread samples), with one candidate, with a streamed cdf; skipping the shadow ray didn't help either, so the
+     cost is the sampling at the extra points.
+   - User-reported: with First-person Model, the player's shadow had no head (the mod hides it, moved 5000 units
+     forward, and Helio skipped its own body for the mod's). The mod's body state is now submitted a second time
+     with Helio's hidden body render types, and ModelFeatureRendererMixin draws only the head of that copy (put
+     back in place), between the model's setupAnim and its drawing, so it has the mod's exact pose and place.
+     A separate state of Helio's own put the head a little off. Checked against the third-person shadow at the
+     same spot (bench word `thirdperson`): the same shape, head included. Third person is unchanged.
+   - Not done yet: the rest of the user's long play session with everything installed.
 10. [ ] Voxy (stretch): depth-composite its LOD pass first; LOD sections as TLAS instances later. Blending, so
     there's no abrupt change at the render distance:
     - LOD chunks out to 1.5x the base render distance (a band of 50% of its radius past it) get reflections and

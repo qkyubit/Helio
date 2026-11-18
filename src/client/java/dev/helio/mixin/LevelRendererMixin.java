@@ -130,7 +130,12 @@ public class LevelRendererMixin {
 	@WrapOperation(method = "submitEntities", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;submit(Lnet/minecraft/client/renderer/entity/state/EntityRenderState;Lnet/minecraft/client/renderer/state/level/CameraRenderState;DDDLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/SubmitNodeCollector;)V"))
 	private void helio$submitBody(EntityRenderDispatcher dispatcher, EntityRenderState state, CameraRenderState camera, double x, double y, double z,
 		PoseStack poseStack, SubmitNodeCollector output, Operation<Void> original) {
-		original.call(dispatcher, state, camera, x, y, z, poseStack, state == Entities.firstPersonBody ? Entities.bodyCollector(output) : output);
+		if (state != Entities.firstPersonBody) original.call(dispatcher, state, camera, x, y, z, poseStack, output);
+		else if (!Entities.firstPersonHeadOnly) original.call(dispatcher, state, camera, x, y, z, poseStack, Entities.bodyCollector(output));
+		else { // another mod's first-person body: as it is, and again for the head's shadow
+			original.call(dispatcher, state, camera, x, y, z, poseStack, output);
+			original.call(dispatcher, state, camera, x, y, z, poseStack, Entities.bodyCollector(output));
+		}
 	}
 
 	// Inside the RT distance the path tracer draws translucent terrain itself (reflected and refracted).

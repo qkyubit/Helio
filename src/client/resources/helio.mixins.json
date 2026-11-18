@@ -13,6 +13,7 @@
 		"LevelExtractorMixin",
 		"LevelRendererMixin",
 		"MinecraftMixin",
+		"ModelFeatureRendererMixin",
 		"PipelineCacheMixin",
 		"PreparedRenderTypeMixin",
 		"RenderSectionMixin",

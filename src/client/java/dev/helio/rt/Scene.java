@@ -407,6 +407,16 @@ public final class Scene {
 		return ready && keepRadius != Integer.MAX_VALUE ? keepRadius - KEEP_MARGIN : 0;
 	}
 
+	/**
+	 * Sodium: a section it built that the scene never got, though in range now (built while beyond the RT distance,
+	 * or held back for memory: submitRaw drops those), and Sodium won't build it again by itself. Marks it
+	 * requested, as withHiddenSections does for vanilla; true if it should be rebuilt.
+	 */
+	public static boolean sodiumRequest(long node) {
+		if (!ready || !inKeepRange(node) || memoryTight && !nearCamera(node) || held.contains(node)) return false;
+		return requested.add(node);
+	}
+
 	private static boolean inKeepRange(long node) {
 		return Math.abs(SectionPos.x(node) - keepX) <= keepRadius && Math.abs(SectionPos.z(node) - keepZ) <= keepRadius;
 	}
@@ -506,6 +516,11 @@ public final class Scene {
 			keepRadius = rtDistance() + KEEP_MARGIN;
 		}
 		while (!deferred.isEmpty() && deferred.peek().frame + RING <= frame) deferred.poll().free.run();
+		Object level = Minecraft.getInstance().level;
+		if (level != sceneLevel) {
+			sceneLevel = level;
+			dropAll();
+		}
 		drainIncoming();
 		if (frame % 64 == 0 || evictNow) evictOutOfRange(camera);
 		evictNow = false;
@@ -559,6 +574,27 @@ public final class Scene {
 				if (stale != null) freeGeos(stale); // never reached the GPU
 			}
 		}
+	}
+
+	/** The level the scene's sections belong to. */
+	private static Object sceneLevel;
+
+	/**
+	 * Another world or dimension: drops every section. Sections are keyed by position only, and nothing removes the
+	 * old level's within the keep range (Sodium never builds empty sections), so they stayed as mirages.
+	 * ponytail: a section of the old level still compiling now arrives after this and stays until it is rebuilt or
+	 * evicted; tag uploads with the level if that shows up.
+	 */
+	private static void dropAll() {
+		for (Upload u; (u = incoming.poll()) != null; ) if (u.layers != null) freeGeos(u.layers);
+		pending.values().forEach(Scene::freeGeos);
+		pending.clear();
+		sections.values().forEach(Scene::deferFree);
+		sections.clear();
+		held.clear();
+		requested.clear();
+		Lights.clear();
+		instancesDirty = true;
 	}
 
 	/** Drops sections past the keep range (and any a removal raced past). */

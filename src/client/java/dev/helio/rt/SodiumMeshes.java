@@ -27,7 +27,7 @@ public final class SodiumMeshes {
 		boolean active;
 		BlockAndTintGetter level;
 		int layer, mark;
-		boolean foliage;
+		boolean foliage, glass;
 	}
 
 	private static final ThreadLocal<Section> CURRENT = ThreadLocal.withInitial(Section::new);
@@ -55,6 +55,7 @@ public final class SodiumMeshes {
 		Section s = CURRENT.get();
 		s.mark = Scene.mark(state);
 		s.foliage = Scene.isFoliage(state);
+		s.glass = Scene.isGlass(state);
 	}
 
 	/** A fluid is next, in this layer (ChunkSectionLayer ordinal). */
@@ -62,6 +63,7 @@ public final class SodiumMeshes {
 		Section s = CURRENT.get();
 		s.mark = fluid.is(FluidTags.WATER) ? Scene.WATER_MARK : state.getLightEmission();
 		s.foliage = false;
+		s.glass = false;
 		s.layer = layer;
 	}
 
@@ -77,8 +79,9 @@ public final class SodiumMeshes {
 	public static void vertex(float x, float y, float z, int abgr, float u, float v, int light) {
 		Section s = CURRENT.get();
 		if (!s.active) return;
-		// Foliage stays alpha-tested, as SectionCompilerMixin keeps it for vanilla.
-		int layer = s.layer == TRANSLUCENT && s.foliage ? CUTOUT : s.layer;
+		// Foliage stays alpha-tested and plain glass translucent, as SectionCompilerMixin keeps them for vanilla
+		// (connected-texture glass tiles, Continuity, would land in cutout).
+		int layer = s.layer == TRANSLUCENT && s.foliage ? CUTOUT : s.layer == CUTOUT && s.glass ? TRANSLUCENT : s.layer;
 		if (s.filled[layer] == s.capacity[layer] * 4) grow(s, layer);
 		long p = s.buffers[layer] + (long) s.filled[layer] * Scene.VERTEX_STRIDE;
 		memPutFloat(p, x);

@@ -18,6 +18,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(value = RenderSectionManager.class, remap = false)
 public abstract class RenderSectionManagerMixin {
 	@Shadow private RenderSection getRenderSection(int x, int y, int z) { throw new AssertionError(); }
+	@Shadow public abstract void scheduleRebuild(int x, int y, int z, boolean important);
 	@Shadow private void submitSectionTask(ChunkJobCollector collector, RenderSection section, UploadResourceBudget budget) { throw new AssertionError(); }
 
 	/** Sections looked at per frame, and builds asked for per frame at most. */
@@ -45,7 +46,13 @@ public abstract class RenderSectionManagerMixin {
 			int i = helio$cursor = (helio$cursor + 1) % total;
 			int y = i % height, xz = i / height;
 			RenderSection section = getRenderSection(cx - r + xz % w, minY + y, cz - r + xz / w);
-			if (section == null || section.isDisposed() || section.getPendingUpdate() == 0) continue;
+			if (section == null || section.isDisposed()) continue;
+			if (section.getPendingUpdate() == 0) {
+				// Built while out of the scene's reach (Scene.sodiumRequest): holes in the traced terrain otherwise.
+				if (!section.isBuilt() || !Scene.sodiumRequest(section.getPosition().asLong())) continue;
+				scheduleRebuild(section.getChunkX(), section.getChunkY(), section.getChunkZ(), false);
+				if (section.getPendingUpdate() == 0) continue;
+			}
 			submitSectionTask(deferred, section, budget);
 			builds++;
 		}

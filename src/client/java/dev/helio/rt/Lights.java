@@ -146,6 +146,15 @@ public final class Lights {
 		if (lights == null ? bySection.remove(node) != null : bySection.put(node, lights) != lights) dirty = true;
 	}
 
+	/** Flag on a cell's light count: it or one of its 26 neighbours has lights (pathtrace.comp LIGHTS_NEAR). */
+	private static final int NEAR = 0x80000000;
+
+	/** Render thread: another level, every section's lights go. */
+	static void clear() {
+		bySection.clear();
+		dirty = true;
+	}
+
 	/**
 	 * Light blocks held in either hand by living entities near the camera, nearest first: {x, y, z (hand,
 	 * world), emission, packed sRGB colour} each.
@@ -224,6 +233,16 @@ public final class Lights {
 				putLight(p + lightsOffset + (long) n * LIGHT_SIZE, bx + (packed & 15) + 0.5f, by + (packed >> 4 & 15) + 0.5f,
 					bz + (packed >> 8 & 15) + 0.5f, packed >> 12 & 15, l[i + 1], 0);
 			}
+		}
+		// NEAR on every cell next to one with lights (and on it): the shader's cheap test that any light could reach.
+		for (int z = 0; z < w; z++) for (int y = 0; y < height; y++) for (int x = 0; x < w; x++) {
+			if ((memGetInt(p + HEADER + ((long) (z * height + y) * w + x) * 8 + 4) & ~NEAR) == 0) continue;
+			for (int dz = Math.max(z - 1, 0); dz <= Math.min(z + 1, w - 1); dz++)
+				for (int dy = Math.max(y - 1, 0); dy <= Math.min(y + 1, height - 1); dy++)
+					for (int dx = Math.max(x - 1, 0); dx <= Math.min(x + 1, w - 1); dx++) {
+						long c = p + HEADER + ((long) (dz * height + dy) * w + dx) * 8 + 4;
+						memPutInt(c, memGetInt(c) | NEAR);
+					}
 		}
 		memPutInt(p, -r);
 		memPutInt(p + 4, minY - camera.y());

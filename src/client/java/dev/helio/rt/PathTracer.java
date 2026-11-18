@@ -109,6 +109,8 @@ public final class PathTracer {
 	public static boolean benchFly;
 	private static boolean benchSummoned;
 
+	private static String benchDim = "";
+
 	private static void readBench() {
 		java.nio.file.Path file = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("helio-bench.txt");
 		bench = java.nio.file.Files.exists(file);
@@ -139,6 +141,14 @@ public final class PathTracer {
 					Vec3 at = pl.position().add(pl.getLookAngle().multiply(1, 0, 1).normalize().scale(3));
 					pl.connection.sendCommand(String.format(java.util.Locale.ROOT, "summon minecraft:zombified_piglin %.2f %.2f %.2f {NoAI:1b,Silent:1b,DeathLootTable:\"minecraft:empty\",Tags:[\"helio_test\"]}", at.x, at.y, at.z));
 				}
+				// "dim:<dimension>": once per change, the player moves to that dimension at the same coordinates
+				// (Scene dropping the old dimension's sections).
+				if (word.startsWith("dim:") && !word.equals(benchDim) && Minecraft.getInstance().player != null) {
+					benchDim = word;
+					Minecraft.getInstance().player.connection.sendCommand("execute in minecraft:" + word.substring(4) + " run tp @s ~ ~ ~");
+				}
+				// "thirdperson": the camera behind the player (first-person body shadow checks against the real one).
+				if (word.equalsIgnoreCase("thirdperson")) Minecraft.getInstance().options.setCameraType(net.minecraft.client.CameraType.THIRD_PERSON_BACK);
 				// "togglefs": fullscreen on / off each read, recreating the swapchain (M7 step 8: the pacer crash).
 				if (word.equalsIgnoreCase("togglefs")) Minecraft.getInstance().execute(() -> { var o = Minecraft.getInstance().options.fullscreen(); o.set(!o.get()); });
 			}
