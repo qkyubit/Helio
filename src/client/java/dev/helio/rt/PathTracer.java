@@ -24,6 +24,7 @@ import net.minecraft.client.CloudStatus;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.world.level.dimension.DimensionType.Skybox;
 import net.minecraft.world.level.material.FogType;
+import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
@@ -123,6 +124,9 @@ public final class PathTracer {
 				// compiler threads on the way out (driver 620.70.06).
 				if (word.equalsIgnoreCase("quit")) Minecraft.getInstance().stop();
 				if (word.equalsIgnoreCase("fly")) benchFly = true;
+				// "nightvision": gives the player night vision (the bench restores the player's data after).
+				if (word.equalsIgnoreCase("nightvision") && Minecraft.getInstance().player != null && !Minecraft.getInstance().player.hasEffect(net.minecraft.world.effect.MobEffects.NIGHT_VISION))
+					Minecraft.getInstance().player.connection.sendCommand("effect give @s minecraft:night_vision infinite 0 true");
 				// "unsummon": removes what "summon" made (it's saved with the world).
 				if (word.equalsIgnoreCase("unsummon") && benchSummoned && Minecraft.getInstance().player != null) {
 					benchSummoned = false;
@@ -396,7 +400,8 @@ public final class PathTracer {
 			if (cacheOn) ensureCache(cmd, mc, s);
 			int slot = seed % RING;
 			Memory.Buf frame = frameData[slot];
-			float exposure = adaptExposure(frame.mapped(), daylight);
+			float vision = nightVision(mc);
+			float exposure = adaptExposure(frame.mapped(), Math.max(daylight, vision), vision);
 			updateAutoWarmth(mc, sun);
 			vkCmdFillBuffer(cmd, meters.buffer(), meters.offset() + slot * 16L, 16, 0);
 			VulkanCommandEncoder.memoryBarrier(cmd, s);
@@ -404,16 +409,16 @@ public final class PathTracer {
 			lastViewProj.get(0, fb);
 			fb.putFloat(64, (float) cameraDelta.x).putFloat(68, (float) cameraDelta.y).putFloat(72, (float) cameraDelta.z)
 				.putFloat(76, accumulate ? 3 : 1).putInt(80, upscale ? 1 : 0)
-				.putFloat(84, (float) (0.02 + 0.1 * mc.options.gamma().get()))
+				.putFloat(84, Mth.lerp(vision, (float) (0.02 + 0.1 * mc.options.gamma().get()), NIGHT_VISION_FLOOR))
 				.putInt(88, HelioConfig.current.lighting == HelioConfig.Lighting.HYBRID ? 1 : 0)
 				.putLong(92, cacheOn ? radianceCache.address() : 0)
 				.putInt(100, Scene.anchorX).putInt(104, Scene.anchorY).putInt(108, Scene.anchorZ)
-				.putFloat(112, HelioConfig.current.caveBrightness / 100f)
+				.putFloat(112, Mth.lerp(vision, HelioConfig.current.caveBrightness / 100f, 1))
 				.putFloat(116, HelioConfig.current.normalStrength / 100f)
 				.putFloat(120, exposure).putLong(124, meters.address() + slot * 16L)
 				.putFloat(132, cloudTime).putFloat(136, cloudBottom).putFloat(140, cloudCover(mc))
 				.putFloat(144, mc.options.getEffectiveRenderDistance() * 16)
-				.putFloat(148, HelioConfig.current.nightBrightness / 100f)
+				.putFloat(148, Mth.lerp(vision, HelioConfig.current.nightBrightness / 100f, 1))
 				.putFloat(152, updateWetness(mc)).putInt(156, benchOff)
 				.putInt(160, HelioConfig.current.fogSteps).putInt(164, HelioConfig.current.cloudSteps)
 				.putInt(168, HelioConfig.current.lightCandidates).putFloat(172, HelioConfig.current.specularCutoff / 100f)
@@ -547,7 +552,7 @@ public final class PathTracer {
 	 * The radiance scale for this frame: the auto exposure, adapted towards what the frame that last used this
 	 * slot measured (its GPU work is done: the ring waits for it), times the Exposure setting. Resets the meter.
 	 */
-	private static float adaptExposure(long frame, float daylight) {
+	private static float adaptExposure(long frame, float daylight, float vision) {
 		int sum = MemoryUtil.memGetInt(frame + METER), count = MemoryUtil.memGetInt(frame + METER + 4);
 		if (count > 0) lightRedOverBlue = (float) Integer.toUnsignedLong(MemoryUtil.memGetInt(frame + METER + 8))
 			/ Math.max(1, Integer.toUnsignedLong(MemoryUtil.memGetInt(frame + METER + 12)));
@@ -560,7 +565,7 @@ public final class PathTracer {
 				case OVERWORLD -> NIGHT_KEY + (1 - NIGHT_KEY) * daylight;
 				case END -> END_KEY;
 				default -> NETHER_KEY;
-			};
+			} * (1 + vision); // night vision: a stop brighter than by day, as vanilla's brightens everything
 			float target = Math.clamp((float) (Math.log(key) / Math.log(2)) - average, AUTO_EV_MIN, AUTO_EV_MAX);
 			autoEv += (target - autoEv) * (1 - (float) Math.exp(-dt / EXPOSURE_TAU));
 			if (timedFrames % 600 == 0) Helio.LOG.info("Exposure: average log2 luminance {}, auto {} EV; light red/blue {}, auto warmth {}",
@@ -568,6 +573,24 @@ public final class PathTracer {
 		}
 		return (float) Math.pow(2, autoEv + HelioConfig.current.exposure);
 	}
+
+	/**
+	 * Night vision (and conduit power's underwater vision), 0-1, as vanilla's lightmap takes it: full, flickering
+	 * in the effect's last 10 seconds. Vanilla brightens its lightmap, which the path tracer doesn't use; here it
+	 * lifts the light floor towards {@link #NIGHT_VISION_FLOOR} everywhere (caves and night included), and the auto
+	 * exposure aims as by day, a stop brighter (M8 step 6).
+	 */
+	private static float nightVision(Minecraft mc) {
+		if (!(mc.getCameraEntity() instanceof net.minecraft.world.entity.LivingEntity e)) return 0;
+		if (e.hasEffect(net.minecraft.world.effect.MobEffects.NIGHT_VISION))
+			return net.minecraft.client.renderer.GameRenderer.nightVisionScale(e, mc.getDeltaTracker().getGameTimeDeltaPartialTick(false));
+		if (e instanceof net.minecraft.client.player.LocalPlayer p && p.getWaterVision() > 0 && p.hasEffect(net.minecraft.world.effect.MobEffects.CONDUIT_POWER))
+			return p.getWaterVision();
+		return 0;
+	}
+
+	/** Light floor under full night vision: an unlit cave reads about like an overcast day. */
+	private static final float NIGHT_VISION_FLOOR = 0.5f;
 
 	private static float wetness;
 	private static long lastWetNanos;

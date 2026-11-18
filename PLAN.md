@@ -1274,11 +1274,28 @@ netherrack normal map leans 0.14 one way on average (others under 0.03), x3 at N
 leaned the same way before, and with rotation each block its own way. `PbrAtlas.level` now takes each pack normal
 map's mean tilt out as the atlas is built (a tiling block's map should average flat).
 
-6. [ ] Night vision (added 2026-11-17, user's request): it does nothing with ray tracing on. Vanilla's effect
+6. [x] Night vision (added 2026-11-17, user's request): it does nothing with ray tracing on. Vanilla's effect
    brightens the lightmap, which Helio doesn't use; give it a traced equivalent (lift the light floor / exposure
    by the effect's strength, fading as vanilla's does in its last seconds).
-7. [ ] First-person Model: test it (one at a time, as steps 2-4). Its body vs Helio's own first-person body
+   - Done (`PathTracer.nightVision`): vanilla's strength (`GameRenderer.nightVisionScale`: 1, flickering in the
+     last 10 seconds; conduit power's underwater vision too) lifts the light floor from vanilla's Brightness
+     towards 0.5 (an unlit cave reads about like an overcast day), the cave and night shares of it to 1, the
+     auto exposure aims as by day, and a stop brighter. Hybrid lighting gets the same floor. Bench word
+     "nightvision" gives the effect.
+   - Checked: sand cave with torches brighter and evenly lit (colours more neutral: the even fill outweighs the
+     torches' warm light, as vanilla's does); overworld at night reads like dusk, forest and shore visible. No
+     cost (cave 5.61 ms either way).
+   - User-checked: looks good. Not checked: the end-of-effect flicker; conduit power underwater.
+7. [x] First-person Model: test it (one at a time, as steps 2-4). Its body vs Helio's own first-person body
    (shadows, camera rays passing through the body, reflections).
+   - First-person Model 2.7.3 (release) needs Not Enough Animations 1.12.7; both only need Fabric API.
+   - Its body is a plain entity (the vanilla extraction includes the local player), so Helio's own hidden copy
+     (`Entities.firstPersonBody`) sat in the same place and shadowed it black. LevelExtractorMixin now skips its
+     copy when the frame already holds the local player's render state (any mod drawing the body in first person).
+     Checked looking down in the torch-lit cave and on the shore: the body is lit, shaded and casts its shadow, one
+     shadow only (temporary log: Helio's copy skipped). No cost (cave 5.53 vs 5.92 ms, noise).
+   - Known: reflections show First-person Model's body as it draws it (its own head handling).
+   - Not checked yet: the user's look in play.
 8. [x] Continuity: test it. Connected-texture sprites with the pack's PBR maps, emissive overlays, Random Block
    Rotation on connected faces.
    - Continuity 3.0.1+26.3 (release; needs only Fabric API), with its built-in "default" connected textures and

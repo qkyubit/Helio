@@ -36,6 +36,10 @@ public class LevelExtractorMixin {
 	private void helio$extractFirstPersonBody(Camera camera, Frustum frustum, DeltaTracker deltaTracker, LevelRenderState output, CallbackInfo ci) {
 		Entities.firstPersonBody = null;
 		if (!PathTracer.active() || camera.isDetached() || !(camera.entity() instanceof LocalPlayer player) || player.isSleeping()) return;
+		// A mod already draws the body in first person (First-person Model): it's a plain entity then, seen, lit and
+		// casting its shadow; a second, hidden copy of Helio's in the same place shadowed it black.
+		for (EntityRenderState other : output.entityRenderStates)
+			if (other instanceof net.minecraft.client.renderer.entity.state.AvatarRenderState a && a.id == player.getId()) return;
 		EntityRenderState state = levelRenderer.entityRenderDispatcher().extractEntity(player, deltaTracker.getGameTimeDeltaPartialTick(true));
 		output.entityRenderStates.add(state);
 		Entities.firstPersonBody = state;
