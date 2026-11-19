@@ -1044,8 +1044,9 @@ ivec3 anchor;
 
 // A cache cell's two hashes: where it sits and a check. Cells are 1/4 block, doubling every time the distance
 // from the camera does past 8 blocks (to 16); one per face direction.
-void cacheKey(vec3 pos, vec3 n, out uint slot, out uint check) {
-	int level = clamp(int(log2(max(length(pos - pc.cameraInScene.xyz) / 8.0, 1.0))), 0, 6);
+// coarser: 0 for pos's own cell, 1 for the cell twice its size around it (fed too, read where pos's is empty).
+void cacheKey(vec3 pos, vec3 n, int coarser, out uint slot, out uint check) {
+	int level = min(clamp(int(log2(max(length(pos - pc.cameraInScene.xyz) / 8.0, 1.0))), 0, 6) + coarser, 6);
 	vec3 a = abs(n);
 	uint face = a.x > a.y && a.x > a.z ? (n.x > 0.0 ? 0u : 1u) : a.y > a.z ? (n.y > 0.0 ? 2u : 3u) : (n.z > 0.0 ? 4u : 5u);
 	// The anchor is a multiple of 16, so whole cells: (anchor * 4) >> level in cells of 0.25 * 2^level.
@@ -1068,27 +1069,37 @@ int cacheEntry(uint slot, uint check, bool insert) {
 	return -1;
 }
 
+// A sample goes to its cell and to the coarser cell around it.
 void cacheAdd(vec3 pos, vec3 n, vec3 irradiance) {
-	uint slot, check;
-	cacheKey(pos, n, slot, check);
-	int i = cacheEntry(slot, check, true);
-	if (i < 0 || any(isnan(irradiance))) return;
+	if (any(isnan(irradiance))) return;
 	uvec3 fixedPoint = uvec3(min(irradiance, vec3(CACHE_MAX)) * CACHE_FIXED + 0.5);
-	atomicAdd(sums.s[i].sum.x, fixedPoint.x);
-	atomicAdd(sums.s[i].sum.y, fixedPoint.y);
-	atomicAdd(sums.s[i].sum.z, fixedPoint.z);
-	atomicAdd(sums.s[i].count, 1u);
+	for (int coarser = 0; coarser < 2; coarser++) {
+		uint slot, check;
+		cacheKey(pos, n, coarser, slot, check);
+		int i = cacheEntry(slot, check, true);
+		if (i < 0) continue;
+		atomicAdd(sums.s[i].sum.x, fixedPoint.x);
+		atomicAdd(sums.s[i].sum.y, fixedPoint.y);
+		atomicAdd(sums.s[i].sum.z, fixedPoint.z);
+		atomicAdd(sums.s[i].count, 1u);
+	}
 }
 
+// pos's cell, or where that has no average yet, the coarser one around it. Bounce rays reach surfaces the feeding
+// paths seldom do; a miss falls back to a far dimmer estimate (direct light and the sky fill by vanilla's level),
+// and in places lit mostly through the cache (an underwater tunnel at night) those misses were dark specks.
 bool cacheLookup(vec3 pos, vec3 n, out vec3 irradiance) {
-	uint slot, check;
-	cacheKey(pos, n, slot, check);
-	int i = cacheEntry(slot, check, false);
-	if (i < 0) return false;
-	uvec2 v = cells.c[i].value;
-	vec2 bn = unpackHalf2x16(v.y);
-	irradiance = vec3(unpackHalf2x16(v.x), bn.x);
-	return bn.y > 0.0; // averaged at least once
+	for (int coarser = 0; coarser < 2; coarser++) {
+		uint slot, check;
+		cacheKey(pos, n, coarser, slot, check);
+		int i = cacheEntry(slot, check, false);
+		if (i < 0) continue;
+		uvec2 v = cells.c[i].value;
+		vec2 bn = unpackHalf2x16(v.y);
+		irradiance = vec3(unpackHalf2x16(v.x), bn.x);
+		if (bn.y > 0.0) return true; // averaged at least once
+	}
+	return false;
 }
 
 // Light reaching a bounce ray's hit: the cache's, or (not cached yet) its direct light and the sky fill.

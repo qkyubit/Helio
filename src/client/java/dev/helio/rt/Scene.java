@@ -166,14 +166,16 @@ public final class Scene {
 		// Held back while memory is tight: the copies below are what fills it (withHiddenSections asks again after).
 		if (!ready || !inKeepRange(node) || memoryTight && !nearCamera(node)) return;
 		Geo[] geos = null;
-		for (Map.Entry<ChunkSectionLayer, MeshData> e : meshes.entrySet()) {
-			MeshData mesh = e.getValue();
+		LongOpenHashSet faces = new LongOpenHashSet();
+		for (ChunkSectionLayer layer : ChunkSectionLayer.values()) { // in order: overlays are lifted off what's under them
+			MeshData mesh = meshes.get(layer);
+			if (mesh == null) continue;
 			if (!mesh.drawState().format().equals(DefaultVertexFormat.BLOCK)) {
 				if (!warnedFormat) Helio.LOG.warn("Section mesh in unexpected vertex format {}; skipped", mesh.drawState().format());
 				warnedFormat = true;
 				continue;
 			}
-			geos = addLayer(geos, e.getKey(), memAddress(mesh.vertexBuffer()), mesh.drawState().vertexCount() / 4);
+			geos = addLayer(geos, layer, memAddress(mesh.vertexBuffer()), mesh.drawState().vertexCount() / 4, faces);
 		}
 		incoming.add(new Upload(node, geos, lights, false));
 	}
@@ -185,19 +187,24 @@ public final class Scene {
 	public static void submitRaw(long node, long[] layerVertices, int[] layerQuads, int[] lights) {
 		if (!ready || !inKeepRange(node) || memoryTight && !nearCamera(node)) return;
 		Geo[] geos = null;
+		LongOpenHashSet faces = new LongOpenHashSet();
 		for (ChunkSectionLayer layer : ChunkSectionLayer.values()) {
 			int i = layer.ordinal();
-			if (i < layerQuads.length) geos = addLayer(geos, layer, layerVertices[i], layerQuads[i]);
+			if (i < layerQuads.length) geos = addLayer(geos, layer, layerVertices[i], layerQuads[i], faces);
 		}
 		incoming.add(new Upload(node, geos, lights, false));
 	}
 
-	/** Copies one layer's vertices (BLOCK layout) into a buffer of ours; returns geos, created if needed. */
-	private static Geo[] addLayer(Geo[] geos, ChunkSectionLayer layer, long source, int quads) {
+	/**
+	 * Copies one layer's vertices (BLOCK layout) into a buffer of ours; returns geos, created if needed. faces: the
+	 * section's quads so far (liftOverlays), across its layers.
+	 */
+	private static Geo[] addLayer(Geo[] geos, ChunkSectionLayer layer, long source, int quads, LongOpenHashSet faces) {
 		if (quads == 0) return geos;
 		long bytes = (long) quads * 4 * VERTEX_STRIDE;
 		Buf vertices = Memory.buffer(bytes, BUILD_INPUT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true);
 		memCopy(source, vertices.mapped(), bytes);
+		liftOverlays(vertices.mapped(), quads, faces);
 		if (geos == null) geos = new Geo[ChunkSectionLayer.values().length];
 		Micromaps.Plan plan = Helio.omm && layer == ChunkSectionLayer.CUTOUT ? Micromaps.plan(vertices.mapped(), quads) : null;
 		int mask = LAYER_MASK[layer.ordinal()];
@@ -212,6 +219,39 @@ public final class Scene {
 		}
 		geos[layer.ordinal()] = new Geo(layer.ordinal(), mask, vertices, quads, new Blas(), plan);
 		return geos;
+	}
+
+	/** How far an overlay quad is lifted off the quad under it, in blocks: less than secondary rays' 0.002 start offset. */
+	private static final float OVERLAY_LIFT = 0.001f;
+
+	/**
+	 * Quads drawn exactly over an earlier quad of the section (the same corners, in the same order: a model's
+	 * overlay, like the grass block's tinted side over its dirt) are moved off it, outwards, by OVERLAY_LIFT.
+	 * Vanilla's raster draws the later one over the first at equal depth; a ray finds both at the same distance and
+	 * kept the first, so the overlay was lost (brown grass block sides with SPBR, whose side texture is plain dirt).
+	 * Outwards is the side the quad faces: models wind quads counter-clockwise seen from the front.
+	 * ponytail: corners hashed to 64 bits; a collision lifts an unrelated quad by 0.001, invisibly.
+	 */
+	private static void liftOverlays(long vertices, int quads, LongOpenHashSet faces) {
+		for (int q = 0; q < quads; q++) {
+			long v = vertices + (long) q * 4 * VERTEX_STRIDE, key = 0;
+			for (int c = 0; c < 4; c++)
+				for (int k = 0; k < 3; k++) key = it.unimi.dsi.fastutil.HashCommon.mix(key + Float.floatToIntBits(memGetFloat(v + (long) c * VERTEX_STRIDE + k * 4L)));
+			if (faces.add(key)) continue;
+			float ax = memGetFloat(v + VERTEX_STRIDE) - memGetFloat(v), ay = memGetFloat(v + VERTEX_STRIDE + 4) - memGetFloat(v + 4),
+				az = memGetFloat(v + VERTEX_STRIDE + 8) - memGetFloat(v + 8);
+			float bx = memGetFloat(v + 2L * VERTEX_STRIDE) - memGetFloat(v), by = memGetFloat(v + 2L * VERTEX_STRIDE + 4) - memGetFloat(v + 4),
+				bz = memGetFloat(v + 2L * VERTEX_STRIDE + 8) - memGetFloat(v + 8);
+			float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx, len = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
+			if (len == 0) continue;
+			float s = OVERLAY_LIFT / len;
+			for (int c = 0; c < 4; c++) {
+				long p = v + (long) c * VERTEX_STRIDE;
+				memPutFloat(p, memGetFloat(p) + nx * s);
+				memPutFloat(p + 4, memGetFloat(p + 4) + ny * s);
+				memPutFloat(p + 8, memGetFloat(p + 8) + nz * s);
+			}
+		}
 	}
 
 	/** Vanilla reset a section (unloaded, moved out of range, or the renderer was rebuilt). Any thread. */
@@ -297,7 +337,15 @@ public final class Scene {
 	private static boolean sodiumRemeshed;
 	private static boolean rotated = HelioConfig.current.randomRotation;
 
+	private static Vec3 benchHeld;
+
 	public static void tick(Minecraft mc) {
+		if (!PathTracer.benchHold || mc.player == null) benchHeld = null;
+		else if (benchHeld == null) benchHeld = mc.player.position();
+		else {
+			mc.player.setDeltaMovement(Vec3.ZERO);
+			mc.player.setPos(benchHeld);
+		}
 		if (PathTracer.benchFly && mc.player != null) {
 			mc.player.getAbilities().flying = true;
 			mc.player.setDeltaMovement(Vec3.ZERO);

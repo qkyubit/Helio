@@ -1367,6 +1367,17 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
      back in place), between the model's setupAnim and its drawing, so it has the mod's exact pose and place.
      A separate state of Helio's own put the head a little off. Checked against the third-person shadow at the
      same spot (bench word `thirdperson`): the same shape, head included. Third person is unchanged.
+   - User-reported (long-standing, shows with SPBR): grass block sides all dirt. SPBR's side texture is plain
+     dirt with the grass in the tinted overlay quad, drawn over it in the same plane; a ray found both at the
+     same distance and kept the dirt. `Scene.liftOverlays` moves a quad with the same corners as an earlier one
+     of the section (across layers: Sodium puts the opaque dirt in solid) 0.001 outwards. Checked by the shore and
+     at night by the house: green grass edges now; no cost measured.
+   - User-reported (long-standing): dark specks in dark scenes (an underwater tunnel at night, its end lit only
+     by bounce light). Not NaNs (checked): bounce rays whose hit had no averaged radiance cache cell fell back to
+     the far dimmer direct light and sky fill, and Ray Reconstruction kept those as blotches. Without the cache
+     the specks went, with most of the light. Each cache sample now also feeds the cell twice its size around it,
+     and a lookup falls back to that before the dim estimate. Specks gone at the user's spot; cave 5.4 -> 5.3 ms,
+     night by the portal 16.6 -> 16.5 ms. Bench word `hold` keeps the player in place (water currents moved it).
    - Not done yet: the rest of the user's long play session with everything installed.
 10. [ ] Voxy (stretch): depth-composite its LOD pass first; LOD sections as TLAS instances later. Blending, so
     there's no abrupt change at the render distance:

@@ -107,6 +107,8 @@ public final class PathTracer {
 	private static int benchOff;
 	/** Bench word "fly": the player flies along +x at 20 blocks a second (Scene.tick), for the CPU cost of terrain coming into range. */
 	public static boolean benchFly;
+	/** Bench word "hold": the player stays where it was when the word was first read (water currents moved it off a pose). */
+	public static boolean benchHold;
 	private static boolean benchSummoned;
 
 	private static String benchDim = "";
@@ -117,6 +119,7 @@ public final class PathTracer {
 		int was = benchOff;
 		benchOff = 0;
 		benchFly = false;
+		benchHold = false;
 		dev.helio.vk.DisplayClock.logging = bench;
 		if (!bench) return;
 		try {
@@ -126,6 +129,7 @@ public final class PathTracer {
 				// compiler threads on the way out (driver 620.70.06).
 				if (word.equalsIgnoreCase("quit")) Minecraft.getInstance().stop();
 				if (word.equalsIgnoreCase("fly")) benchFly = true;
+				if (word.equalsIgnoreCase("hold")) benchHold = true;
 				// "nightvision": gives the player night vision (the bench restores the player's data after).
 				if (word.equalsIgnoreCase("nightvision") && Minecraft.getInstance().player != null && !Minecraft.getInstance().player.hasEffect(net.minecraft.world.effect.MobEffects.NIGHT_VISION))
 					Minecraft.getInstance().player.connection.sendCommand("effect give @s minecraft:night_vision infinite 0 true");
