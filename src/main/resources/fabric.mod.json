@@ -5,7 +5,7 @@
 	"name": "Helio",
 	"description": "Path tracing and DLSS for Minecraft on Vulkan.",
 	"authors": ["bit"],
-	"license": "TBD",
+	"license": "MIT",
 	"icon": "assets/helio/icon.png",
 	"environment": "client",
 	"entrypoints": {

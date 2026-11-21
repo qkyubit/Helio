@@ -38,3 +38,7 @@ hs_err_*.log
 replay_*.log
 *.hprof
 *.jfr
+
+# NVIDIA's NGX loader, relinked from the DLSS SDK: under NVIDIA's license, not this repo's.
+# Build it with native/build-ngx.sh <DLSS SDK checkout>.
+src/client/resources/natives/
