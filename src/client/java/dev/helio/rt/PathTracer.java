@@ -111,7 +111,7 @@ public final class PathTracer {
 	public static boolean benchHold;
 	private static boolean benchSummoned;
 
-	private static String benchDim = "";
+	private static String benchDim = "", benchPose = "", benchPlaced = "";
 
 	private static void readBench() {
 		java.nio.file.Path file = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("helio-bench.txt");
@@ -150,6 +150,20 @@ public final class PathTracer {
 				if (word.startsWith("dim:") && !word.equals(benchDim) && Minecraft.getInstance().player != null) {
 					benchDim = word;
 					Minecraft.getInstance().player.connection.sendCommand("execute in minecraft:" + word.substring(4) + " run tp @s ~ ~ ~");
+				}
+				// "pose:x/y/z/yaw/pitch/time": once per change, the player moves there and the time is set (the bench
+				// restores the player's data and the world clock after).
+				if (word.startsWith("pose:") && !word.equals(benchPose) && Minecraft.getInstance().player != null) {
+					benchPose = word;
+					String[] p = word.substring(5).split("/");
+					Minecraft.getInstance().player.connection.sendCommand("tp @s " + p[0] + " " + p[1] + " " + p[2] + " " + p[3] + " " + p[4]);
+					Minecraft.getInstance().player.connection.sendCommand("time set " + p[5]);
+				}
+				// "place" / "unplace": once each, a stone block 8 blocks ahead of the player, then air again (ghost
+				// blocks: in open sky, the section is left all air).
+				if ((word.equalsIgnoreCase("place") || word.equalsIgnoreCase("unplace")) && !word.equalsIgnoreCase(benchPlaced) && Minecraft.getInstance().player != null) {
+					benchPlaced = word.toLowerCase(java.util.Locale.ROOT);
+					Minecraft.getInstance().player.connection.sendCommand("execute positioned ~ ~1.6 ~ run setblock ^ ^ ^8 " + (benchPlaced.equals("place") ? "stone" : "air"));
 				}
 				// "thirdperson": the camera behind the player (first-person body shadow checks against the real one).
 				if (word.equalsIgnoreCase("thirdperson")) Minecraft.getInstance().options.setCameraType(net.minecraft.client.CameraType.THIRD_PERSON_BACK);

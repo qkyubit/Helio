@@ -14,6 +14,8 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import net.caffeinemc.mods.sodium.client.render.chunk.compile.tasks.ChunkBuilderMeshingTask;
 
 @Mixin(value = RenderSectionManager.class, remap = false)
 public abstract class RenderSectionManagerMixin {
@@ -29,6 +31,14 @@ public abstract class RenderSectionManagerMixin {
 	@Inject(method = "onSectionRemoved", at = @At("HEAD"))
 	private void helio$remove(int x, int y, int z, CallbackInfo ci) {
 		Scene.remove(SectionPos.asLong(x, y, z));
+	}
+
+	// A section left all air (its last block broken) gets no meshing task: Sodium posts an empty build itself, so
+	// SodiumMeshes never hears of it and the old geometry stayed traced (ghost blocks). The scene empties it too.
+	@Inject(method = "createRebuildTask", at = @At("RETURN"))
+	private void helio$emptySection(RenderSection section, int frame, boolean important, long time,
+		CallbackInfoReturnable<ChunkBuilderMeshingTask> cir) {
+		if (cir.getReturnValue() == null) Scene.submitRaw(section.getPosition().asLong(), new long[0], new int[0], null);
 	}
 
 	// Sodium builds the sections it finds visible; shadows and reflections need those out of view too, within the

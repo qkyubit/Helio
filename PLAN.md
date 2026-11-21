@@ -1378,6 +1378,14 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
      the specks went, with most of the light. Each cache sample now also feeds the cell twice its size around it,
      and a lookup falls back to that before the dim estimate. Specks gone at the user's spot; cave 5.4 -> 5.3 ms,
      night by the portal 16.6 -> 16.5 ms. Bench word `hold` keeps the player in place (water currents moved it).
+   - Ghost blocks after breaking (survival playtest, 2026-11-21): a section left all air gets no meshing task
+     from Sodium (`createRebuildTask` returns null and Sodium posts an empty build itself), so SodiumMeshes never
+     heard of it and the old geometry stayed traced. RenderSectionManagerMixin now empties the scene's copy then.
+     Checked with bench words `place` / `unplace` (stone 8 blocks ahead in open sky, then air) and
+     `pose:x/y/z/yaw/pitch/time`: the old build kept the stone after removal; the new one doesn't. Vanilla always
+     meshes, so it never had this.
+   - SPBR ores too white in daylight (same playtest): it went away on its own. It wasn't seen again with blocks
+     placed in daylight.
    - Not done yet: the rest of the user's long play session with everything installed.
 10. [ ] Voxy (stretch): depth-composite its LOD pass first; LOD sections as TLAS instances later. Blending, so
     there's no abrupt change at the render distance:
@@ -1399,6 +1407,12 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
   - Started early (M7 step 5): `HelioAdvancedScreen` holds the ray budget only; the rest joins it here.
 - Recommended JVM args / Prism settings documented.
 - CI build on tag.
+- No NVIDIA code in the release jar (user request, 2026-11-21): the DLSS SDK license keeps it out of open-source
+  terms. Either the mod downloads it, or the user is linked to NVIDIA's downloads. The DLSS libraries already
+  come from the M1 downloader. `libhelio_ngx.so` still holds NVIDIA's static NGX loader (`libnvsdk_ngx.a`),
+  so it is the open problem: it is gitignored now, but the jar still bundles it.
+- Public builds (user request, 2026-11-21): release jars drop what only helps debugging, such as bench words,
+  bench logging, the spikes, and debug views users gain nothing from. Dev builds keep all of it.
 
 ### Stretch
 
