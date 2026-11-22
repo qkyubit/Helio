@@ -165,7 +165,7 @@ const float SKY_SAMPLE = 32.0;  // the same for the sky (its sun)
 const float SKY_DISTANCE = 65504.0; // RR's hit distance for rays that escape (FP16 max)   // luminance cap on what RR gets: sun glints off water and metal flicker past it
 const float FOLIAGE_TRANSMISSION = 0.5; // light leaves and grass let through, over what they reflect
 const float SSS_TRANSMISSION = 1.0;     // the same at a pack's full subsurface value (LabPBR _s blue 255)
-const float RT_BLEND = 0.25;            // share of the RT distance over which traced terrain fades into vanilla's, shaded alike (vanillaRadiance)
+const float RT_BLEND = 0.25;            // (Scene.RT_BLEND) share of the RT distance over which traced terrain fades into vanilla's, shaded alike (vanillaRadiance)
 // Polished blocks (Scene.METAL_MARK, Scene.GEM_MARK): metals reflect in their own colour, slightly blurred,
 // over a little diffuse; gems reflect faintly and sharply over their full colour.
 const float METAL_ROUGHNESS = 0.2, METAL_DIFFUSE = 0.3, GEM_ROUGHNESS = 0.05, GEM_F0 = 0.08;
@@ -1440,7 +1440,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 	vec2 d = abs(pos.xz - camera.xz);
 	if ((off & OFF_BLEND) != 0u && h.kind < KIND_TRANSLUCENT && max(d.x, d.y) > pc.rtDistance) return vec4(0.0);
 	if ((off & OFF_TRACED) != 0u && h.kind < KIND_TRANSLUCENT) return vec4(0.0);
-	if ((off & OFF_BLEND) == 0u && h.kind < KIND_TRANSLUCENT) {
+	if ((off & OFF_BLEND) == 0u && h.kind <= KIND_TRANSLUCENT) { // water too: vanilla draws it in the band as well (Scene.tracesTranslucent)
 		float band = max(16.0, pc.rtDistance * RT_BLEND);
 		covered = 1.0 - smoothstep(pc.rtDistance - band, pc.rtDistance, length(pos.xz - camera.xz));
 		if (covered <= 0.0) return vec4(0.0);

@@ -1442,6 +1442,12 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
          lies over the terrain; there the sky is reflected, Schlick from water's 0.02. Same view, old vs new: far
          water went from saturated vanilla blue with jagged, dark-outlined shores to the terrain's light and haze
          with a sky sheen. Pixels changing more than 12/255 between two frames 0.1 s apart: 1.4% -> 0.
+       - A straight seam remained across lakes where traced water met vanilla's (user, 2026-11-22). Only opaque
+         terrain was crossfaded: vanilla skipped water anywhere inside the RT distance, so there was nothing to fade
+         into. Now vanilla also draws translucent terrain in sections reaching into the band
+         (Scene.tracesTranslucent: traced alone only if its farthest corner is inside it), and traced water fades
+         like the land. Checked on the frozen river: the water's straight edge at the RT distance became a
+         gradient. (That run's RT distance was 4: the memory guard, system RAM short with 3 GB free.)
        - Bench word `hold` now holds at the `pose:` position from the first frame: in survival the player fell
          before the hold began, so views varied between runs.
     a. [x] LOD data. Voxelise each 16³ section to block state ids plus sky and block light. Mip it into levels:

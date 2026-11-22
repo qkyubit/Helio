@@ -417,19 +417,30 @@ public final class Scene {
 		return toCompile;
 	}
 
-	/** Inside the RT distance the path tracer draws water, glass and ice itself, so vanilla skips them. */
+	/**
+	 * Inside the RT distance the path tracer draws water, glass and ice itself, so vanilla skips them; but not in
+	 * sections reaching into the band where traced terrain fades into vanilla's (pathtrace.comp RT_BLEND, a circle):
+	 * there both draw them, so traced water fades into vanilla's like the land (a straight seam across lakes, else).
+	 */
+	public static final float RT_BLEND = 0.25f;
+
 	public static boolean tracesTranslucent(long node, Vec3 camera) {
 		if (!PathTracer.active()) return false;
-		int r = rtDistance();
-		return Math.abs(SectionPos.x(node) - SectionPos.blockToSectionCoord(camera.x)) <= r
-			&& Math.abs(SectionPos.z(node) - SectionPos.blockToSectionCoord(camera.z)) <= r;
+		return tracesTranslucentAt(SectionPos.x(node) * 16 + 8 - camera.x, SectionPos.z(node) * 16 + 8 - camera.z);
 	}
 
 	/** Sodium (dev.helio.sodium): whether the path tracer draws this section's translucent blocks (around the camera's section). */
 	public static boolean tracesTranslucent(int sectionX, int sectionZ) {
 		if (!PathTracer.active()) return false;
-		int r = rtDistance();
-		return Math.abs(sectionX - keepX) <= r && Math.abs(sectionZ - keepZ) <= r;
+		return tracesTranslucentAt((sectionX - keepX) * 16.0, (sectionZ - keepZ) * 16.0);
+	}
+
+	/** dx, dz: a section's centre from the camera, blocks. Traced alone if its farthest corner is inside the band. */
+	private static boolean tracesTranslucentAt(double dx, double dz) {
+		int r = rtDistance() * 16;
+		double fx = Math.abs(dx) + 8, fz = Math.abs(dz) + 8;
+		if (fx > r + 16 || fz > r + 16) return false;
+		return Math.sqrt(fx * fx + fz * fz) < r - Math.max(16, r * RT_BLEND) - 8; // 8: the camera section's own spread (Sodium's variant)
 	}
 
 	private static int rtDistance() {
