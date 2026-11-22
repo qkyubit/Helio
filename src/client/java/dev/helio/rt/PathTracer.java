@@ -58,6 +58,32 @@ public final class PathTracer {
 
 	/** The projection vanilla draws the level with (view bobbing, nausea warp included). */
 	public static final Matrix4f levelProjection = new Matrix4f();
+	/**
+	 * Under DLSS this frame's sub-pixel jitter (render pixels) is picked when vanilla sets up its projection, and
+	 * vanilla's terrain is drawn with it too (vanillaJittered; GameRendererMixin): RR then gathers new samples of
+	 * the picture past the RT distance each frame, and anti-aliases it (leaf edges) as it does the traced one.
+	 * levelProjection stays unjittered: Helio's own maths, and what features are drawn with after the trace.
+	 */
+	private static float frameJitterX, frameJitterY;
+	private static boolean vanillaJittered;
+
+	public static boolean vanillaJittered() {
+		return vanillaJittered;
+	}
+
+	public static void jitterLevelProjection(Matrix4f projection) {
+		levelProjection.set(projection);
+		vanillaJittered = false;
+		if (!active() || benchNoJitter || HelioConfig.current.accumulate || !Dlss.available() || HelioConfig.current.debugView != HelioConfig.DebugView.OFF
+			|| Dlss.renderWidth <= 0 || Dlss.renderHeight <= 0) return;
+		int i = jitterIndex++ % Dlss.jitterPhases() + 1;
+		frameJitterX = halton(i, 2) - 0.5f;
+		frameJitterY = halton(i, 3) - 0.5f;
+		// The picture shifted by minus the jitter in clip space: a pixel's centre then shows what the jittered
+		// ray through it does (pathtrace.comp vanillaShift).
+		projection.translateLocal(-2f * frameJitterX / Dlss.renderWidth, -2f * frameJitterY / Dlss.renderHeight, 0);
+		vanillaJittered = true;
+	}
 
 	private static VulkanDevice device;
 	private static long sampler, setLayout, textureSetLayout, descriptorPool, pipelineLayout, pipeline;
@@ -102,7 +128,7 @@ public final class PathTracer {
 	 * breakdown. Re-read every 120 frames, so a script can step through them in one session. Bits as
 	 * pathtrace.comp's OFF_*. The word "quit" closes the game the way its Quit button does.
 	 */
-	private static final String[] OFF_NAMES = {"specular", "fog", "clouds", "block", "bounce", "sun", "caustics"};
+	private static final String[] OFF_NAMES = {"specular", "fog", "clouds", "block", "bounce", "sun", "caustics", "blend", "vanilla"};
 	private static boolean bench;
 	private static int benchOff;
 	/** Bench word "fly": the player flies along +x at 20 blocks a second (Scene.tick), for the CPU cost of terrain coming into range. */
@@ -112,6 +138,14 @@ public final class PathTracer {
 	private static boolean benchSummoned;
 
 	private static String benchDim = "", benchPose = "", benchPlaced = "";
+	/** The last pose word's yaw and pitch, which "hold" keeps too (mouse input turned the camera off a pose). */
+	public static float benchYaw = Float.NaN, benchPitch;
+	/** The last pose word's position, where "hold" keeps the player (null: wherever it was). */
+	public static Vec3 benchPosePos;
+	/** Bench word "spin": with "hold", the camera turns 4 degrees a tick (black squares while turning the head). */
+	public static boolean benchSpin;
+	/** Bench word "nojitter": vanilla's terrain drawn unjittered, as before (A/B of jitterLevelProjection). */
+	private static boolean benchNoJitter;
 
 	private static void readBench() {
 		java.nio.file.Path file = net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("helio-bench.txt");
@@ -120,6 +154,8 @@ public final class PathTracer {
 		benchOff = 0;
 		benchFly = false;
 		benchHold = false;
+		benchSpin = false;
+		benchNoJitter = false;
 		dev.helio.vk.DisplayClock.logging = bench;
 		if (!bench) return;
 		try {
@@ -130,6 +166,8 @@ public final class PathTracer {
 				if (word.equalsIgnoreCase("quit")) Minecraft.getInstance().stop();
 				if (word.equalsIgnoreCase("fly")) benchFly = true;
 				if (word.equalsIgnoreCase("hold")) benchHold = true;
+				if (word.equalsIgnoreCase("spin")) benchSpin = true;
+				if (word.equalsIgnoreCase("nojitter")) benchNoJitter = true;
 				// "nightvision": gives the player night vision (the bench restores the player's data after).
 				if (word.equalsIgnoreCase("nightvision") && Minecraft.getInstance().player != null && !Minecraft.getInstance().player.hasEffect(net.minecraft.world.effect.MobEffects.NIGHT_VISION))
 					Minecraft.getInstance().player.connection.sendCommand("effect give @s minecraft:night_vision infinite 0 true");
@@ -151,13 +189,17 @@ public final class PathTracer {
 					benchDim = word;
 					Minecraft.getInstance().player.connection.sendCommand("execute in minecraft:" + word.substring(4) + " run tp @s ~ ~ ~");
 				}
-				// "pose:x/y/z/yaw/pitch/time": once per change, the player moves there and the time is set (the bench
-				// restores the player's data and the world clock after).
+				// "pose:x/y/z/yaw/pitch/time": once per change, the player moves there, the time is set and the weather
+				// cleared (the bench restores the player's data, the world clock and the weather after).
 				if (word.startsWith("pose:") && !word.equals(benchPose) && Minecraft.getInstance().player != null) {
 					benchPose = word;
 					String[] p = word.substring(5).split("/");
+					benchYaw = Float.parseFloat(p[3]);
+					benchPitch = Float.parseFloat(p[4]);
+					benchPosePos = new Vec3(Double.parseDouble(p[0]), Double.parseDouble(p[1]), Double.parseDouble(p[2]));
 					Minecraft.getInstance().player.connection.sendCommand("tp @s " + p[0] + " " + p[1] + " " + p[2] + " " + p[3] + " " + p[4]);
 					Minecraft.getInstance().player.connection.sendCommand("time set " + p[5]);
+					Minecraft.getInstance().player.connection.sendCommand("weather clear");
 				}
 				// "place" / "unplace": once each, a stone block 8 blocks ahead of the player, then air again (ghost
 				// blocks: in open sky, the section is left all air).
@@ -175,6 +217,15 @@ public final class PathTracer {
 		}
 		if (benchOff != was) Helio.LOG.info("Bench: effects off now {}", benchOff);
 	}
+	/** Vanilla's lightmap colour for full sky light (LightmapMixin), linear 0-1: Frame.vanillaSky. */
+	private static float skyR = 1, skyG = 1, skyB = 1;
+
+	public static void vanillaSky(float r, float g, float b) {
+		skyR = r;
+		skyG = g;
+		skyB = b;
+	}
+
 	/** Auto exposure (log2 of the radiance scale before the tonemap), and when it last adapted. */
 	private static float autoEv;
 	private static long lastExposureNanos;
@@ -417,7 +468,11 @@ public final class PathTracer {
 			Vec3 cameraDelta = cameraPos.subtract(lastCameraPos);
 			updateAccumulation(invViewProj);
 			float jitterX = 0, jitterY = 0;
-			if (accumulate || upscale) {
+			if (upscale && !accumulate && vanillaJittered) {
+				jitterX = frameJitterX;
+				jitterY = frameJitterY;
+			} else if (accumulate || upscale) {
+				vanillaJittered = false;
 				int i = accumulate ? frameIndex + 1 : jitterIndex++ % Dlss.jitterPhases() + 1;
 				jitterX = halton(i, 2) - 0.5f;
 				jitterY = halton(i, 3) - 0.5f;
@@ -450,7 +505,10 @@ public final class PathTracer {
 				.putFloat(152, updateWetness(mc)).putInt(156, benchOff)
 				.putInt(160, HelioConfig.current.fogSteps).putInt(164, HelioConfig.current.cloudSteps)
 				.putInt(168, HelioConfig.current.lightCandidates).putFloat(172, HelioConfig.current.specularCutoff / 100f)
-				.putInt(176, HelioConfig.current.cacheFeed);
+				.putInt(176, HelioConfig.current.cacheFeed)
+				// Frame.vanillaSky: 3 floats up to the meter at 192
+				.putFloat(180, skyR).putFloat(184, skyG).putFloat(188, skyB)
+				.putInt(208, vanillaJittered ? 1 : 0); // Frame.vanillaJittered, past the meter's copy at 192
 			lastViewProj.set(viewProj);
 			GpuTimers.begin(cmd, GpuTimers.Pass.PATH_TRACE);
 			Sky.update(cmd, sun, moon, hasSky ? rainBrightness : 1, moonPhase, s);

@@ -88,9 +88,14 @@ layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Fr
 	uint lightCandidates; // block lights weighed per shading point when stochastic (RR, reference); 8 otherwise
 	float specularCutoff; // surfaces smoother than this (perceptual roughness) get a reflection ray
 	uint cacheFeed;       // one 8x8 group in this many feeds the radiance cache each frame
+	vec3 vanillaSky;      // vanilla's lightmap colour at full sky light, no block light (LightmapMixin)
+	uvec4 meterCopy;      // PathTracer.METER: where the meter is copied for reading back
+	uint vanillaJittered; // 1: vanilla's terrain was drawn with this frame's jitter (PathTracer.jitterLevelProjection)
 };
 // M7 bench: effects the cost breakdown can switch off one at a time (config/helio-bench.txt).
-const uint OFF_SPECULAR = 1u, OFF_FOG = 2u, OFF_CLOUDS = 4u, OFF_BLOCK = 8u, OFF_BOUNCE = 16u, OFF_SUN = 32u, OFF_CAUSTICS = 64u;
+const uint OFF_SPECULAR = 1u, OFF_FOG = 2u, OFF_CLOUDS = 4u, OFF_BLOCK = 8u, OFF_BOUNCE = 16u, OFF_SUN = 32u, OFF_CAUSTICS = 64u,
+	OFF_BLEND = 128u, // M8 step 10.0: the RT distance's edge as before (A/B)
+	OFF_TRACED = 256u; // terrain everywhere shaded as past the RT distance (vanillaRadiance), to match it to the traced picture
 uint off;
 // Traced pixels' log2 luminance, in sixteenths, and how many (read back by PathTracer a few frames later).
 // And the light's colour: red and blue over luminance of the light reaching surfaces (radiance over albedo), in
@@ -159,6 +164,7 @@ const float SKY_SAMPLE = 32.0;  // the same for the sky (its sun)
 const float SKY_DISTANCE = 65504.0; // RR's hit distance for rays that escape (FP16 max)   // luminance cap on what RR gets: sun glints off water and metal flicker past it
 const float FOLIAGE_TRANSMISSION = 0.5; // light leaves and grass let through, over what they reflect
 const float SSS_TRANSMISSION = 1.0;     // the same at a pack's full subsurface value (LabPBR _s blue 255)
+const float RT_BLEND = 0.25;            // share of the RT distance over which traced terrain fades into vanilla's, shaded alike (vanillaRadiance)
 // Polished blocks (Scene.METAL_MARK, Scene.GEM_MARK): metals reflect in their own colour, slightly blurred,
 // over a little diffuse; gems reflect faintly and sharply over their full colour.
 const float METAL_ROUGHNESS = 0.2, METAL_DIFFUSE = 0.3, GEM_ROUGHNESS = 0.05, GEM_F0 = 0.08;
@@ -1425,10 +1431,19 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		hitDepth = clip.z / clip.w;
 	}
 
-	// Past the RT distance the terrain thins out; leave vanilla's picture there. Entities are always traced
-	// (vanilla no longer draws them).
+	// Past the RT distance the terrain thins out; leave vanilla's picture there, shaded alike (vanillaRadiance).
+	// Over the last RT_BLEND of it, on a circle (the traced area is square, which showed as a straight seam),
+	// the traced picture fades into that: covered, its share. Entities are always traced (vanilla no longer
+	// draws them).
+	float covered = 1.0;
 	vec2 d = abs(pos.xz - camera.xz);
-	if (h.kind < KIND_TRANSLUCENT && max(d.x, d.y) > pc.rtDistance) return vec4(0.0);
+	if ((off & OFF_BLEND) != 0u && h.kind < KIND_TRANSLUCENT && max(d.x, d.y) > pc.rtDistance) return vec4(0.0);
+	if ((off & OFF_TRACED) != 0u && h.kind < KIND_TRANSLUCENT) return vec4(0.0);
+	if ((off & OFF_BLEND) == 0u && h.kind < KIND_TRANSLUCENT) {
+		float band = max(16.0, pc.rtDistance * RT_BLEND);
+		covered = 1.0 - smoothstep(pc.rtDistance - band, pc.rtDistance, length(pos.xz - camera.xz));
+		if (covered <= 0.0) return vec4(0.0);
+	}
 
 	// Through water, glass and ice: each surface reflects (the first one only, ponytail: one reflection ray per
 	// pixel), shows its texture lit like any surface, and lets the rest through, bent by the refraction indices
@@ -1524,7 +1539,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 		pos = from + dir * t;
 		h = shade(rq, dir);
 	}
-	return vec4(result, 1.0);
+	return vec4(result, covered);
 }
 
 // Inverse of tonemap() after vanilla's gamma: the linear radiance that would come out as this sRGB colour
@@ -1543,8 +1558,8 @@ vec3 untonemap(vec3 srgb) {
 	return max(inverse(AGX_IN) * exp2(log2x), vec3(0.0));
 }
 
-// Adds the log luminance of every 8th pixel each way to the frame's meter. Only traced pixels count:
-// vanilla's (sky, past the RT distance) come back from untonemap() scaled by the exposure itself.
+// Adds the log luminance of every 8th pixel each way to the frame's meter. Only terrain counts, traced or past
+// the RT distance (lit alike, vanillaRadiance); not the sky.
 // (Summing a subgroup's pixels with subgroupAdd after the ray queries hung the GPU within a minute.)
 void meter(Frame frame, ivec2 p, vec3 radiance, vec3 albedo, bool traced) {
 	if (!traced || any(notEqual(p & 7, ivec2(0)))) return;
@@ -1583,11 +1598,15 @@ vec3 vanillaAt(vec2 pixel, ivec2 size, bool replaceSky, vec3 skySrgb, out float 
 // fog, towards its brighter fog colour, is off while Helio draws the sky: FogRendererMixin).
 const float EDGE_FADE = 0.2;
 float fadeEnd; // Frame.fadeEnd
+// Under DLSS vanilla's terrain is drawn with this frame's jitter (Frame.vanillaJittered): a window pixel's centre
+// shows what lies vanillaShift (NDC) from it, along the jittered ray, so RR anti-aliases it over frames. Its
+// picture is then read at pixel centres (vanillaTap 0); unjittered, at the ray's own offset (vanillaTap = jitter).
+vec2 vanillaShift = vec2(0.0), vanillaTap;
 
 float edgeFade(ivec2 windowPixel, vec2 ndc) {
 	float depth = texelFetch(depthTex, windowPixel, 0).r;
 	if (depth == 0.0) return 1.0;
-	vec4 rel = pc.invViewProj * vec4(ndc, depth, 1.0);
+	vec4 rel = pc.invViewProj * vec4(ndc + vanillaShift, depth, 1.0);
 	return smoothstep(fadeEnd * (1.0 - EDGE_FADE), fadeEnd, length(rel.xz / rel.w));
 }
 
@@ -1610,13 +1629,121 @@ vec3 skyThrough(vec2 pixel, vec2 size) {
 	return l > SKY_SAMPLE ? c * (SKY_SAMPLE / l) : c;
 }
 
+// Vanilla's terrain past the RT distance (M8 step 10.0), shaded the way the traced picture is, so the two meet
+// without a seam: it was vanilla's own flat lighting (no sun angle, no sky tint, no haze) right after traced
+// terrain. Everything past the RT distance goes through here, LODs too later.
+vec3 vanillaSky; // Frame.vanillaSky
+
+// Position (relative to the camera) of vanilla's surface at a window pixel, from its depth.
+vec3 vanillaPos(ivec2 w, ivec2 size) {
+	vec2 ndc = (vec2(w) + 0.5) / vec2(size) * 2.0 - 1.0 + vanillaShift;
+	vec4 rel = pc.invViewProj * vec4(ndc, texelFetch(depthTex, w, 0).r, 1.0);
+	return rel.xyz / rel.w;
+}
+
+// Its normal at a tree crown's scale: from the depths FAR_NORMAL_SPAN pixels either way (the nearer one each way,
+// so silhouettes don't bend it). Per pixel, leaves seen through their holes made it noise, and the light
+// speckled; this way crowns are lit round, sun side bright, and flat ground still comes out flat.
+const int FAR_NORMAL_SPAN = 3;
+vec3 vanillaNormal(ivec2 w, ivec2 size, vec3 pos) {
+	ivec2 hi = size - 1, sx = ivec2(FAR_NORMAL_SPAN, 0), sy = ivec2(0, FAR_NORMAL_SPAN);
+	vec3 r = vanillaPos(min(w + sx, hi), size) - pos, l = pos - vanillaPos(max(w - sx, ivec2(0)), size);
+	vec3 u = vanillaPos(min(w + sy, hi), size) - pos, d = pos - vanillaPos(max(w - sy, ivec2(0)), size);
+	vec3 n = cross(dot(r, r) < dot(l, l) ? r : l, dot(u, u) < dot(d, d) ? u : d);
+	// Next to the sky (depth 0: infinitely far) the steps are infinite: no normal, take up's. A NaN here
+	// spread through Ray Reconstruction into black squares.
+	if (any(isinf(n)) || any(isnan(n)) || dot(n, n) < 1e-12) return vec3(0.0, 1.0, 0.0);
+	n = normalize(n);
+	return dot(n, pos) > 0.0 ? -n : n; // towards the camera
+}
+
+// Share of the sky's light that arrives: traced terrain's is partly blocked (trees, slopes; the radiance cache
+// knows), which left vanilla's bluer and brighter than it next to it.
+const float FAR_SKY = 0.65;
+// Light bounced off what's around (foliage, the ground), in its own colour, as a share of the sun's on the
+// ground: in shade the sky's blue alone left far leaves blue-white where traced ones stay green.
+const float FAR_BOUNCE = 0.25;
+
+// Sun shadows for it, screen-space: steps towards the light (growing, from 1.5-2.5 out to about 25 blocks: other
+// trees, cliffs) against vanilla's depth. Something nearer than the step, but within a few blocks of it (else
+// it's in front, not in the way), shades it. Eight depth reads, only where vanilla's picture is used. Steps
+// starting closer found a crown's own gaps pixel by pixel: a fixed speckle (frosted far leaves).
+float vanillaShadow(vec3 pos, vec3 l, ivec2 size) {
+	float t = 1.5 + rand();
+	for (int i = 0; i < 8; i++, t *= 1.45) {
+		vec3 q = pos + l * t;
+		vec4 clip = pc.viewProj * vec4(q, 1.0);
+		vec3 ndc = clip.xyz / clip.w;
+		if (clip.w <= 0.0 || any(greaterThan(abs(ndc.xy), vec2(1.0)))) break;
+		ivec2 at = clamp(ivec2(((ndc.xy - vanillaShift) * 0.5 + 0.5) * vec2(size)), ivec2(0), size - 1);
+		if (texelFetch(depthTex, at, 0).r > ndc.z && length(q) - length(vanillaPos(at, size)) < 2.0 + 0.25 * t) return 0.0; // reversed Z
+	}
+	return 1.0;
+}
+
+// Vanilla's colour is the texture times its lightmap, face shade and ambient occlusion, in sRGB. Dividing out the
+// lightmap (at full sky light: block-lit spots come out brighter, capped) leaves the texture with vanilla's shade
+// and occlusion, kept as is (they're steady, and give faces their contrast): farAlbedo. It takes Helio's light:
+// the sun or moon (shadowed by vanillaShadow), the sky's, what bounces off the surroundings, and the floor.
+vec3 farAlbedo, farNormal; // RR's guides for vanilla's terrain
+vec3 vanillaLit(vec3 srgb, vec3 pos, vec3 n) {
+	vec3 albedo = srgbToLinear(min(srgb / max(vanillaSky, vec3(0.02)), vec3(1.0)));
+	farAlbedo = albedo;
+	farNormal = n;
+	bool day = pc.sunDir.y > 0.0;
+	vec3 l = day ? pc.sunDir.xyz : pc.moonDir.xyz, direct = vec3(0.0);
+	vec3 sun = l.y > 0.0 ? (day ? sunRadiance(l.y) : moonRadiance(l.y)) : vec3(0.0);
+	float nl = max(dot(n, l), 0.0);
+	if (nl > 0.0 && l.y > 0.0) direct = nl * sun * cloudShadow(pc.cameraInScene.xyz + pos, l) * vanillaShadow(pos + n * 0.05, l, imageSize(colorImg));
+	return albedo * (direct + skyIrradiance(n) * FAR_SKY + FAR_BOUNCE * albedo * sun * max(l.y, 0.0) + lightFloor * mix(nightFloor, 1.0, pc.sunDir.w));
+}
+
+// Vanilla's picture at a render pixel, as radiance. Where Helio draws the sky: its terrain shaded as above, with
+// clouds and haze in front, fading into Helio's sky over the render distance's last EDGE_FADE. Elsewhere (Nether,
+// End, underwater) vanilla's own picture. farSurface: how much of it is terrain (else sky), for RR's guides.
+float farSurface;
+vec3 vanillaRadiance(ivec2 p, ivec2 size, Frame frame) {
+	farSurface = 0.0;
+	ivec2 outSize = imageSize(colorImg);
+	vec2 scale = vec2(outSize) / vec2(size), ndc = (vec2(p) + 0.5) / vec2(size) * 2.0 - 1.0;
+	ivec2 under = clamp(ivec2((vec2(p) + 0.5) * scale), ivec2(0), outSize - 1);
+	bool replaceSky = pc.skyColor.w != 0.0 && pc.fogColor.w == 0.0; // as ownSky()
+	vec3 sky = replaceSky ? skyThrough(vec2(p) + 0.5 + pc.jitter, vec2(size)) : vec3(0.0);
+	vec3 skySrgb = pow(tonemap(sky * frame.exposure), vec3(1.0 / 2.2));
+	float skyShare;
+	vec3 v = vanillaAt((vec2(p) + 0.5 + vanillaTap) * scale, outSize, replaceSky, skySrgb, skyShare);
+	if (skyShare >= 0.999) return sky;
+	if (!replaceSky) return untonemap(v) / frame.exposure;
+	if ((off & OFF_BLEND) != 0u) return mix(untonemap(v) / frame.exposure, sky, edgeFade(under, ndc));
+	vec3 pos = vanillaPos(under, outSize), dir = normalize(pos);
+	// The bilinear taps can see terrain where the pixel under them is sky (depth 0, infinitely far): sky then.
+	if (texelFetch(depthTex, under, 0).r == 0.0 || any(isinf(pos)) || any(isnan(pos))) return sky;
+	// On the horizon's pixels taking the sky's share out can leave below zero, and pow() gave NaN there.
+	vec3 c = vanillaLit(max((v - skyShare * skySrgb) / (1.0 - skyShare), vec3(0.0)), pos, vanillaNormal(under, outSize, pos));
+	fogSkyLight = 1.0; // out in the open, as far terrain mostly is
+	vec4 cloud = clouds(pc.cameraInScene.xyz, dir, length(pos)), haze = fog(pc.cameraInScene.xyz, dir, length(pos));
+	c = (c * cloud.a + cloud.rgb) * haze.a + haze.rgb;
+	float fade = edgeFade(under, ndc);
+	if (any(isnan(c)) || any(isinf(c))) return sky;
+	farSurface = (1.0 - fade) * (1.0 - skyShare);
+	return mix(mix(c, sky, fade), sky, skyShare);
+}
+
+// A NaN or infinity in RR's inputs spreads through its history into black squares that grow as the view turns
+// (seen once past the RT distance, M8 step 10.0): whatever made it, a pixel of nothing goes in instead.
+bool bad(vec3 v) {
+	return any(isnan(v)) || any(isinf(v));
+}
+
 void writeDenoiserInputs(ivec2 p, ivec2 size, vec4 current, Frame frame) {
 	// Position relative to the camera, homogeneous: w = 0 for the sky (reversed-Z depth 0 is infinitely far).
 	vec4 rel;
 	if (current.a > 0.0) {
 		rel = vec4(guidePos, 1.0);
-		float l = luminance(current.rgb);
-		imageStore(rrColor, p, vec4(l > MAX_SAMPLE ? current.rgb * (MAX_SAMPLE / l) : current.rgb, 1.0));
+		vec3 c = current.a >= 1.0 ? current.rgb : mix(vanillaRadiance(p, size, frame), current.rgb, current.a);
+		if (bad(c)) c = vec3(0.0);
+		float l = luminance(c);
+		imageStore(rrColor, p, vec4(l > MAX_SAMPLE ? c * (MAX_SAMPLE / l) : c, 1.0));
 		imageStore(rrDiffuse, p, vec4(guideAlbedo, 1.0));
 		imageStore(rrSpecular, p, vec4(guideSpecular, 1.0));
 		imageStore(rrNormals, p, vec4(guideNormal, guideRoughness));
@@ -1626,17 +1753,19 @@ void writeDenoiserInputs(ivec2 p, ivec2 size, vec4 current, Frame frame) {
 		ivec2 outSize = imageSize(colorImg);
 		vec2 scale = vec2(outSize) / vec2(size), ndc = (vec2(p) + 0.5) / vec2(size) * 2.0 - 1.0;
 		ivec2 under = clamp(ivec2((vec2(p) + 0.5) * scale), ivec2(0), outSize - 1);
-		rel = pc.invViewProj * vec4(ndc, texelFetch(depthTex, under, 0).r, 1.0);
-		bool replaceSky = pc.skyColor.w != 0.0 && pc.fogColor.w == 0.0; // as ownSky()
-		vec3 sky = replaceSky ? skyThrough(vec2(p) + 0.5 + pc.jitter, vec2(size)) : vec3(0.0);
-		float skyShare;
-		vec3 v = vanillaAt((vec2(p) + 0.5 + pc.jitter) * scale, outSize, replaceSky, pow(tonemap(sky * frame.exposure), vec3(1.0 / 2.2)), skyShare);
-		vec3 c = skyShare >= 0.999 ? sky : mix(untonemap(v) / frame.exposure, sky, replaceSky ? edgeFade(under, ndc) : 0.0);
+		rel = pc.invViewProj * vec4(ndc + vanillaShift, texelFetch(depthTex, under, 0).r, 1.0);
+		vec3 c = vanillaRadiance(p, size, frame);
+		if (bad(c)) c = vec3(0.0);
 		imageStore(rrColor, p, vec4(c, 1.0));
-		imageStore(rrDiffuse, p, vec4(0.5, 0.5, 0.5, 1.0)); // RR's suggested sky defaults
+		// Lit by Helio now, so it counts for the auto exposure like traced terrain.
+		meter(frame, p, c, farAlbedo, farSurface > 0.5);
+		// Vanilla's terrain as a rough diffuse surface, so RR denoises its light (the shadows' random steps) as it
+		// does the traced picture's; the sky with RR's suggested defaults.
+		bool surface = farSurface > 0.5 && !bad(farAlbedo) && !bad(farNormal);
+		imageStore(rrDiffuse, p, vec4(surface ? farAlbedo : vec3(0.5), 1.0));
 		imageStore(rrSpecular, p, vec4(0.0));
-		imageStore(rrNormals, p, vec4(0.0));
-		imageStore(rrHitDistance, p, vec4(SKY_DISTANCE));
+		imageStore(rrNormals, p, surface ? vec4(farNormal, 1.0) : vec4(0.0));
+		imageStore(rrHitDistance, p, vec4(surface ? 0.0 : SKY_DISTANCE));
 	}
 	vec4 clip = pc.viewProj * rel;
 	// Where it was last frame, relative to last frame's camera: entities by their own motion where known, the
@@ -1670,6 +1799,8 @@ void main() {
 	rng = pcg(uint(p.x) + pcg(uint(p.y) + pcg(pc.stochastic != 0.0 ? pc.seed : 0u)));
 	Frame frame = Frame(pc.frame);
 	if (frame.denoise != 0u) size = imageSize(rrColor); // DLSS's render size
+	vanillaShift = frame.vanillaJittered != 0u ? pc.jitter * 2.0 / vec2(size) : vec2(0.0);
+	vanillaTap = frame.vanillaJittered != 0u ? vec2(0.0) : pc.jitter;
 	if (any(greaterThanEqual(p, size))) return;
 	bounces = int(frame.cameraDelta.w);
 	lightFloor = frame.lightFloor;
@@ -1677,6 +1808,7 @@ void main() {
 	cloudBottom = frame.cloudBottom;
 	cloudCover = frame.cloudCover;
 	fadeEnd = frame.fadeEnd;
+	vanillaSky = frame.vanillaSky;
 	anchorWorld = vec3(frame.anchor);
 	caveFloor = frame.caveFloor;
 	nightFloor = frame.nightFloor;
@@ -1717,10 +1849,8 @@ void main() {
 	vec4 acc = pc.frameIndex == 0u ? current : mix(imageLoad(accumImg, p), current, 1.0 / float(pc.frameIndex + 1u));
 	imageStore(accumImg, p, acc);
 	vec4 vanilla = imageLoad(colorImg, p);
-	bool sky = acc.a <= 0.0 && pc.skyColor.w != 0.0 && pc.fogColor.w == 0.0; // Helio's sky, or vanilla's terrain fading into it
-	float fade = sky ? edgeFade(p, (vec2(p) + 0.5) / vec2(size) * 2.0 - 1.0) : 0.0;
-	sky = fade > 0.0;
-	if (sky) vanilla.rgb = mix(vanilla.rgb, pow(tonemap(skyThrough(vec2(p) + 0.5 + pc.jitter, vec2(size)) * frame.exposure), vec3(1.0 / 2.2)), fade);
+	bool sky = acc.a < 1.0 && pc.skyColor.w != 0.0 && pc.fogColor.w == 0.0; // Helio's sky, or vanilla's terrain shaded and fading into it
+	if (sky) vanilla.rgb = pow(tonemap(vanillaRadiance(p, size, frame) * frame.exposure), vec3(1.0 / 2.2));
 	vec3 shown = acc.a <= 0.0 ? vanilla.rgb : mix(vanilla.rgb, pow(tonemap(acc.rgb / acc.a * frame.exposure), vec3(1.0 / 2.2)), acc.a);
 	// Vanilla draws entities over this next (for their depth); entity_composite.comp puts this colour back,
 	// on the entity (depth matches) or behind traced water / glass (negative depth: anything behind it).

@@ -1,5 +1,8 @@
 package dev.helio.mixin;
 
+import com.mojang.blaze3d.ProjectionType;
+import net.minecraft.client.renderer.ProjectionMatrixBuffer;
+
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.llamalad7.mixinextras.sugar.Local;
@@ -42,6 +45,7 @@ public class LevelRendererMixin {
 	@Unique private ChunkSectionsToRender helio$deferredSections;
 	@Unique private FeatureRenderDispatcher.PreparedFrame helio$deferredFeatures;
 	@Unique private boolean helio$replaying;
+	@Unique private static ProjectionMatrixBuffer helio$unjittered;
 
 	@Shadow
 	private void executeClassicTransparency(ChunkSectionsToRender chunkSectionsToRender, FeatureRenderDispatcher.PreparedFrame featureFrame, RenderPass renderPass) {}
@@ -102,6 +106,12 @@ public class LevelRendererMixin {
 		if (helio$deferredFeatures == null) return;
 		PathTracer.run();
 		RenderTarget main = gameRenderer.mainRenderTarget();
+		// Terrain was drawn jittered for DLSS (PathTracer.jitterLevelProjection); what's drawn from here on
+		// (entities, particles, translucents, outlines) isn't, or it would wobble over the upscaled picture.
+		if (PathTracer.vanillaJittered()) {
+			if (helio$unjittered == null) helio$unjittered = new ProjectionMatrixBuffer("Helio unjittered level");
+			RenderSystem.setProjectionMatrix(helio$unjittered.getBuffer(PathTracer.levelProjection), ProjectionType.PERSPECTIVE);
+		}
 		try {
 			try (RenderPass pass = RenderSystem.getDevice().createCommandEncoder()
 				.createRenderPass(() -> "Helio solid features", main.getColorTextureView(), Optional.empty(), main.getDepthTextureView(), OptionalDouble.empty())) {

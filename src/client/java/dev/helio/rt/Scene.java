@@ -341,10 +341,15 @@ public final class Scene {
 
 	public static void tick(Minecraft mc) {
 		if (!PathTracer.benchHold || mc.player == null) benchHeld = null;
-		else if (benchHeld == null) benchHeld = mc.player.position();
+		else if (benchHeld == null) benchHeld = PathTracer.benchPosePos != null ? PathTracer.benchPosePos : mc.player.position();
 		else {
 			mc.player.setDeltaMovement(Vec3.ZERO);
 			mc.player.setPos(benchHeld);
+			if (PathTracer.benchSpin && !Float.isNaN(PathTracer.benchYaw)) PathTracer.benchYaw += 4;
+			if (!Float.isNaN(PathTracer.benchYaw)) {
+				mc.player.setYRot(PathTracer.benchYaw);
+				mc.player.setXRot(PathTracer.benchPitch);
+			}
 		}
 		if (PathTracer.benchFly && mc.player != null) {
 			mc.player.getAbilities().flying = true;

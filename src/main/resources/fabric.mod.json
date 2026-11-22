@@ -22,6 +22,10 @@
 		"java": ">=25",
 		"fabric-api": "*"
 	},
+	"breaks": {
+		"voxy": "*",
+		"distanthorizons": "*"
+	},
 	"suggests": {
 		"modmenu": "*"
 	}

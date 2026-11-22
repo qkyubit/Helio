@@ -1164,11 +1164,10 @@ checking each has a 26.3 Fabric build on Modrinth:
 | EntityCulling / More Culling | culling | can remove geometry RT needs (shadows/reflections) |
 | First-person Model | draws the player's own body in first person | Helio already extracts the body for shadows (`Entities.firstPersonBody`): double body, or camera rays hitting it |
 | Continuity | connected textures (CTM) | its sprites need the pack's PBR maps found; emissive overlays; Random Block Rotation must not turn connected faces |
-| Voxy | LODs (own GPU-driven renderer) | stretch: depth-composite its LOD pass first, then LOD sections as low-detail TLAS instances so far terrain casts shadows / shows in reflections |
+| Voxy, Distant Horizons | LODs (own renderers; Voxy is OpenGL-only) | incompatible (fabric.mod.json breaks); Helio draws its own LODs (step 10) |
 
-With Voxy, LOD terrain past a distance threshold (configurable, default around
-the RT distance) stays raster: Voxy draws it, Helio composites over it by depth
-and spends no rays on it. Only LODs inside the threshold, if any, join the TLAS.
+LOD terrain past the RT distance stays raster: Helio's own LOD pass draws it (step 10), the composite
+spends no rays on it. Only LODs inside the threshold, if any, join the TLAS.
 
 Iris shader packs are out of scope: Helio is the shader.
 
@@ -1321,7 +1320,7 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
    - Found on the way, in the bench scripts: they restored settings from a backup of 2026-11-15/17 after every
      run, reverting the user's options, Helio settings, resource packs (3D Vanilla, enabled since), position and
      time. They now snapshot the state at the start and put exactly that back.
-9. [ ] All together (minus Voxy): bench and a long play session.
+9. [x] All together (minus Voxy): bench and a long play session.
    - Bench (Balanced, FG off, path traced; SPBR plus Continuity's packs): the user's set (Chunky, Continuity,
      First-person Model, Not Enough Animations) vs that plus Lithium, FerriteCore, ImmediatelyFast, C2ME,
      EntityCulling (+ Cloth Config), MoreCulling and Sodium:
@@ -1386,13 +1385,84 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
      meshes, so it never had this.
    - SPBR ores too white in daylight (same playtest): it went away on its own. It wasn't seen again with blocks
      placed in daylight.
-   - Not done yet: the rest of the user's long play session with everything installed.
-10. [ ] Voxy (stretch): depth-composite its LOD pass first; LOD sections as TLAS instances later. Blending, so
-    there's no abrupt change at the render distance:
-    - LOD chunks out to 1.5x the base render distance (a band of 50% of its radius past it) get reflections and
-      cheap water effects (Fresnel reflection of the sky and scene, waves, absorption tint).
-    - Farther LOD chunks get cheap effects too (fog, sky-tinted ambient, water tint and sky reflection, maybe
-      baked or approximate sun shadowing) to blend in.
+   - Done (2026-11-21): the user's long play session and a survival playtest found nothing else.
+10. [ ] Helio's own LODs (replaces "Voxy"; user decision, 2026-11-21). Voxy draws with raw OpenGL 4.6 and has
+    no Vulkan code: its 26.3 build's changelog says "require opengl". Helio needs the Vulkan backend, so Voxy's
+    pass can't be composited. Instead Helio draws far terrain itself, in Vulkan, with techniques like Voxy's
+    (ideas only: Voxy is All Rights Reserved, so none of its code). Voxy and Distant Horizons are marked
+    incompatible (fabric.mod.json "breaks": the loader refuses to start with either installed).
+    Targets (user, 2026-11-21): an LOD distance of about 800 chunks (12,800 blocks) for at most about a 10 FPS
+    drop (about 1 ms a frame at 100 FPS), or as close as is realistic. Every change in look, at the RT distance,
+    the render distance and the LOD distance's end, blends in smoothly through cheap techniques (the user's
+    screenshot: traced trees, then flat, unshaded vanilla terrain right after the RT distance).
+    Sub-steps:
+    0. [x] The RT distance's edge, now (no LODs needed): vanilla's terrain past it is shaded by Helio in the
+       composite, like the traced picture. Its normal comes from the depth, snapped to the block axes. Its colour
+       has vanilla's light and face shading divided out. Then Helio's sun, sky light and fog are applied, unshadowed.
+       Over a band inside the RT distance, the traced picture crossfades into that, on a round edge rather than
+       the traced area's square one. Everything past the RT distance (vanilla's terrain, then LODs) is shaded
+       this one way, so it matches throughout.
+       - Done (2026-11-22), `vanillaRadiance` in pathtrace.comp. Vanilla's lightmap colour at full sky light comes
+         from LightmapMixin (lightmap.fsh's sums, Frame.vanillaSky) and is divided out. Vanilla's face shade and
+         AO stay in: they're steady and give faces their contrast. The normal is taken at a crown's scale (depths
+         3 pixels either way): per pixel, leaves seen through their holes made it noise, and the light speckled.
+         Sun shadows are screen-space, 8 steps from 1.5-2.5 out to about 25 blocks against vanilla's depth.
+         Starting closer, they found a crown's own gaps pixel by pixel, a fixed speckle that RR can't average
+         (the user's "very speckled": frosted far leaves). Far terrain gets RR guides (albedo, normal, rough
+         diffuse), so RR denoises it like traced terrain. It also counts for the auto exposure. With nothing
+         traced, the exposure had no pixels and the comparison skewed.
+       - Calibrated with bench word `vanilla` (OFF_TRACED: everything shaded this way) against the traced
+         picture: forest, snow and ground within 1-4 of 255 in every channel. FAR_SKY 0.65 (traced terrain's sky
+         is partly blocked) and FAR_BOUNCE 0.25 (light off the surroundings, in their colour). RT_BLEND widened to
+         25% of the RT distance.
+       - Checked with bench word `blend` (OFF_BLEND: the old edge) over the snowy taiga, from y 95 at noon. Old:
+         far trees bright, light green, against dark traced ones. New: the same dark green, fading into the fog;
+         no seam, no speckle. Night: no blow-up. Cost: path tracing 6.27 -> 6.49 ms.
+       - Bench word `hold` now also keeps a `pose:` word's yaw and pitch (mouse input had turned the camera).
+       - Black square while turning (user, 2026-11-22): a NaN reached Ray Reconstruction, which spread it in blocks
+         below the horizon. Likely source: horizon pixels, where taking the sky's share out of vanilla's colour
+         left it below zero, and pow() then gave NaN. Fixed: that colour is clamped, sky-edge normals and positions
+         (depth 0, infinitely far) fall back, and a catch-all puts nothing into RR where any input is NaN or
+         infinite. Not reproduced here: still frames and the new bench word `spin` (with `hold`: 4 degrees a tick)
+         gave no black areas, with or without the guards.
+       - Anti-aliasing past the RT distance (user: "aliasing around leaves is pretty bad", 2026-11-22). Vanilla drew
+         that terrain unjittered, so RR saw the same samples every frame and had nothing to anti-alias with. Under
+         DLSS the frame's jitter is now picked when vanilla sets up its projection (GameRendererMixin, before
+         ProjectionMatrixBuffer.getBuffer, which Sodium copies too): terrain is drawn shifted by it, and
+         pathtrace.comp reads vanilla's picture at pixel centres and its depth with the shift (vanillaShift). An
+         unjittered projection is bound again before the trace's replay passes (entities, particles, translucents,
+         outlines), so they don't wobble. Helio's own maths keeps the unjittered levelProjection. Bench word
+         `nojitter` gives the old way. Same view, one session: leaf edges went from hard stair-steps to smooth.
+         No cost. Coverage-preserving leaf mipmaps (far trees thinning) stay an option if still needed.
+       - Bench word `hold` now holds at the `pose:` position from the first frame: in survival the player fell
+         before the hold began, so views varied between runs.
+    a. [ ] LOD data. Voxelise each 16³ section to block state ids plus sky and block light. Mip it into levels:
+       level L is one voxel per 2^L blocks, up to level 6 or 7 for 800 chunks, picking the most visible block per cell (the one
+       that faces the air). Sources: chunks as the client receives them, and an import of the world's region
+       files (singleplayer: the save on disk), so a pre-generated world shows at once. Store it in Helio's own
+       per-world files, compressed, written off the render thread.
+    b. [ ] Meshing. Build quads per LOD tile on worker threads: faces against air or transparent only, merged
+       where neighbours match (greedy), with each quad's block, light and tint. First colour: each block face's
+       average texture colour, tinted (grass, leaves and water by biome). Later: each block state's faces baked
+       to small textures (with depth and alpha), so plants, slabs and fences still read right from far away.
+    c. [ ] Drawing. A Vulkan raster pass draws the LOD tiles into the vanilla frame, past the vanilla render
+       distance, before Helio's composite. Pick tiles by distance (a quadtree: coarser farther out, sized by
+       screen error), cull by frustum, and skip tiles under loaded sections. Then the composite's existing
+       handling of the area past the RT distance (fog, sky) applies. For 800 chunks at about 1 ms this has to be
+       GPU-driven from early on: tile selection by screen error in a compute pass, occlusion against a depth
+       pyramid, and indirect draws. The CPU only streams tiles in and out.
+    d. [ ] Blending, so there's no abrupt change at the render distance:
+       - LOD chunks out to 1.5x the base render distance (a band of 50% of its radius past it) get reflections
+         and cheap water effects (Fresnel reflection of the sky and scene, waves, absorption tint).
+       - Farther LOD chunks get cheap effects too (fog, sky-tinted ambient, water tint and sky reflection, maybe
+         baked or approximate sun shadowing) to blend in.
+    e. [ ] Later: LOD tiles near the RT distance as low-detail TLAS instances, so far terrain casts shadows and
+       shows in reflections.
+    - Test world (2026-11-21): a separate Prism instance, "Voxy Pregen 26.2", pre-generated a large world
+      ("Pregen Voxy Test", 17 GB: 9.1 GB of terrain, plus 7.1 GB of Voxy's LOD data that Helio doesn't use). It
+      runs MC 26.2 because C2ME's OpenCL worldgen module (c2me-ocl, GPU) has no 26.3 build yet. Its mods are
+      Fabric API 0.161.0, Sodium 0.9.2, C2ME 0.4.2-alpha.0.71, c2me-ocl (needs ScalableLux 0.3.0-alpha.0.3),
+      Chunky 1.5.66 and Voxy 0.2.19-beta. The world is now in the 26.3 instance (upgraded when first opened).
 11. [ ] Exit: compatibility table in README.
 
 ### M9 — Release
@@ -1419,9 +1489,8 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
 - Photo mode: freeze camera, accumulate thousands of samples for
   offline-quality screenshots.
 - Auto-PBR for vanilla textures (generated normals/roughness).
-- Voxy integration (see M8). Voxy is all-rights-reserved: read its source
-  only to understand its API/data layout for interop, never copy code from it.
-  Integrate through its public hooks, or ask its author for an API if none fit.
+- Helio's own LODs (M8 step 10; Voxy itself is OpenGL-only, so incompatible). Voxy is all-rights-reserved:
+  its source may be read for ideas, never copied.
 - Port to 26.4 when released.
 
 ## Risks

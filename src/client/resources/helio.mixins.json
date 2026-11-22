@@ -12,6 +12,7 @@
 		"IndigoBlockRendererMixin",
 		"LevelExtractorMixin",
 		"LevelRendererMixin",
+		"LightmapMixin",
 		"MinecraftMixin",
 		"ModelFeatureRendererMixin",
 		"PipelineCacheMixin",

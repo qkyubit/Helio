@@ -11,9 +11,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(GameRenderer.class)
 public class GameRendererMixin {
-	// The projection vanilla actually draws the level with (view bobbing, nausea warp included).
-	@Inject(method = "renderLevel", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/LevelRenderer;render"))
+	// The projection vanilla actually draws the level with (view bobbing, nausea warp included), kept by Helio, then
+	// jittered for DLSS in place before vanilla uploads it and Sodium copies it (PathTracer.jitterLevelProjection).
+	@Inject(method = "renderLevel", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/ProjectionMatrixBuffer;getBuffer(Lorg/joml/Matrix4f;)Lcom/mojang/renderpearl/api/buffers/GpuBufferSlice;"))
 	private void helio$captureProjection(CallbackInfo ci, @Local(ordinal = 0) Matrix4f projectionMatrix) {
-		PathTracer.levelProjection.set(projectionMatrix);
+		PathTracer.jitterLevelProjection(projectionMatrix);
 	}
 }
