@@ -58,14 +58,22 @@ final class LodColors {
 		level = (BlockAndTintGetter) Proxy.newProxyInstance(BlockAndTintGetter.class.getClassLoader(), new Class<?>[] {BlockAndTintGetter.class}, h);
 	}
 
-	/** dir: Direction ordinal (down, up, north, south, west, east). */
+	/** dir: Direction ordinal (down, up, north, south, west, east). sRGB 0xRRGGBB; water's also has its texture's mean alpha in the top byte. */
 	int color(int state, int biomeId, int dir) {
 		long key = (long) state << 24 | (long) biomeId << 3 | dir;
 		int c = cache.get(key);
-		if (c >= 0) return c;
-		c = compute(mapping.stateOf(state), biomeId, Direction.values()[dir]);
+		if (c != -1) return c; // water's colour has its alpha in the top byte: negative
+		BlockState s = mapping.stateOf(state);
+		c = compute(s, biomeId, Direction.values()[dir]);
+		if (s.getFluidState().is(net.minecraft.tags.FluidTags.WATER)) c |= waterAlpha() << 24;
 		cache.put(key, c);
 		return c;
+	}
+
+	/** The water texture's mean alpha: LodRenderer blends LOD water over its bed by it, as vanilla does. */
+	private int waterAlpha() {
+		return average(Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(net.minecraft.world.level.block.Blocks.WATER.defaultBlockState())
+			.particleMaterial().sprite())[4];
 	}
 
 	private int compute(BlockState state, int biomeId, Direction dir) {
@@ -123,17 +131,19 @@ final class LodColors {
 		return spriteAverages.computeIfAbsent(sprite, s -> {
 			NativeImage image = ((SpriteContentsAccessor) s.contents()).helio$originalImage();
 			int w = Math.min(image.getWidth(), s.contents().width()), h = Math.min(image.getHeight(), s.contents().height());
-			long r = 0, g = 0, b = 0;
+			long r = 0, g = 0, b = 0, a = 0;
 			int n = 0;
 			for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
 				int argb = image.getPixel(x, y);
+				a += argb >>> 24;
 				if ((argb >>> 24) < 128) continue;
 				r += argb >> 16 & 255;
 				g += argb >> 8 & 255;
 				b += argb & 255;
 				n++;
 			}
-			return n == 0 ? new int[] {128, 128, 128, 0} : new int[] {(int) (r / n), (int) (g / n), (int) (b / n), n};
+			int alpha = (int) (a / Math.max(1, w * h)); // mean of all its pixels
+			return n == 0 ? new int[] {128, 128, 128, 0, alpha} : new int[] {(int) (r / n), (int) (g / n), (int) (b / n), n, alpha};
 		});
 	}
 }

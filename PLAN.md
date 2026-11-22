@@ -1506,7 +1506,7 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
          quads a tile (4.35M faces merged into 2.41M quads), 1.3 ms a tile. Level 3: 1,602 a tile, 0.9 ms.
        - For 10c: that's a lot of quads (bumpy canopies merge badly). So draw only the directions facing the
          camera per tile (half the quads), and let the selection's screen error keep tile counts down.
-    c. [ ] Drawing. A Vulkan raster pass draws the LOD tiles into the vanilla frame, past the vanilla render
+    c. [x] Drawing. A Vulkan raster pass draws the LOD tiles into the vanilla frame, past the vanilla render
        distance, before Helio's composite. Pick tiles by distance (a quadtree: coarser farther out, sized by
        screen error), cull by frustum, and skip tiles under loaded sections. Then the composite's existing
        handling of the area past the RT distance (fog, sky) applies. For 800 chunks at about 1 ms this has to be
@@ -1553,11 +1553,34 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
          coarser. Default 5. The ~1 ms target is met in both views.
        - Not checked yet: night, other dimensions; GPU-driven selection isn't needed for now (the CPU walk is
          cheap at these tile counts).
+       - Frosted ring of trees at vanilla's render distance (user, 2026-11-22): vanilla's distance fog had been on
+         since the 26.x port. Open air's fog type is ATMOSPHERIC now, and FogRendererMixin only took NONE. Sodium's
+         terrain fog and chunk fade-in (which mixes towards the fog colour too) are switched off as well
+         (sodium.SodiumWorldRendererMixin).
     d. [ ] Blending, so there's no abrupt change at the render distance:
        - LOD chunks out to 1.5x the base render distance (a band of 50% of its radius past it) get reflections
          and cheap water effects (Fresnel reflection of the sky and scene, waves, absorption tint).
        - Farther LOD chunks get cheap effects too (fog, sky-tinted ambient, water tint and sky reflection, maybe
          baked or approximate sun shadowing) to blend in.
+       - Most of that was already in the far composite (10.0): haze, sky light, screen-space sun shadows, the sky's
+         Fresnel reflection on water. Water first (2026-11-22, pregen world, over a lake):
+         - LOD water was opaque (its colour x 0.55), vanilla's is blended over its bed: a hard seam where they met.
+           LOD water is now blended the same way, by the water texture's mean alpha (LodColors; water has a block
+           model in 26.x, so it's taken from the water block's sprite), in pipelines of its own. Shallows show
+           their sand, as vanilla's do. Its top sits at vanilla's height (8/9 of the block).
+         - A dark line with kelp at the render distance: vanilla draws a far section's bed and kelp without its
+           water, and edge tiles dropped LOD water wherever vanilla had drawn anything. LOD water in edge tiles now
+           gives way only to vanilla's surfaces at its own or nearer (1.5 blocks' slack).
+         - A thin dark line along vanilla's last chunks: its water's side faces against the unloaded chunks, lit
+           sideways. Far translucent pixels now take an up normal (they're water and ice).
+         - Far water gets the traced water's waves in its sky reflection, flattening with distance.
+         - Bright patches of shallow bed through far water (user): it's absorbed like traced water now, over the
+           depth to the bed along the refracted ray (the view ray's length darkened it at grazing angles), with
+           vanilla's default water tint; the texture's share (WATER_OPACITY) stays, as traced.
+         - A hole under the camera from high up (y 400): vanilla's terrain is a cylinder, and it drew nothing that
+           far below, while LOD selection and the edge test took it as horizontal only.
+         - LOD pass unchanged (1.0 ms over the lake).
+         - Not done: reflections of the scene (shores, islands) on far water; only the sky's.
     e. [ ] Later: LOD tiles near the RT distance as low-detail TLAS instances, so far terrain casts shadows and
        shows in reflections.
     - Test world (2026-11-21): a separate Prism instance, "Voxy Pregen 26.2", pre-generated a large world

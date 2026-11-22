@@ -78,8 +78,11 @@ public final class LodRenderer {
 	private static final Long2ObjectOpenHashMap<GpuTile> tiles = new Long2ObjectOpenHashMap<>();
 	private static final LongOpenHashSet requested = new LongOpenHashSet();
 	private static long frame;
-	/** pipelines[0]: tiles wholly past vanilla's terrain (no tests in the fragment shader, early depth test); [1]: the rest. */
-	private static final long[] pipelines = new long[2];
+	/**
+	 * pipelines[0]: tiles wholly past vanilla's terrain (no tests in the fragment shader, early depth test); [1]: the
+	 * rest. [2], [3]: the same for water, blended over its bed by its alpha as vanilla's is.
+	 */
+	private static final long[] pipelines = new long[4];
 	private static long layout, setLayout, sampler;
 	private static Memory.Buf indices;
 	private static final int INDEXED_QUADS = 32768, CMD_BYTES = 20;
@@ -141,11 +144,17 @@ public final class LodRenderer {
 			VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(2, s);
 			stages.get(0).sType$Default().stage(VK_SHADER_STAGE_VERTEX_BIT).module(vm).pName(s.UTF8("main"));
 			stages.get(1).sType$Default().stage(VK_SHADER_STAGE_FRAGMENT_BIT).module(fm).pName(s.UTF8("main"));
+			for (int k = 0; k < 4; k++) {
+			int edge = k & 1;
 			VkPipelineColorBlendAttachmentState.Buffer blend = VkPipelineColorBlendAttachmentState.calloc(1, s);
 			blend.get(0).colorWriteMask(0xF);
-			for (int edge = 0; edge < 2; edge++) {
-			stages.get(1).pSpecializationInfo(VkSpecializationInfo.calloc(s).pMapEntries(VkSpecializationMapEntry.calloc(1, s).constantID(0).offset(0).size(4))
-				.pData(s.malloc(4).putInt(0, edge)));
+			if (k >= 2) blend.get(0).blendEnable(true).colorBlendOp(VK_BLEND_OP_ADD).alphaBlendOp(VK_BLEND_OP_ADD)
+				.srcColorBlendFactor(VK_BLEND_FACTOR_SRC_ALPHA).dstColorBlendFactor(VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA)
+				.srcAlphaBlendFactor(VK_BLEND_FACTOR_ZERO).dstAlphaBlendFactor(VK_BLEND_FACTOR_ONE);
+			VkSpecializationMapEntry.Buffer constants = VkSpecializationMapEntry.calloc(2, s);
+			constants.get(0).constantID(0).offset(0).size(4); // EDGE
+			constants.get(1).constantID(1).offset(4).size(4); // WATER
+			stages.get(1).pSpecializationInfo(VkSpecializationInfo.calloc(s).pMapEntries(constants).pData(s.malloc(8).putInt(0, edge).putInt(4, k >> 1)));
 			VkGraphicsPipelineCreateInfo.Buffer ci = VkGraphicsPipelineCreateInfo.calloc(1, s);
 			ci.get(0).sType$Default()
 				.pNext(VkPipelineRenderingCreateInfo.calloc(s).sType$Default().colorAttachmentCount(1)
@@ -163,7 +172,7 @@ public final class LodRenderer {
 				.pDynamicState(VkPipelineDynamicStateCreateInfo.calloc(s).sType$Default().pDynamicStates(s.ints(VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR)))
 				.layout(layout);
 			check(vkCreateGraphicsPipelines(vk, VK_NULL_HANDLE, ci, null, h), "lod pipeline");
-			pipelines[edge] = h.get(0);
+			pipelines[k] = h.get(0);
 			}
 			// Every quad's two triangles: 0 1 2, 0 2 3 of its 4 vertices; draws offset their vertices to their quads.
 			indices = Memory.buffer((long) INDEXED_QUADS * 6 * 4, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, true);
@@ -267,7 +276,7 @@ public final class LodRenderer {
 				int n = q.length / 4, i = 0;
 				for (int grp = 0; grp < 2; grp++) for (int d = 0; d < 6; d++) {
 					g.dirStart[grp * 6 + d] = i;
-					while (i < n && q[i * 4 + 3] == grp && (q[i * 4 + 1] & 7) == d) i++;
+					while (i < n && (q[i * 4 + 3] & 255) == grp && (q[i * 4 + 1] & 7) == d) i++;
 				}
 				g.dirStart[12] = n;
 				int[] lo = {63, 63, 63}, hi = {0, 0, 0};
@@ -455,7 +464,7 @@ public final class LodRenderer {
 		vkCmdBindIndexBuffer(cmd, indices.buffer(), indices.offset(), VK_INDEX_TYPE_UINT32);
 		for (int edge = 0; edge < 2; edge++) {
 			int l = list * 2 + edge;
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines[edge]);
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines[(list == 2 ? 2 : 0) + edge]);
 			vkCmdDrawIndexedIndirectCount(cmd, lists.buffer(), lists.offset() + (long) l * MAX_DRAWS * CMD_BYTES,
 				listCounts.buffer(), listCounts.offset() + l * 4L, MAX_DRAWS, CMD_BYTES);
 		}
@@ -474,9 +483,11 @@ public final class LodRenderer {
 		// Wholly inside vanilla's terrain, short of its edge band (its farthest corner within the render distance
 		// less EDGE_BAND): nothing to add. In the band LODs fill wherever vanilla has nothing (chunks it dropped as
 		// the player moved away, before the LOD tile was ready: gaps that came in bursts walking backwards).
-		double fx = Math.max(Math.abs(x0 - c.x), Math.abs(x0 + size - c.x)), fz = Math.max(Math.abs(z0 - c.z), Math.abs(z0 + size - c.z));
+		// Vanilla's terrain is a cylinder: from high above (y 400) it drew nothing below, and LODs left a hole.
+		double fx = Math.max(Math.abs(x0 - c.x), Math.abs(x0 + size - c.x)), fz = Math.max(Math.abs(z0 - c.z), Math.abs(z0 + size - c.z)),
+			fy = Math.max(Math.abs(y0 - c.y), Math.abs(y0 + size - c.y));
 		double inner = Math.max(0, vanillaDistance - EDGE_BAND);
-		if (fx * fx + fz * fz < inner * inner) return;
+		if (fx * fx + fz * fz < inner * inner && fy < inner) return;
 		double distance = Math.sqrt(horizontal * horizontal + dy * dy);
 		if (level > 1 && distance < SPLIT * size) {
 			for (int k = 0; k < 8; k++) select(level - 1, tx * 2 + (k & 1), ty * 2 + (k >> 2), tz * 2 + (k >> 1 & 1), c, vanillaDistance, info, cmds, counts);
@@ -507,7 +518,7 @@ public final class LodRenderer {
 		int size = Lod.TILE << level;
 		double x0 = (double) tx * size, y0 = (double) ty * size, z0 = (double) tz * size;
 		double dx = Math.max(0, Math.max(x0 - c.x, c.x - (x0 + size))), dz = Math.max(0, Math.max(z0 - c.z, c.z - (z0 + size)));
-		double horizontal = Math.sqrt(dx * dx + dz * dz);
+		double horizontal = Math.sqrt(dx * dx + dz * dz), dy = Math.max(0, Math.max(y0 - c.y, c.y - (y0 + size)));
 		g.usedFrame = frame;
 		if (g.quads == null || counts[0] >= MAX_TILES || counts[1] + 24 > MAX_DRAWS) return;
 		int t = counts[0]++;
@@ -523,7 +534,7 @@ public final class LodRenderer {
 		// Directions that can face the camera: down unless it's below the tile's bottom, and so on.
 		boolean[] faces = {c.y < y0 + size, c.y > y0, c.z < z0 + size, c.z > z0, c.x < x0 + size, c.x > x0};
 		// Past vanilla's terrain altogether (a section's margin): the pipeline without fragment tests.
-		int edge = horizontal > vanillaDistance + 16 ? 0 : 1;
+		int edge = Math.max(horizontal, dy) > vanillaDistance + 16 ? 0 : 1;
 		memPutInt(p + 40, edge | g.boundsHi << 8);
 		memPutInt(p + 44, g.boundsLo);
 		for (int grp = 0; grp < 2; grp++) {

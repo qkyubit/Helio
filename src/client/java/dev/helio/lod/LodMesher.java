@@ -12,7 +12,7 @@ import static dev.helio.lod.Lod.TILE;
  * <p>
  * A quad is 4 ints, tile-local in voxels: x | y << 6 | z << 12 | w << 18 | h << 24 (w, h along the face's two
  * axes, in the order of {@link #AXES}); direction (Direction ordinal) | sky light << 3 | block light << 7; colour
- * (sRGB 0xRRGGBB); 1 for water, else 0. Quads come grouped: the rest by direction, then water by direction
+ * (sRGB 0xRRGGBB); for water 1 | its alpha << 8, else 0. Quads come grouped: the rest by direction, then water by direction
  * (LodRenderer draws water after the opaque depth is copied, so the composite treats it as water).
  */
 final class LodMesher {
@@ -49,7 +49,7 @@ final class LodMesher {
 							// neighbouring faces merging, for no visible change from far away.
 							int sky = other == 0 ? 15 : Lod.sky(other), blk = Lod.blockLight(other);
 							int light = (sky >= 12 ? 15 : sky & 12) | (blk & 12) << 4;
-							key = 1L << 63 | (long) light << 32 | colors.color(s, Lod.biome(self), dir);
+							key = 1L << 63 | (long) light << 32 | (colors.color(s, Lod.biome(self), dir) & 0xFFFFFFFFL);
 							any = true;
 						}
 					}
@@ -79,7 +79,7 @@ final class LodMesher {
 					int light = (int) (key >>> 32 & 255);
 					out.add(dir | (light & 15) << 3 | (light >> 4 & 15) << 7);
 					out.add((int) (key & 0xFFFFFF));
-					out.add(waterPass ? 1 : 0);
+					out.add(waterPass ? 1 | (int) (key >>> 24 & 255) << 8 : 0); // water: its alpha too
 					u += w;
 				}
 			}

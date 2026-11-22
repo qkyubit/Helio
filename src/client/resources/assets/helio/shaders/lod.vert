@@ -17,7 +17,7 @@ layout(push_constant, scalar) uniform Push {
 	vec4 sky;        // vanilla's lightmap colour at full sky light (as Frame.vanillaSky); w: no LODs nearer than this (blocks)
 } pc;
 
-layout(location = 0) out flat vec3 colour;
+layout(location = 0) out flat vec4 colour;
 layout(location = 1) out vec3 rel;
 
 // Per direction (down, up, north, south, west, east): the axis it faces along, and its face's u, v axes.
@@ -40,11 +40,13 @@ void main() {
 	p[a.y] += corner.x * size.x;
 	p[a.z] += corner.y * size.y;
 	rel = t.origin + p * t.voxel;
+	// Water's top at vanilla's height for still water (8/9 of the block): level with vanilla's where they meet.
+	if ((q.w & 255u) == 1u && dir == 1u) rel.y -= 1.0 / 9.0;
 	gl_Position = pc.viewProj * vec4(rel, 1.0);
 	// As vanilla's raster would have it: the texture's colour, face shade, and its lightmap at the face's sky light.
 	float sky = float(q.y >> 3 & 15u) / 15.0;
 	vec3 c = vec3((q.z >> 16) & 255u, (q.z >> 8) & 255u, q.z & 255u) / 255.0;
-	// Water: darker, as vanilla's blend of it over its bed looks (its reflection comes in the composite).
-	if (q.w == 1u) c *= 0.55;
-	colour = c * SHADE[dir] * pc.sky.rgb * (sky / (4.0 - 3.0 * sky));
+	// Water: blended over its bed with its texture's alpha, as vanilla draws it (its reflection comes in the
+	// composite); the rest opaque.
+	colour = vec4(c * SHADE[dir] * pc.sky.rgb * (sky / (4.0 - 3.0 * sky)), (q.w & 255u) == 1u ? float(q.w >> 8 & 255u) / 255.0 : 1.0);
 }

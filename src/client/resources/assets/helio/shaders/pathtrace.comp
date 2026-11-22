@@ -1735,14 +1735,28 @@ vec3 vanillaRadiance(ivec2 p, ivec2 size, Frame frame) {
 	// The bilinear taps can see terrain where the pixel under them is sky (depth 0, infinitely far): sky then.
 	if (texelFetch(depthTex, under, 0).r == 0.0 || any(isinf(pos)) || any(isnan(pos))) return sky;
 	// On the horizon's pixels taking the sky's share out can leave below zero, and pow() gave NaN there.
-	vec3 n = vanillaNormal(under, outSize, pos);
+	// Translucent terrain this far out is water and ice, facing up: vanilla's water also has a side face along its
+	// last chunks (against the unloaded ones past them), and lit as it faces, it was a dark line at the render
+	// distance (M8 step 10d).
+	bool translucent = texelFetch(depthTex, under, 0).r > texelFetch(opaqueDepthTex, under, 0).r + 1e-7;
+	vec3 n = translucent ? vec3(0.0, 1.0, 0.0) : vanillaNormal(under, outSize, pos);
 	vec3 c = vanillaLit(max((v - skyShare * skySrgb) / (1.0 - skyShare), vec3(0.0)), pos, n);
-	// Under translucent terrain (water, ice, glass: vanilla's blend of it over what's behind, lit as above), its
-	// surface also reflects the sky, more at grazing angles (Schlick, water's 0.02 head-on): far lakes and the
-	// sea no longer look matte next to the traced water before them.
-	if (texelFetch(depthTex, under, 0).r > texelFetch(opaqueDepthTex, under, 0).r + 1e-7) {
-		float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(-dir, n), 0.0), 5.0);
-		vec3 r = reflect(dir, n);
+	// Under translucent terrain (water, ice: vanilla's blend of it over what's behind, lit as above), its surface
+	// also reflects the sky, more at grazing angles (Schlick, water's 0.02 head-on): far lakes and the sea no
+	// longer look matte next to the traced water before them.
+	if (translucent) {
+		// Absorbed like traced water over the depth behind its surface (vanilla's tint unknown here: its default),
+		// so far beds don't shine up through the deep water as bright patches. Along the refracted ray, as traced
+		// water's: the view ray's own length, at grazing angles, made it darker than the traced water next to it.
+		vec4 bed = pc.invViewProj * vec4((vec2(under) + 0.5) / vec2(outSize) * 2.0 - 1.0 + vanillaShift, texelFetch(opaqueDepthTex, under, 0).r, 1.0);
+		float sinT = sqrt(max(1.0 - dir.y * dir.y, 0.0)) / WATER_IOR;
+		float depth = bed.w <= 0.0 ? 1e4 : min(max(pos.y - bed.y / bed.w, 0.0) / sqrt(1.0 - sinT * sinT), 1e4);
+		enterWater(pow(vec3(0.247, 0.463, 0.894), vec3(2.2)), 1.0);
+		c = mix(waterGlow, c, WATER_OPACITY + (1.0 - WATER_OPACITY) * exp(-waterSigma * depth)); // its texture's share stays, as traced
+		// The traced water's waves, flattening with distance, where a pixel covers many of them.
+		vec3 wn = normalize(mix(waveNormal(pc.cameraInScene.xyz + pos), n, clamp(length(pos) / 1500.0, 0.0, 0.8)));
+		float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(-dir, wn), 0.0), 5.0);
+		vec3 r = reflect(dir, wn);
 		r.y = abs(r.y); // a rough normal mustn't send it into the ground
 		c = mix(c, skyRadiance(normalize(r)), fresnel);
 	}
