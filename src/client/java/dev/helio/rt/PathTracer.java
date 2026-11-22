@@ -137,7 +137,7 @@ public final class PathTracer {
 	public static boolean benchHold;
 	private static boolean benchSummoned;
 
-	private static String benchDim = "", benchPose = "", benchPlaced = "", benchLodMap = "";
+	private static String benchDim = "", benchPose = "", benchPlaced = "", benchLodMap = "", benchLodMesh = "";
 	/** The last pose word's yaw and pitch, which "hold" keeps too (mouse input turned the camera off a pose). */
 	public static float benchYaw = Float.NaN, benchPitch;
 	/** The last pose word's position, where "hold" keeps the player (null: wherever it was). */
@@ -206,6 +206,12 @@ public final class PathTracer {
 				if ((word.equalsIgnoreCase("place") || word.equalsIgnoreCase("unplace")) && !word.equalsIgnoreCase(benchPlaced) && Minecraft.getInstance().player != null) {
 					benchPlaced = word.toLowerCase(java.util.Locale.ROOT);
 					Minecraft.getInstance().player.connection.sendCommand("execute positioned ~ ~1.6 ~ run setblock ^ ^ ^8 " + (benchPlaced.equals("place") ? "stone" : "air"));
+				}
+				// "lodmesh:<level>": once per change, meshes the LOD tiles around the player at that level (log,
+				// helio_lodmesh_<level>.png).
+				if (word.startsWith("lodmesh:") && !word.equals(benchLodMesh)) {
+					benchLodMesh = word;
+					dev.helio.lod.Lod.meshTest(Integer.parseInt(word.substring(8)));
 				}
 				// "lodmap:<level>": once per change, a top-down picture of that LOD level around the player
 				// (helio_lodmap_<level>.png in the game directory).

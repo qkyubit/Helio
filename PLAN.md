@@ -1477,10 +1477,25 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
          (720 a second, so about 26 minutes in all), 1.6 KB a chunk (about 1.8 GB in all; Voxy's own: 7.1 GB).
        - Left: the import's CPU load while playing isn't measured yet. Level 0 for the ring just past the render
          distance (from the save, on demand) waits to see whether level 1 looks too coarse there.
-    b. [ ] Meshing. Build quads per LOD tile on worker threads: faces against air or transparent only, merged
+    b. [x] Meshing. Build quads per LOD tile on worker threads: faces against air or transparent only, merged
        where neighbours match (greedy), with each quad's block, light and tint. First colour: each block face's
        average texture colour, tinted (grass, leaves and water by biome). Later: each block state's faces baked
        to small textures (with depth and alpha), so plants, slabs and fences still read right from far away.
+       - Done (2026-11-22), LodMesher and LodColors. A quad goes wherever a voxel's face meets air or a different
+         see-through voxel (water against air; not leaves against leaves). Faces on a tile's sides look into the
+         neighbouring tiles, and unknown counts as air. Greedy merging joins faces with the same colour and light.
+         Light comes in coarse steps (open sky from 12 up, else quarters), which cut level-1 quads by 13%.
+         A quad is 4 ints, tile-local: position and size in voxels, direction and light, sRGB colour.
+       - Colour: the mean of the block's mostly opaque texels on that side (its model's quads facing it, or all
+         of them for plants), tinted as vanilla tints them in that biome. Its own tint sources are asked, with a
+         stand-in level (a Proxy) that puts every position in that biome. Water has no model: its sprite with the
+         biome's water colour, as the fluid renderer tints it.
+       - Checked with bench word `lodmesh:<level>` (meshes the tiles around the player, logs counts and times,
+         and draws their upward faces from above) on the pregen world around spawn. Forests take their biome's
+         tint, deserts and badlands are right, oceans warm teal, rivers deeper blue. Level 1: 801 tiles, 3,014
+         quads a tile (4.35M faces merged into 2.41M quads), 1.3 ms a tile. Level 3: 1,602 a tile, 0.9 ms.
+       - For 10c: that's a lot of quads (bumpy canopies merge badly). So draw only the directions facing the
+         camera per tile (half the quads), and let the selection's screen error keep tile counts down.
     c. [ ] Drawing. A Vulkan raster pass draws the LOD tiles into the vanilla frame, past the vanilla render
        distance, before Helio's composite. Pick tiles by distance (a quadtree: coarser farther out, sized by
        screen error), cull by frustum, and skip tiles under loaded sections. Then the composite's existing

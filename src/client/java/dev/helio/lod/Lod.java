@@ -106,6 +106,7 @@ public final class Lod {
 	private static ClientLevel level;
 	static LodStore store;
 	static Mapping mapping;
+	static LodColors colors;
 	private static LodImport importer;
 	/** The worker: all tile edits, mips and writes, in order. */
 	static ExecutorService worker;
@@ -147,6 +148,7 @@ public final class Lod {
 			mapping = new Mapping(dir, level.registryAccess());
 			store = new LodStore(dir);
 			store.mapping = mapping;
+			colors = new LodColors(mapping, level.registryAccess());
 		} catch (Exception e) {
 			Helio.LOG.error("Helio: couldn't open the LOD store in {}", dir, e);
 			store = null;
@@ -319,6 +321,18 @@ public final class Lod {
 			if (open[i] || open[i - 1] || open[i + 1] || open[i - row] || open[i + row] || open[i - layer] || open[i + layer]) continue;
 			v[i] = hidden;
 		}
+	}
+
+	/** Bench word "lodmesh:<level>": LodStore.meshTest around the player, by the worker. */
+	public static void meshTest(int lod) {
+		var mc = Minecraft.getInstance();
+		if (store == null || mc.player == null) return;
+		Path out = mc.gameDirectory.toPath().resolve("helio_lodmesh_" + lod + ".png");
+		int x = mc.player.getBlockX(), z = mc.player.getBlockZ();
+		LodStore s = store;
+		Mapping m = mapping;
+		LodColors c = colors;
+		afterPatches(() -> s.meshTest(lod, m, c, x, z, out));
 	}
 
 	/** Bench word "lodmap:<level>": a top-down picture of that level's tiles around the player, by the worker. */

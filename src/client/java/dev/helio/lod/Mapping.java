@@ -111,6 +111,10 @@ final class Mapping {
 		return s != null ? s : Blocks.AIR.defaultBlockState();
 	}
 
+	synchronized String biomeKey(int id) {
+		return id < biomes.size() ? biomes.get(id) : "minecraft:plains";
+	}
+
 	synchronized boolean plant(int id) {
 		return (flags[id] & PLANT) != 0;
 	}

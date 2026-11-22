@@ -286,6 +286,66 @@ final class LodStore implements AutoCloseable {
 		}
 	}
 
+	/** A tile's mesh (LodMesher), its neighbours looked up here. Null if the tile is unknown. */
+	int[] mesh(long key, Mapping m, LodColors colors) {
+		Tile t = tile(key, false);
+		if (t == null) return null;
+		int level = level(key), tx = tx(key), ty = ty(key), tz = tz(key);
+		long[][] n = new long[6][];
+		int[][] off = {{0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {-1, 0, 0}, {1, 0, 0}};
+		for (int d = 0; d < 6; d++) {
+			Tile o = tile(key(level, tx + off[d][0], ty + off[d][1], tz + off[d][2]), false);
+			n[d] = o == null ? null : o.v;
+		}
+		t = tile(key, false); // may have left the cache meanwhile: fetched again
+		return t == null ? null : LodMesher.mesh(t.v, n, m, colors);
+	}
+
+	/**
+	 * Bench word "lodmesh:<level>": meshes the tiles within 8 of the player's at that level, logs their counts and
+	 * times, and draws their upward faces from above (helio_lodmesh_<level>.png), to check colours and tints.
+	 */
+	void meshTest(int level, Mapping m, LodColors colors, int cx, int cz, Path out) {
+		int R = 8, size = (2 * R + 1) * TILE, vs = 1 << level;
+		int ctx = Math.floorDiv(Math.floorDiv(cx, vs), TILE), ctz = Math.floorDiv(Math.floorDiv(cz, vs), TILE);
+		int[] top = new int[size * size], color = new int[size * size];
+		java.util.Arrays.fill(top, Integer.MIN_VALUE);
+		long quads = 0, faces = 0, nanos = 0;
+		int tiles = 0;
+		for (int tz = ctz - R; tz <= ctz + R; tz++) for (int tx = ctx - R; tx <= ctx + R; tx++) for (int ty = -8; ty <= 7; ty++) {
+			long t0 = System.nanoTime();
+			int[] q = mesh(key(level, tx, ty, tz), m, colors);
+			nanos += System.nanoTime() - t0;
+			if (q == null) continue;
+			tiles++;
+			quads += q.length / 4;
+			for (int i = 0; i < q.length; i += 4) {
+				int pos = q[i], w = pos >>> 18 & 63, h = pos >>> 24 & 63;
+				faces += (long) w * h;
+				if ((q[i + 1] & 7) != 1) continue; // up
+				int x = (tx - ctx + R) * TILE + (pos & 63), y = ty * TILE + (pos >> 6 & 63), z = (tz - ctz + R) * TILE + (pos >> 12 & 63);
+				for (int j = 0; j < h; j++) for (int k = 0; k < w; k++) {
+					int idx = (z + j) * size + x + k;
+					if (idx < 0 || idx >= top.length || y <= top[idx]) continue;
+					top[idx] = y;
+					color[idx] = 0xFF000000 | q[i + 2];
+				}
+			}
+		}
+		Helio.LOG.info("Helio LOD: level {} meshes: {} tiles, {} quads ({} faces before merging, {} a tile), {} ms ({} ms a tile)", level, tiles, quads, faces,
+			tiles == 0 ? 0 : quads / tiles, nanos / 1_000_000, tiles == 0 ? 0 : nanos / 1_000_000.0 / tiles);
+		try (NativeImage img = new NativeImage(size, size, false)) {
+			for (int z = 0; z < size; z++) for (int x = 0; x < size; x++) {
+				int i = z * size + x, c = top[i] == Integer.MIN_VALUE ? 0xFF000000 : color[i];
+				if (z > 0 && top[i] != Integer.MIN_VALUE && top[i - size] > top[i]) c = (c & 0xFF000000) | (c >> 1 & 0x7F7F7F) + (c >> 2 & 0x3F3F3F);
+				img.setPixel(x, z, c);
+			}
+			img.writeToFile(out);
+		} catch (IOException e) {
+			Helio.LOG.warn("Helio LOD: writing {}", out, e);
+		}
+	}
+
 	@Override
 	public void close() throws IOException {
 		flush();
