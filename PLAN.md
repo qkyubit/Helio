@@ -1448,6 +1448,16 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
          (Scene.tracesTranslucent: traced alone only if its farthest corner is inside it), and traced water fades
          like the land. Checked on the frozen river: the water's straight edge at the RT distance became a
          gradient. (That run's RT distance was 4: the memory guard, system RAM short with 3 GB free.)
+       - Large water and ice cost (user, 2026-11-22: "the icy lake ... 80fps down to around 50fps"). Looking down
+         at New World's ice lake (136, 72, -200): path tracing 12.9 ms, 52 FPS. Every pixel lit four surfaces
+         (ice top, ice bottom, water's top flush under the ice, the bed), each with lights searched past
+         vanilla's level and a bounce ray of its own. Block light was 3.95 ms, bounce 2.3 ms. Now: a face's
+         back (leaving ice or glass, as vanilla culls it) only bends the ray (water's underside stays, drawn from
+         below). A face flush against the last one (water under ice) isn't lit. Surfaces seen through a
+         translucent one, and translucent texture layers, gate block light by vanilla's level (`seen` false) and
+         take bounce light from the radiance cache instead of a ray. Result: 8.0 ms, 69 FPS, same look (ice
+         within ~3% brightness). Under the ice 57 -> 77 FPS, over open water about 63 -> 75. From below, the
+         ice shows a little more sky (its texture drawn once, not twice).
        - Bench word `hold` now holds at the `pose:` position from the first frame: in survival the player fell
          before the hold began, so views varied between runs.
     a. [x] LOD data. Voxelise each 16³ section to block state ids plus sky and block light. Mip it into levels:

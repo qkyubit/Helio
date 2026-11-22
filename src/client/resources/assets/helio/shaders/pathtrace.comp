@@ -216,6 +216,7 @@ struct Hit {
 	uint kind;
 	vec3 albedo;    // linear
 	vec3 normal;    // geometric, facing the ray: ray offsets, what's in front or behind
+	bool back;      // the ray hit the face's back (models wind counter-clockwise from the front)
 	vec3 shading;   // normal-mapped (LabPBR _n), on the ray's side: how light falls on the surface
 	float ao;       // the texture's ambient occlusion (_n blue), on indirect light
 	vec2 light;     // vanilla block / sky light level, 0..1
@@ -450,7 +451,8 @@ Hit shade(rayQueryEXT rq, vec3 dir) {
 	uint stride = strideOf(inst.kind);
 	vec3 p0 = posAt(vb, t.x, stride);
 	vec3 n = normalize(cross(posAt(vb, t.y, stride) - p0, posAt(vb, t.z, stride) - p0));
-	h.normal = dot(n, dir) > 0.0 ? -n : n;
+	h.back = dot(n, dir) > 0.0; // models wind counter-clockwise from the front
+	h.normal = h.back ? -n : n;
 	vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, true);
 	vec3 w = vec3(1.0 - b.x - b.y, b.x, b.y);
 	vec2 uv = uvAt(vb, t.x, stride) * w.x + uvAt(vb, t.y, stride) * w.y + uvAt(vb, t.z, stride) * w.z;
@@ -1172,15 +1174,23 @@ float lightFloor, caveFloor, nightFloor; // Frame.lightFloor, Frame.caveFloor, F
 
 // Light leaving an opaque (or textured translucent) surface back along the ray: its emission and direct
 // light, plus bounce light (approximated, or followed when stochastic).
-vec3 surfaceRadiance(Hit h, vec3 pos) {
+vec3 surfaceRadiance(Hit h, vec3 pos, bool seen) {
 	if (h.portal) return h.albedo * (EMISSIVE * h.emission);
 	// A floor (vanilla's Brightness, scaled down by Cave Brightness where no sky light reaches) so caves and dense
 	// foliage never go black; when stochastic, also a share of sky light by vanilla's sky level, for the bounces
 	// past the one followed (the radiance cache's job, when on).
 	// The floor: caves keep caveFloor of it at any hour; open air keeps it by day, nightFloor of it at night.
 	vec3 ambient = (vec3(lightFloor * mix(caveFloor, mix(nightFloor, 1.0, pc.sunDir.w), h.light.y)) + (pc.stochastic != 0.0 && !cacheOn ? skyIrradiance(h.shading) * h.light.y * h.light.y * SKY_FILL : vec3(0.0))) * h.ao;
-	vec3 direct = directLight(h, pos, true);
+	vec3 direct = directLight(h, pos, seen);
 	vec3 radiance = h.albedo * (EMISSIVE * h.emission + direct + ambient);
+	if (cacheOn && !seen) {
+		// Seen through water, ice or glass (or their own faint texture): its bounce light from the radiance cache
+		// (the cell's light past this pixel's own direct light) rather than a bounce ray of its own, as reflections
+		// do. Over an icy lake every pixel had traced one per surface.
+		vec3 e;
+		vec3 bounce = cacheLookup(pos, h.normal, e) ? max(e - direct, vec3(0.0)) : skyIrradiance(h.shading) * h.light.y * h.light.y * SKY_FILL;
+		return radiance + h.albedo * h.ao * bounce;
+	}
 	if (cacheOn) return radiance + h.albedo * h.ao * cachedBounce(h, pos, direct);
 	if (pc.stochastic == 0.0) {
 		// ponytail: until M4's denoiser, bounce light is approximated outside reference mode: sky light scaled by
@@ -1328,7 +1338,7 @@ float reflectionDistance; // set by reflectionSeen(): how far its ray went (SKY_
 // both, so no shadow or bounce rays), or where it has none yet, its direct light and the sky fill. ponytail:
 // shadows seen in reflections soften to the cache's cells (1/4 block near the camera, coarser far off).
 vec3 reflectedRadiance(Hit h, vec3 pos) {
-	if (!cacheOn || h.portal) return surfaceRadiance(h, pos); // the reference (and no RR): in full
+	if (!cacheOn || h.portal) return surfaceRadiance(h, pos, true); // the reference (and no RR): in full
 	vec3 ambient = vec3(lightFloor * mix(caveFloor, mix(nightFloor, 1.0, pc.sunDir.w), h.light.y)) * h.ao;
 	vec3 e;
 	if (!cacheLookup(pos, h.normal, e))
@@ -1481,7 +1491,7 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 					guideHitDistance = reflectionDistance;
 				}
 			}
-			result += weight * diffuse * surfaceRadiance(h, pos);
+			result += weight * diffuse * surfaceRadiance(h, pos, layer == 0); // through water or glass, vanilla's level gates block light (as below)
 			guideAlbedo += weight * diffuse * h.albedo;
 			break;
 		}
@@ -1516,9 +1526,14 @@ vec4 radiance(vec2 pixel, vec2 size, uvec2 p) {
 			from = pos + h.normal * 0.002;
 		} else {
 			weight *= separate || pc.stochastic == 0.0 ? 1.0 - fresnel : 1.0;
-			float opacity = h.opacity * (h.water ? WATER_OPACITY : 1.0);
+			// A face's back (leaving ice or glass, as vanilla culls it) only bends the ray: lit as well, under ice
+			// every pixel paid for four lit surfaces (ice top and bottom, water's top under it, the bed), 80 fps -> 50.
+			// The texture layer's block light keeps vanilla's level as its gate (directLight, seen false): the
+			// light's edge barely shows on it, and finding lights near every layer cost 4 ms over a lake.
+			float opacity = h.back && !h.water ? 0.0 : h.opacity * (h.water ? WATER_OPACITY : 1.0); // water's surface is drawn from below too
+			if (layer > 0 && t < 0.01) opacity = 0.0; // flush against the last surface (water's top right under ice): no surface there
 			if (layer == 0) replace = (1.0 - fresnel) * (1.0 - opacity) > fresnel;
-			result += weight * opacity * surfaceRadiance(h, pos);
+			if (opacity > 0.0) result += weight * opacity * surfaceRadiance(h, pos, false);
 			guideAlbedo += weight * opacity * h.albedo;
 			weight *= 1.0 - opacity;
 			if (max(weight.r, max(weight.g, weight.b)) < 0.01) break;
