@@ -111,6 +111,11 @@ final class LodStore implements AutoCloseable {
 		long key = key(1, p.tx(), p.ty(), p.tz());
 		Tile t = tile(key, true);
 		int n = 8;
+		boolean same = true;
+		for (int y = 0; y < n && same; y++) for (int z = 0; z < n && same; z++)
+			same = java.util.Arrays.equals(p.voxels(), (y * n + z) * n, (y * n + z) * n + n, t.v, Lod.index(p.ox(), p.oy() + y, p.oz() + z), Lod.index(p.ox(), p.oy() + y, p.oz() + z) + n);
+		// Unchanged (most chunks the client drops, or gets again): nothing to write, mip or mesh again.
+		if (same) return;
 		for (int y = 0; y < n; y++) for (int z = 0; z < n; z++)
 			System.arraycopy(p.voxels(), (y * n + z) * n, t.v, Lod.index(p.ox(), p.oy() + y, p.oz() + z), n);
 		t.dirty = true;
@@ -132,10 +137,17 @@ final class LodStore implements AutoCloseable {
 				long parentKey = key(level + 1, tx >> 1, ty >> 1, tz >> 1);
 				Tile parent = tile(parentKey, true);
 				int ox = (tx & 1) * 16, oy = (ty & 1) * 16, oz = (tz & 1) * 16;
+				boolean same = true;
 				for (int y = 0; y < 16; y++) for (int z = 0; z < 16; z++) for (int x = 0; x < 16; x++) {
 					for (int k = 0; k < 8; k++) c[k] = child.v[Lod.index(x * 2 + (k & 1), y * 2 + (k >> 2), z * 2 + (k >> 1 & 1))];
-					parent.v[Lod.index(ox + x, oy + y, oz + z)] = Lod.pick(c, m);
+					long v = Lod.pick(c, m);
+					int i = Lod.index(ox + x, oy + y, oz + z);
+					if (parent.v[i] != v) {
+						parent.v[i] = v;
+						same = false;
+					}
 				}
+				if (same) continue; // its mip didn't change: nor will the levels above
 				parent.dirty = true;
 				changed[level + 1].add(parentKey);
 				meshDirty.add(parentKey);
@@ -187,12 +199,16 @@ final class LodStore implements AutoCloseable {
 	/** A tile palette-packed: the distinct voxels, then each voxel's index in as few bits as they need. */
 	private void write(long key, Tile t) {
 		int tx = tx(key), tz = tz(key);
-		if (mapping != null) Lod.hide(t.v, mapping);
+		long[] voxels = t.v;
+		if (mapping != null) {
+			voxels = t.v.clone(); // hidden as written, not in the cache: a fresh copy of the same chunk must still compare equal
+			Lod.hide(voxels, mapping);
+		}
 		try (DataOutputStream out = file(level(key), ty(key), tx >> 5, tz >> 5).getChunkDataOutputStream(new ChunkPos(tx, tz))) {
 			Long2IntOpenHashMap palette = new Long2IntOpenHashMap();
 			palette.defaultReturnValue(-1);
 			long[] values = new long[16];
-			for (long v : t.v) {
+			for (long v : voxels) {
 				if (palette.get(v) >= 0) continue;
 				if (palette.size() == values.length) values = java.util.Arrays.copyOf(values, values.length * 2);
 				values[palette.size()] = v;
@@ -205,7 +221,7 @@ final class LodStore implements AutoCloseable {
 				int bits = 32 - Integer.numberOfLeadingZeros(n - 1);
 				long word = 0;
 				int used = 0;
-				for (long v : t.v) {
+				for (long v : voxels) {
 					long idx = palette.get(v);
 					word |= idx << used;
 					used += bits;

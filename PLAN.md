@@ -1531,6 +1531,16 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
          (PathTracer.jitterLevelProjection), and Helio's sky fade moves out to the LOD distance.
        - Measured (pregen world, y 150 over spawn, looking at the horizon; bench word `nolod` for A/B, `Bench LOD`
          log line): 3,800 tiles, 4.8M quads, 1.28 ms of GPU time, 102 -> 88 FPS. 134 MB of meshes on the GPU.
+       - Gaps in bursts while moving backwards (user, 2026-11-22). Three ways a part could go undrawn while
+         meshes were made: a tile turning coarser had nothing until its mesh came (now its children stay drawn
+         until then); a tile turning finer likewise (its children are now asked for from 1.4x SPLIT on); and
+         chunks vanilla dropped behind its edge before their LOD tile was ready (LODs now also fill, where vanilla
+         has nothing, a 48-block band inside its render distance). The user still saw them. The real cause:
+         a chunk the client drops is ingested again, which marked its tile, the neighbours and every coarser tile
+         over it changed, and the renderer dropped all those meshes at once until they were made again. Now a
+         changed tile keeps its old mesh until the new one comes, and a patch or mip that changes nothing (a
+         dropped chunk no one edited) marks nothing. Hiding unseen voxels works on a copy as tiles are written,
+         so the cached tile still compares equal.
        - Left for the 1 ms target: occlusion (a depth pyramid; much of a horizon view is behind nearer hills),
          GPU-driven selection, and possibly a tighter SPLIT. Not checked yet: moving (tile streaming, hitches),
          night, other dimensions.

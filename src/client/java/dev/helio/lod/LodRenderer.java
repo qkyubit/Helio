@@ -34,6 +34,10 @@ public final class LodRenderer {
 	public static final int DISTANCE = 800 * 16;
 	/** A tile closer than this many times its size is drawn at the level below. */
 	private static final float SPLIT = 6f;
+	/** Children are meshed ahead from this much farther than SPLIT. */
+	private static final float PREFETCH = 1.4f;
+	/** LODs are drawn (where vanilla has nothing) this far inside vanilla's render distance, blocks. */
+	private static final int EDGE_BAND = 48;
 	private static final int MAX_TILES = 16384, RING = 3, TILE_BYTES = 32;
 
 	private static final class GpuTile {
@@ -139,16 +143,14 @@ public final class LodRenderer {
 		}
 	}
 
-	/** Meshes the worker finished: onto the GPU (or dropped, if they changed meanwhile). Tiles that changed: re-meshed. */
+	/**
+	 * Meshes the worker finished: onto the GPU, in place of the tile's old mesh. Tiles that changed are meshed
+	 * again, their old mesh drawn until then: dropping it at once left holes in bursts (a chunk the client
+	 * dropped is ingested, and its tile, neighbours and every coarser tile over it changed).
+	 */
 	private static void receive() {
 		for (long key; (key = Lod.pollDirtyMesh()) != Long.MIN_VALUE; ) {
-			GpuTile g = tiles.remove(key);
-			if (g != null && g.quads != null) {
-				Memory.Buf b = g.quads;
-				bytes -= b.size();
-				dev.helio.rt.Scene.defer(b::free);
-			}
-			requested.remove(key);
+			if (tiles.containsKey(key) && requested.add(key)) Lod.requestMesh(key);
 		}
 		for (Lod.MeshResult r; (r = Lod.pollMesh()) != null; ) {
 			if (!requested.remove(r.key())) continue;
@@ -167,7 +169,12 @@ public final class LodRenderer {
 				g.dirStart[12] = n;
 			}
 			g.usedFrame = frame;
-			tiles.put(r.key(), g);
+			GpuTile old = tiles.put(r.key(), g);
+			if (old != null && old.quads != null) {
+				Memory.Buf b = old.quads;
+				bytes -= b.size();
+				dev.helio.rt.Scene.defer(b::free);
+			}
 		}
 	}
 
@@ -280,8 +287,8 @@ public final class LodRenderer {
 			ByteBuffer pc = s.malloc(96);
 			viewProj.get(0, pc);
 			pc.putLong(64, tileInfo[slot].address());
-			// No LODs where vanilla's terrain is sure to be: a section short of its render distance.
-			pc.putFloat(72, vanillaSky[0]).putFloat(76, vanillaSky[1]).putFloat(80, vanillaSky[2]).putFloat(84, Math.max(0, renderDistance - 16));
+			// No LODs where vanilla's terrain is sure to be: short of its render distance by EDGE_BAND.
+			pc.putFloat(72, vanillaSky[0]).putFloat(76, vanillaSky[1]).putFloat(80, vanillaSky[2]).putFloat(84, Math.max(0, renderDistance - EDGE_BAND));
 			vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, pc);
 			vkCmdBindIndexBuffer(cmd, indices.buffer(), indices.offset(), VK_INDEX_TYPE_UINT32);
 			for (int edge = 0; edge < 2; edge++) {
@@ -304,10 +311,14 @@ public final class LodRenderer {
 			dz = Math.max(0, Math.max(z0 - c.z, c.z - (z0 + size)));
 		double horizontal = Math.sqrt(dx * dx + dz * dz);
 		if (horizontal > DISTANCE) return;
-		// Wholly inside vanilla's terrain (its farthest corner within the render distance): nothing to add.
+		// Wholly inside vanilla's terrain, short of its edge band (its farthest corner within the render distance
+		// less EDGE_BAND): nothing to add. In the band LODs fill wherever vanilla has nothing (chunks it dropped as
+		// the player moved away, before the LOD tile was ready: gaps that came in bursts walking backwards).
 		double fx = Math.max(Math.abs(x0 - c.x), Math.abs(x0 + size - c.x)), fz = Math.max(Math.abs(z0 - c.z), Math.abs(z0 + size - c.z));
-		if (fx * fx + fz * fz < (double) (vanillaDistance - 16) * (vanillaDistance - 16)) return;
-		if (level > 1 && Math.sqrt(horizontal * horizontal + dy * dy) < SPLIT * size) {
+		double inner = Math.max(0, vanillaDistance - EDGE_BAND);
+		if (fx * fx + fz * fz < inner * inner) return;
+		double distance = Math.sqrt(horizontal * horizontal + dy * dy);
+		if (level > 1 && distance < SPLIT * size) {
 			for (int k = 0; k < 8; k++) select(level - 1, tx * 2 + (k & 1), ty * 2 + (k >> 2), tz * 2 + (k >> 1 & 1), c, vanillaDistance, info, cmds, counts);
 			return;
 		}
@@ -315,8 +326,28 @@ public final class LodRenderer {
 		GpuTile g = tiles.get(key);
 		if (g == null) {
 			if (requested.add(key)) Lod.requestMesh(key);
+			// Until it's ready, its children if they're there (moving away: the finer tiles drawn till now).
+			if (level > 1) for (int k = 0; k < 8; k++) {
+				int ctx = tx * 2 + (k & 1), cty = ty * 2 + (k >> 2), ctz = tz * 2 + (k >> 1 & 1);
+				GpuTile child = tiles.get(LodStore.key(level - 1, ctx, cty, ctz));
+				if (child != null) emit(child, level - 1, ctx, cty, ctz, c, vanillaDistance, info, cmds, counts);
+			}
 			return;
 		}
+		// Coming closer: its children asked for ahead of time, so they're ready when it splits.
+		if (level > 1 && distance < SPLIT * PREFETCH * size) for (int k = 0; k < 8; k++) {
+			long ck = LodStore.key(level - 1, tx * 2 + (k & 1), ty * 2 + (k >> 2), tz * 2 + (k >> 1 & 1));
+			if (!tiles.containsKey(ck) && requested.add(ck)) Lod.requestMesh(ck);
+		}
+		emit(g, level, tx, ty, tz, c, vanillaDistance, info, cmds, counts);
+	}
+
+	/** One tile's draws (the directions that can face the camera). */
+	private static void emit(GpuTile g, int level, int tx, int ty, int tz, Vec3 c, float vanillaDistance, long info, long[] cmds, int[] counts) {
+		int size = Lod.TILE << level;
+		double x0 = (double) tx * size, y0 = (double) ty * size, z0 = (double) tz * size;
+		double dx = Math.max(0, Math.max(x0 - c.x, c.x - (x0 + size))), dz = Math.max(0, Math.max(z0 - c.z, c.z - (z0 + size)));
+		double horizontal = Math.sqrt(dx * dx + dz * dz);
 		g.usedFrame = frame;
 		if (g.quads == null || counts[0] >= MAX_TILES) return;
 		int t = counts[0]++;
