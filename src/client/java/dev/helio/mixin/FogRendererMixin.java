@@ -28,8 +28,12 @@ public abstract class FogRendererMixin {
 	@Inject(method = "setupFog", at = @At("RETURN"))
 	private void helio$noDistanceFog(Camera camera, int renderDistance, DeltaTracker deltaTracker, float darkness, ClientLevel level,
 		CallbackInfoReturnable<FogData> cir) {
-		if (!PathTracer.drawsSky() || getFogType(camera) != FogType.NONE) return;
+		PathTracer.noDistanceFog = false;
+		// Open air is ATMOSPHERIC since 26.x (NONE alone let vanilla's fog through: a pale ring at the render distance).
+		FogType type = getFogType(camera);
+		if (!PathTracer.drawsSky() || type != FogType.ATMOSPHERIC && type != FogType.NONE) return;
 		if (camera.entity() instanceof LivingEntity e && (e.hasEffect(MobEffects.BLINDNESS) || e.hasEffect(MobEffects.DARKNESS))) return;
+		PathTracer.noDistanceFog = true;
 		FogData fog = cir.getReturnValue();
 		fog.renderDistanceStart = fog.environmentalStart = 1e6f;
 		fog.renderDistanceEnd = fog.environmentalEnd = 1e6f + 1;

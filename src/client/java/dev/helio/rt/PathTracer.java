@@ -58,6 +58,8 @@ public final class PathTracer {
 
 	/** The projection vanilla draws the level with (view bobbing, nausea warp included). */
 	public static final Matrix4f levelProjection = new Matrix4f();
+	/** Vanilla's distance fog is off this frame (FogRendererMixin); Sodium's terrain fog follows (sodium.SodiumWorldRendererMixin). */
+	public static boolean noDistanceFog;
 	/**
 	 * Under DLSS this frame's sub-pixel jitter (render pixels) is picked when vanilla sets up its projection, and
 	 * vanilla's terrain is drawn with it too (vanillaJittered; GameRendererMixin): RR then gathers new samples of

@@ -9,7 +9,8 @@
 		"ChunkMeshBufferBuilderMixin",
 		"DefaultChunkRendererMixin",
 		"DefaultFluidRendererMixin",
-		"RenderSectionManagerMixin"
+		"RenderSectionManagerMixin",
+		"SodiumWorldRendererMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1
