@@ -137,7 +137,7 @@ public final class PathTracer {
 	public static boolean benchHold;
 	private static boolean benchSummoned;
 
-	private static String benchDim = "", benchPose = "", benchPlaced = "";
+	private static String benchDim = "", benchPose = "", benchPlaced = "", benchLodMap = "";
 	/** The last pose word's yaw and pitch, which "hold" keeps too (mouse input turned the camera off a pose). */
 	public static float benchYaw = Float.NaN, benchPitch;
 	/** The last pose word's position, where "hold" keeps the player (null: wherever it was). */
@@ -206,6 +206,12 @@ public final class PathTracer {
 				if ((word.equalsIgnoreCase("place") || word.equalsIgnoreCase("unplace")) && !word.equalsIgnoreCase(benchPlaced) && Minecraft.getInstance().player != null) {
 					benchPlaced = word.toLowerCase(java.util.Locale.ROOT);
 					Minecraft.getInstance().player.connection.sendCommand("execute positioned ~ ~1.6 ~ run setblock ^ ^ ^8 " + (benchPlaced.equals("place") ? "stone" : "air"));
+				}
+				// "lodmap:<level>": once per change, a top-down picture of that LOD level around the player
+				// (helio_lodmap_<level>.png in the game directory).
+				if (word.startsWith("lodmap:") && !word.equals(benchLodMap)) {
+					benchLodMap = word;
+					dev.helio.lod.Lod.dumpMap(Integer.parseInt(word.substring(7)));
 				}
 				// "thirdperson": the camera behind the player (first-person body shadow checks against the real one).
 				if (word.equalsIgnoreCase("thirdperson")) Minecraft.getInstance().options.setCameraType(net.minecraft.client.CameraType.THIRD_PERSON_BACK);

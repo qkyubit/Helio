@@ -1436,11 +1436,33 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
          No cost. Coverage-preserving leaf mipmaps (far trees thinning) stay an option if still needed.
        - Bench word `hold` now holds at the `pose:` position from the first frame: in survival the player fell
          before the hold began, so views varied between runs.
-    a. [ ] LOD data. Voxelise each 16³ section to block state ids plus sky and block light. Mip it into levels:
+    a. [x] LOD data. Voxelise each 16³ section to block state ids plus sky and block light. Mip it into levels:
        level L is one voxel per 2^L blocks, up to level 6 or 7 for 800 chunks, picking the most visible block per cell (the one
        that faces the air). Sources: chunks as the client receives them, and an import of the world's region
        files (singleplayer: the save on disk), so a pre-generated world shows at once. Store it in Helio's own
        per-world files, compressed, written off the render thread.
+       - Done (2026-11-22), dev.helio.lod. Tiles are 32³ voxels, levels 1-6 (level 6: 64-block voxels, about
+         5 pixels at 12,800 blocks). There's no level 0: in singleplayer the save already holds the blocks. A
+         section becomes an 8³ patch of a level-1 tile, and each level is mipped into the one above. The voxel is a
+         long: Helio's state id (Mapping: states.txt, biomes.txt; registry ids aren't stable across mod changes),
+         biome, sky and block light, and a KNOWN bit (0 = unknown).
+       - The pick for 2³ voxels: the top layer if anything's in it, plants giving way to solid blocks under them
+         (meadows show their grass); light is the most of the 8. Before a tile is written, what can't be seen
+         (solid voxels with nothing open beside them, and sunless cave air) becomes stone: that halved storage,
+         and the top-down map is unchanged. Unknown has to count as open: all-air sections above the terrain
+         aren't ingested, and the first try turned the sky to stone.
+       - Storage: vanilla's RegionFile container (deflate), a file per level, tile row and 32x32 tiles, palette-
+         packed, in <save>/helio_lod/<dimension>/ (multiplayer: .minecraft/helio_lod/<server>/). A single worker
+         thread owns all tiles (384 cached).
+       - Sources: client chunks 40 ticks after they arrive (their light comes after them: at first all dark) and
+         when dropped. In singleplayer, an import of the save through the server's own ChunkMap.readChunk (its IO
+         worker and data fixers: a 26.2 world reads fine), nearest region first, on 4 low-priority threads. It
+         resumes from imported.txt. Chunks not fully generated (the generated area's edge) are skipped.
+       - Checked with bench word `lodmap:<level>` (a top-down map of a level around the player): New World's
+         levels 2 and 4 match its terrain. The pregen world (26.2, about 1.1M chunks): 164,864 chunks in 229 s
+         (720 a second, so about 26 minutes in all), 1.6 KB a chunk (about 1.8 GB in all; Voxy's own: 7.1 GB).
+       - Left: the import's CPU load while playing isn't measured yet. Level 0 for the ring just past the render
+         distance (from the save, on demand) waits to see whether level 1 looks too coarse there.
     b. [ ] Meshing. Build quads per LOD tile on worker threads: faces against air or transparent only, merged
        where neighbours match (greedy), with each quad's block, light and tint. First colour: each block face's
        average texture colour, tinted (grass, leaves and water by biome). Later: each block state's faces baked

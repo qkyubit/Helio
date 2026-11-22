@@ -54,6 +54,7 @@ public class Helio implements ClientModInitializer {
 		ClientTickEvents.END_CLIENT_TICK.register(mc -> {
 			SelfCheck.tick(mc);
 			Scene.tick(mc);
+			dev.helio.lod.Lod.tick(mc);
 			// Dev stress test (-Dhelio.flyTest=true): fly east at 40 blocks/s so new sections stream in nonstop.
 			if (flyTest && mc.player != null && mc.gui.screen() == null) {
 				mc.player.getAbilities().flying = true;
@@ -68,6 +69,9 @@ public class Helio implements ClientModInitializer {
 				mc.gui.hud.setOverlayMessage(Component.translatable(c.rayTracing ? "helio.rt.on" : "helio.rt.off"), false);
 			}
 		});
+		// LODs (M8 step 10a): chunks as the client gets them, and again as it drops them (edits since).
+		net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents.CHUNK_LOAD.register(dev.helio.lod.Lod::onChunkLoad);
+		net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents.CHUNK_UNLOAD.register(dev.helio.lod.Lod::onChunkUnload);
 		HudElementRegistry.addLast(Identifier.fromNamespaceAndPath("helio", "perf_overlay"), PerfOverlay::render);
 		LOG.info("Helio loaded");
 	}
