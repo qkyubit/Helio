@@ -1541,9 +1541,18 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
          changed tile keeps its old mesh until the new one comes, and a patch or mip that changes nothing (a
          dropped chunk no one edited) marks nothing. Hiding unseen voxels works on a copy as tiles are written,
          so the cached tile still compares equal.
-       - Left for the 1 ms target: occlusion (a depth pyramid; much of a horizon view is behind nearer hills),
-         GPU-driven selection, and possibly a tighter SPLIT. Not checked yet: moving (tile streaming, hitches),
-         night, other dimensions.
+       - Occlusion (2026-11-22): lod_cull.comp, lod_hiz.comp, two phases a frame on the GPU. Candidates visible
+         last frame are drawn; a depth pyramid is built from that and vanilla's terrain; every candidate is
+         tested against it (the result kept per tile slot), and the newly visible are drawn
+         (vkCmdDrawIndexedIndirectCount; drawIndirectCount enabled). Nothing pops in as the view turns. Boxes are
+         each mesh's own bounds: whole tiles (a level-6 tile is 2,048 blocks tall, mostly sky) never hid.
+         In a jungle (y 80, pregen world): draws 19.5k -> 8.5k, LOD pass 1.06 -> 0.83 ms. Flyover (y 150): 42%
+         culled, but the cost is the visible near quads.
+       - SPLIT, A/B with bench word `split:<x>` over the flyover: 6 1.09 ms (4.9M quads), 5 0.95 ms (3.5M), 4
+         0.78 ms (2.3M). 5 looks nearly the same as 6 (slightly blockier mid-distance trees); 4 is visibly
+         coarser. Default 5. The ~1 ms target is met in both views.
+       - Not checked yet: night, other dimensions; GPU-driven selection isn't needed for now (the CPU walk is
+         cheap at these tile counts).
     d. [ ] Blending, so there's no abrupt change at the render distance:
        - LOD chunks out to 1.5x the base render distance (a band of 50% of its radius past it) get reflections
          and cheap water effects (Fresnel reflection of the sky and scene, waves, absorption tint).

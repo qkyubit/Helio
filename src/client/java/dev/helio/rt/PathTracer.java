@@ -182,6 +182,7 @@ public final class PathTracer {
 				if (word.equalsIgnoreCase("hold")) benchHold = true;
 				if (word.equalsIgnoreCase("spin")) benchSpin = true;
 				if (word.equalsIgnoreCase("nolod")) dev.helio.lod.LodRenderer.benchOff = true;
+				if (word.startsWith("split:")) dev.helio.lod.LodRenderer.SPLIT = Float.parseFloat(word.substring(6));
 				if (word.equalsIgnoreCase("nojitter")) benchNoJitter = true;
 				// "nightvision": gives the player night vision (the bench restores the player's data after).
 				if (word.equalsIgnoreCase("nightvision") && Minecraft.getInstance().player != null && !Minecraft.getInstance().player.hasEffect(net.minecraft.world.effect.MobEffects.NIGHT_VISION))
@@ -371,7 +372,7 @@ public final class PathTracer {
 		Matrix4f viewProj = new Matrix4f(jitteredProjection).mul(viewRotation);
 		dev.helio.lod.LodRenderer.draw(commandBuffer(), Helio.device.vkDevice(), cameraPos, viewProj, vanillaDepthView.vkImageView(),
 			((VulkanGpuTextureView) main.getColorTextureView()).vkImageView(), ((VulkanGpuTextureView) main.getDepthTextureView()).vkImageView(),
-			main.width, main.height, new float[] {skyR, skyG, skyB}, Minecraft.getInstance().options.getEffectiveRenderDistance() * 16f);
+			((VulkanGpuTextureView) main.getDepthTextureView()).vkImageView(), main.width, main.height, new float[] {skyR, skyG, skyB}, Minecraft.getInstance().options.getEffectiveRenderDistance() * 16f);
 	}
 
 	/** LOD water, after the opaque depth was copied (LodRenderer.drawWater). */
@@ -684,8 +685,9 @@ public final class PathTracer {
 					String.format("%.3f", (cpu - benchCpu) / 120e6), String.format("%.3f", Scene.cpuNanos[Scene.CPU_UPDATE] / 120e6),
 					String.format("%.3f", Scene.cpuNanos[Scene.CPU_TLAS] / 120e6), String.format("%.3f", Scene.cpuNanos[Scene.CPU_LIGHTS] / 120e6),
 					String.format("%.3f", Scene.cpuNanos[Scene.CPU_HIDDEN] / 120e6));
-				if (dev.helio.lod.LodRenderer.active()) Helio.LOG.info("Bench LOD: GPU {} ms, {} tiles, {} quads drawn, {} tiles on the GPU ({} MB)",
+				if (dev.helio.lod.LodRenderer.active()) Helio.LOG.info("Bench LOD: GPU {} ms, {} tiles ({} quads) selected, draws {} -> {} after culling, {} tiles on the GPU ({} MB)",
 					String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.LOD)), dev.helio.lod.LodRenderer.drawnTiles, dev.helio.lod.LodRenderer.drawnQuads,
+					dev.helio.lod.LodRenderer.candidateDraws, dev.helio.lod.LodRenderer.culledDraws,
 					dev.helio.lod.LodRenderer.gpuTiles(), dev.helio.lod.LodRenderer.gpuBytes() >> 20);
 				benchCpu = cpu;
 				java.util.Arrays.fill(Scene.cpuNanos, 0);

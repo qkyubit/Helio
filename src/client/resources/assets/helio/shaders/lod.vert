@@ -8,7 +8,7 @@
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Quads { uvec4 q[]; };
 // A drawn tile: its corner relative to the camera, voxel size in blocks, its quads.
-struct Tile { vec3 origin; float voxel; uint64_t quads; uvec2 pad; };
+struct Tile { vec3 origin; float voxel; uint64_t quads; uint slot; uint cmdStart; uint opaqueCount; uint waterCount; uint edge; uint bounds; }; // (lod_cull.comp's)
 layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Tiles { Tile t[]; };
 
 layout(push_constant, scalar) uniform Push {

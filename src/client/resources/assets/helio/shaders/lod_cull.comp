@@ -1,0 +1,84 @@
+#version 460
+// LOD occlusion (M8 step 10c), two phases a frame (LodRenderer). Phase 1: the candidate tiles visible last frame
+// get their draws, unchanged. Phase 2 (after the depth pyramid is built from vanilla's terrain and those): every
+// candidate's box is tested against it; the result is kept for the next frame, and the visible ones not drawn
+// in phase 1 get their draws. Water's draws, all from phase 2's test, go in lists of their own for later.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = 64) in;
+
+// A candidate tile, as lod.vert reads it (origin to quads), plus what culling needs.
+// edge: bit 0 (the pipeline with fragment tests), the mesh's top z bound << 8; bounds: its other bounds, 6 bits each
+// (x, y, z low, x, y high), in voxels: the mesh, not the tile, which is mostly air (tall level-6 tiles never hid).
+struct Tile { vec3 origin; float voxel; uint64_t quads; uint slot; uint cmdStart; uint opaqueCount; uint waterCount; uint edge; uint bounds; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) readonly buffer Tiles { Tile t[]; };
+struct Draw { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+layout(buffer_reference, scalar, buffer_reference_align = 4) buffer Draws { Draw d[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 4) buffer Words { uint w[]; };
+
+layout(binding = 0) uniform sampler2D pyramid[16]; // levels 0.. (level 0: half the depth's size)
+
+layout(push_constant, scalar) uniform Push {
+	mat4 viewProj;
+	uint64_t tiles;
+	uint64_t templates;  // each tile's draws, its opaque ones then its water ones
+	uint64_t visibility; // per tile slot: 1 if it was visible last frame
+	uint64_t lists;      // 6 lists of MAX draws: phase 1 [far, edge], phase 2 [far, edge], water [far, edge]
+	uint64_t counts;     // their counts
+	uint count;
+	uint phase;
+	uint levels;
+	uint maxDraws;
+	vec2 depthSize;      // the depth's size, pixels
+} pc;
+
+void emit(uint list, uint from, uint n) {
+	Draws src = Draws(pc.templates), dst = Draws(pc.lists);
+	uint at = atomicAdd(Words(pc.counts).w[list], n);
+	for (uint i = 0u; i < n && at + i < pc.maxDraws; i++) dst.d[list * pc.maxDraws + at + i] = src.d[from + i];
+}
+
+bool visible(Tile t) {
+	vec3 b0 = t.origin + vec3(t.bounds & 63u, t.bounds >> 6 & 63u, t.bounds >> 12 & 63u) * t.voxel;
+	vec3 b1 = t.origin + vec3(t.bounds >> 18 & 63u, t.bounds >> 24 & 63u, t.edge >> 8 & 63u) * t.voxel;
+	vec2 lo = vec2(1e9), hi = vec2(-1e9);
+	float nearest = 0.0;
+	for (int k = 0; k < 8; k++) {
+		vec3 corner = mix(b0, b1, vec3(k & 1, k >> 2, k >> 1 & 1));
+		vec4 clip = pc.viewProj * vec4(corner, 1.0);
+		if (clip.w <= 0.1) return true; // reaching behind the camera: no test
+		vec3 ndc = clip.xyz / clip.w;
+		lo = min(lo, ndc.xy);
+		hi = max(hi, ndc.xy);
+		nearest = max(nearest, ndc.z); // reversed Z
+	}
+	if (any(lessThan(hi, vec2(-1.0))) || any(greaterThan(lo, vec2(1.0)))) return false; // off screen
+	vec2 a = (clamp(lo, -1.0, 1.0) * 0.5 + 0.5) * pc.depthSize, b = (clamp(hi, -1.0, 1.0) * 0.5 + 0.5) * pc.depthSize;
+	float extent = max(b.x - a.x, b.y - a.y);
+	// The level whose texels (2^(level + 1) pixels) cover it in 2 or 3 each way.
+	uint level = uint(clamp(ceil(log2(max(extent, 1.0))) - 2.0, 0.0, float(pc.levels - 1u)));
+	float texel = exp2(float(level + 1u));
+	ivec2 size2 = textureSize(pyramid[level], 0);
+	ivec2 x0 = clamp(ivec2(floor(a / texel)), ivec2(0), size2 - 1), x1 = clamp(ivec2(floor(b / texel)), ivec2(0), size2 - 1);
+	float farthest = 1.0;
+	for (int y = x0.y; y <= min(x1.y, x0.y + 3); y++) for (int x = x0.x; x <= min(x1.x, x0.x + 3); x++)
+		farthest = min(farthest, texelFetch(pyramid[level], ivec2(x, y), 0).r);
+	return nearest >= farthest;
+}
+
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) return;
+	Tile t = Tiles(pc.tiles).t[i];
+	Words vis = Words(pc.visibility);
+	if (pc.phase == 1u) {
+		if (vis.w[t.slot] != 0u) emit(t.edge & 1u, t.cmdStart, t.opaqueCount);
+		return;
+	}
+	bool was = vis.w[t.slot] != 0u, now = visible(t);
+	vis.w[t.slot] = now ? 1u : 0u;
+	if (!now) return;
+	if (!was) emit(2u + (t.edge & 1u), t.cmdStart, t.opaqueCount);
+	emit(4u + (t.edge & 1u), t.cmdStart + t.opaqueCount, t.waterCount);
+}

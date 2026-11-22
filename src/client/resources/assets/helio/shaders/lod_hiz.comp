@@ -1,0 +1,20 @@
+#version 460
+// LOD occlusion (M8 step 10c): one level of the depth pyramid, each texel the farthest (reversed Z: smallest)
+// of the 2x2 below it. Level 0 is read from the depth itself, the rest from the level before (LodRenderer).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D depthTex;          // level 0's source
+layout(binding = 1, r32f) uniform readonly image2D below; // the other levels' source
+layout(binding = 2, r32f) uniform writeonly image2D level;
+layout(push_constant) uniform Push { ivec2 belowSize; int fromDepth; } pc;
+
+void main() {
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	if (any(greaterThanEqual(p, imageSize(level)))) return;
+	ivec2 hi = pc.belowSize - 1;
+	float d = 1.0;
+	for (int k = 0; k < 4; k++) {
+		ivec2 at = min(p * 2 + ivec2(k & 1, k >> 1), hi);
+		d = min(d, pc.fromDepth != 0 ? texelFetch(depthTex, at, 0).r : imageLoad(below, at).r);
+	}
+	imageStore(level, p, vec4(d));
+}

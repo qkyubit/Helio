@@ -36,7 +36,8 @@ public final class HelioFeatures {
 			new VulkanFeature(VK12, "descriptorIndexing"),
 			new VulkanFeature(VK12, "runtimeDescriptorArray"),
 			new VulkanFeature(VK12, "descriptorBindingPartiallyBound"),
-			new VulkanFeature(VK12, "shaderSampledImageArrayNonUniformIndexing")
+			new VulkanFeature(VK12, "shaderSampledImageArrayNonUniformIndexing"),
+			new VulkanFeature(VK12, "drawIndirectCount") // LOD occlusion (LodRenderer)
 		));
 
 	// NVSDK_NGX_VULKAN_RequiredExtensions (SDK 310.9.16) asks for these two plus VK_KHR_push_descriptor
