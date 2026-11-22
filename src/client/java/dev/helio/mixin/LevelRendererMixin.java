@@ -1,6 +1,11 @@
 package dev.helio.mixin;
 
 import com.mojang.blaze3d.ProjectionType;
+import com.mojang.renderpearl.api.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
+import net.minecraft.client.renderer.chunk.ChunkSectionLayerGroup;
+import net.minecraft.client.renderer.texture.TextureAtlas;
+import net.minecraft.client.renderer.texture.TextureManager;
 import net.minecraft.client.renderer.ProjectionMatrixBuffer;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
@@ -46,6 +51,16 @@ public class LevelRendererMixin {
 	@Unique private FeatureRenderDispatcher.PreparedFrame helio$deferredFeatures;
 	@Unique private boolean helio$replaying;
 	@Unique private static ProjectionMatrixBuffer helio$unjittered;
+	@Unique private boolean helio$translucentTerrainDrawn;
+	@Shadow private GpuSampler chunkLayerSampler;
+	@Shadow @Final private TextureManager textureManager;
+
+	// Translucent terrain already drawn before the trace (helio$traceAndReplay): not again in the replay.
+	@WrapOperation(method = "executeClassicTransparency", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/chunk/ChunkSectionsToRender;renderGroup(Lnet/minecraft/client/renderer/chunk/ChunkSectionLayerGroup;Lcom/mojang/renderpearl/api/commands/RenderPass;Lcom/mojang/renderpearl/api/textures/GpuSampler;Lcom/mojang/renderpearl/api/textures/GpuTextureView;Z)V"))
+	private void helio$skipDrawnTranslucents(ChunkSectionsToRender sections, ChunkSectionLayerGroup group, RenderPass pass, GpuSampler sampler,
+		GpuTextureView atlas, boolean wireframe, Operation<Void> original) {
+		if (!helio$translucentTerrainDrawn) original.call(sections, group, pass, sampler, atlas, wireframe);
+	}
 
 	@Shadow
 	private void executeClassicTransparency(ChunkSectionsToRender chunkSectionsToRender, FeatureRenderDispatcher.PreparedFrame featureFrame, RenderPass renderPass) {}
@@ -104,6 +119,20 @@ public class LevelRendererMixin {
 	@Unique
 	private void helio$traceAndReplay() {
 		if (helio$deferredFeatures == null) return;
+		// Translucent terrain (only past the RT distance: the tracer draws the nearer) goes on before the trace,
+		// still jittered: it's shaded and anti-aliased with the rest of vanilla's picture. Drawn after, it kept
+		// vanilla's look and jittered over the upscaled frame. The depth before it tells the tracer where it lies.
+		if (helio$deferredSections != null && PathTracer.active()) {
+			PathTracer.copyOpaqueDepth();
+			RenderTarget target = gameRenderer.mainRenderTarget();
+			try (RenderPass pass = RenderSystem.getDevice().createCommandEncoder()
+				.createRenderPass(() -> "Helio far translucent terrain", target.getColorTextureView(), Optional.empty(), target.getDepthTextureView(), OptionalDouble.empty())) {
+				RenderSystem.bindDefaultUniforms(pass);
+				helio$deferredSections.renderGroup(ChunkSectionLayerGroup.TRANSLUCENT, pass, chunkLayerSampler,
+					textureManager.getTexture(TextureAtlas.LOCATION_BLOCKS).getTextureView(), levelRenderState.renderWireframeTerrain);
+			}
+			helio$translucentTerrainDrawn = true;
+		}
 		PathTracer.run();
 		RenderTarget main = gameRenderer.mainRenderTarget();
 		// Terrain was drawn jittered for DLSS (PathTracer.jitterLevelProjection); what's drawn from here on
@@ -131,6 +160,7 @@ public class LevelRendererMixin {
 			}
 		} finally {
 			helio$replaying = false;
+			helio$translucentTerrainDrawn = false;
 			helio$deferredSections = null;
 			helio$deferredFeatures = null;
 		}

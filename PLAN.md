@@ -1434,6 +1434,14 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
          outlines), so they don't wobble. Helio's own maths keeps the unjittered levelProjection. Bench word
          `nojitter` gives the old way. Same view, one session: leaf edges went from hard stair-steps to smooth.
          No cost. Coverage-preserving leaf mipmaps (far trees thinning) stay an option if still needed.
+       - Translucent terrain past the RT distance (user, 2026-11-22: "aren't blended in and look vanilla, and
+         jitter"). It was drawn in the replay after RR: vanilla's look, and Sodium drew it with its own copy of the
+         jittered projection over the finished frame. Now it goes on before the trace, jittered with the opaque
+         terrain (LevelRendererMixin; the replay skips it), so vanillaRadiance shades it and RR anti-aliases it.
+         A copy of vanilla's depth from before it (PathTracer.copyOpaqueDepth, binding 20) says where a surface
+         lies over the terrain; there the sky is reflected, Schlick from water's 0.02. Same view, old vs new: far
+         water went from saturated vanilla blue with jagged, dark-outlined shores to the terrain's light and haze
+         with a sky sheen. Pixels changing more than 12/255 between two frames 0.1 s apart: 1.4% -> 0.
        - Bench word `hold` now holds at the `pose:` position from the first frame: in survival the player fell
          before the hold began, so views varied between runs.
     a. [x] LOD data. Voxelise each 16³ section to block state ids plus sky and block light. Mip it into levels:

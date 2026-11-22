@@ -315,6 +315,36 @@ public final class PathTracer {
 		Scene.update(commandBuffer(), cameraPos, false);
 	}
 
+	/**
+	 * Vanilla's depth before the translucent terrain past the RT distance is drawn (LevelRendererMixin draws it
+	 * before the trace, jittered, so it's shaded and anti-aliased like the rest): where the final depth is nearer,
+	 * a translucent surface lies over the terrain (pathtrace.comp opaqueDepthTex). Unset frames bind vanilla's
+	 * depth itself: nothing counts as translucent.
+	 */
+	private static com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture opaqueDepth;
+	private static VulkanGpuTextureView opaqueDepthView;
+	private static boolean opaqueDepthSet;
+
+	public static void copyOpaqueDepth() {
+		if (!active() || Helio.device == null) return;
+		var main = Minecraft.getInstance().gameRenderer.mainRenderTarget();
+		if (opaqueDepth == null || opaqueDepth.getWidth(0) != main.width || opaqueDepth.getHeight(0) != main.height) {
+			if (opaqueDepth != null) {
+				var t = opaqueDepth;
+				var v = opaqueDepthView;
+				Scene.defer(() -> {
+					v.close();
+					t.close();
+				});
+			}
+			opaqueDepth = (com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture) Helio.device.createTexture("Helio opaque depth", 15,
+				com.mojang.renderpearl.api.GpuFormat.D32_FLOAT, main.width, main.height, 1, 1);
+			opaqueDepthView = (VulkanGpuTextureView) Helio.device.createTextureView(opaqueDepth, 0, 1);
+		}
+		Helio.device.createCommandEncoder().copyTextureToTexture(main.getDepthTexture(), opaqueDepth, 0, 0, 0, 0, 0, main.width, main.height);
+		opaqueDepthSet = true;
+	}
+
 	private static VkCommandBuffer commandBuffer() {
 		return ((VulkanCommandEncoderAccessor) Helio.device.createCommandEncoder()).helio$commandBuffer();
 	}
@@ -328,9 +358,9 @@ public final class PathTracer {
 				.magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_NEAREST).maxLod(0), null, h), "sampler");
 			sampler = h.get(0);
 
-			// 0 TLAS, 2, 5 and 14-19 sampled (atlas, vanilla depth, PBR atlases, sky LUTs, cloud noise), the rest storage images (see pathtrace.comp).
-			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(20, s);
-			for (int i = 0; i < 20; i++) {
+			// 0 TLAS, 2, 5 and 14-20 sampled (atlas, vanilla depth, PBR atlases, sky LUTs, cloud noise, opaque depth), the rest storage images (see pathtrace.comp).
+			VkDescriptorSetLayoutBinding.Buffer b = VkDescriptorSetLayoutBinding.calloc(21, s);
+			for (int i = 0; i < 21; i++) {
 				int type = i == 0 ? VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR
 					: i == 2 || i == 5 || i >= 14 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 				b.get(i).binding(i).descriptorType(type).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
@@ -520,7 +550,7 @@ public final class PathTracer {
 			Sky.update(cmd, sun, moon, hasSky ? rainBrightness : 1, moonPhase, s);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
-			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(20, s);
+			VkWriteDescriptorSet.Buffer w = VkWriteDescriptorSet.calloc(21, s);
 			w.get(0).sType$Default().dstBinding(0).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
 				.pNext(VkWriteDescriptorSetAccelerationStructureKHR.calloc(s).sType$Default().pAccelerationStructures(s.longs(Scene.tlas)));
 			w.get(1).sType$Default().dstBinding(1).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
@@ -534,6 +564,9 @@ public final class PathTracer {
 			VulkanGpuTextureView depth = (VulkanGpuTextureView) main.getDepthTextureView();
 			w.get(5).sType$Default().dstBinding(5).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
 				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(sampler).imageView(depth.vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+			w.get(20).sType$Default().dstBinding(20).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+				.pImageInfo(VkDescriptorImageInfo.calloc(1, s).sampler(sampler).imageView((opaqueDepthSet ? opaqueDepthView : depth).vkImageView()).imageLayout(VK_IMAGE_LAYOUT_GENERAL));
+			opaqueDepthSet = false;
 			Memory.Img[] inputs = {Dlss.color, Dlss.diffuse, Dlss.specular, Dlss.normals, Dlss.depth, Dlss.motion, Dlss.hitDistance, Dlss.hitDepth};
 			for (int i = 0; i < inputs.length; i++) {
 				w.get(6 + i).sType$Default().dstBinding(6 + i).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)

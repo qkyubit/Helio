@@ -36,6 +36,7 @@ layout(binding = 19) uniform sampler3D cloudNoise; // Sky.java, cloud_noise.comp
 layout(binding = 3, rgba32f) uniform image2D accumImg; // premultiplied radiance + coverage, averaged over frames
 layout(binding = 4, rgba32f) uniform image2D entityImg; // traced colour + NDC depth where an entity is hit (entity_composite.comp)
 layout(binding = 5) uniform sampler2D depthTex; // vanilla's depth so far: sky and terrain past the RT distance
+layout(binding = 20) uniform sampler2D opaqueDepthTex; // the same before translucent terrain (PathTracer.copyOpaqueDepth): nearer here, it's under some
 // DLSS Ray Reconstruction's inputs (RayReconstruction.java), written instead of compositing when Frame.denoise is set.
 layout(binding = 6, rgba16f) uniform writeonly image2D rrColor;    // noisy linear radiance
 layout(binding = 7, rgba8) uniform writeonly image2D rrDiffuse;    // diffuse albedo
@@ -1719,7 +1720,17 @@ vec3 vanillaRadiance(ivec2 p, ivec2 size, Frame frame) {
 	// The bilinear taps can see terrain where the pixel under them is sky (depth 0, infinitely far): sky then.
 	if (texelFetch(depthTex, under, 0).r == 0.0 || any(isinf(pos)) || any(isnan(pos))) return sky;
 	// On the horizon's pixels taking the sky's share out can leave below zero, and pow() gave NaN there.
-	vec3 c = vanillaLit(max((v - skyShare * skySrgb) / (1.0 - skyShare), vec3(0.0)), pos, vanillaNormal(under, outSize, pos));
+	vec3 n = vanillaNormal(under, outSize, pos);
+	vec3 c = vanillaLit(max((v - skyShare * skySrgb) / (1.0 - skyShare), vec3(0.0)), pos, n);
+	// Under translucent terrain (water, ice, glass: vanilla's blend of it over what's behind, lit as above), its
+	// surface also reflects the sky, more at grazing angles (Schlick, water's 0.02 head-on): far lakes and the
+	// sea no longer look matte next to the traced water before them.
+	if (texelFetch(depthTex, under, 0).r > texelFetch(opaqueDepthTex, under, 0).r + 1e-7) {
+		float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(-dir, n), 0.0), 5.0);
+		vec3 r = reflect(dir, n);
+		r.y = abs(r.y); // a rough normal mustn't send it into the ground
+		c = mix(c, skyRadiance(normalize(r)), fresnel);
+	}
 	fogSkyLight = 1.0; // out in the open, as far terrain mostly is
 	vec4 cloud = clouds(pc.cameraInScene.xyz, dir, length(pos)), haze = fog(pc.cameraInScene.xyz, dir, length(pos));
 	c = (c * cloud.a + cloud.rgb) * haze.a + haze.rgb;
