@@ -119,11 +119,17 @@ public class LevelRendererMixin {
 	@Unique
 	private void helio$traceAndReplay() {
 		if (helio$deferredFeatures == null) return;
+		// Helio's LODs (M8 step 10c) fill the sky past vanilla's terrain, before anything translucent goes on.
+		PathTracer.drawLods();
 		// Translucent terrain (only past the RT distance: the tracer draws the nearer) goes on before the trace,
 		// still jittered: it's shaded and anti-aliased with the rest of vanilla's picture. Drawn after, it kept
-		// vanilla's look and jittered over the upscaled frame. The depth before it tells the tracer where it lies.
-		if (helio$deferredSections != null && PathTracer.active()) {
+		// vanilla's look and jittered over the upscaled frame. The depth before it (and before the LODs' water)
+		// tells the tracer where it lies.
+		if (PathTracer.active()) {
 			PathTracer.copyOpaqueDepth();
+			PathTracer.drawLodWater();
+		}
+		if (helio$deferredSections != null && PathTracer.active()) {
 			RenderTarget target = gameRenderer.mainRenderTarget();
 			try (RenderPass pass = RenderSystem.getDevice().createCommandEncoder()
 				.createRenderPass(() -> "Helio far translucent terrain", target.getColorTextureView(), Optional.empty(), target.getDepthTextureView(), OptionalDouble.empty())) {

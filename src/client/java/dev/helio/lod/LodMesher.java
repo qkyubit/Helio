@@ -12,7 +12,8 @@ import static dev.helio.lod.Lod.TILE;
  * <p>
  * A quad is 4 ints, tile-local in voxels: x | y << 6 | z << 12 | w << 18 | h << 24 (w, h along the face's two
  * axes, in the order of {@link #AXES}); direction (Direction ordinal) | sky light << 3 | block light << 7; colour
- * (sRGB 0xRRGGBB); 0 (spare).
+ * (sRGB 0xRRGGBB); 1 for water, else 0. Quads come grouped: the rest by direction, then water by direction
+ * (LodRenderer draws water after the opaque depth is copied, so the composite treats it as water).
  */
 final class LodMesher {
 	/** Per direction (down, up, north, south, west, east): the axis it faces along (0 x, 1 y, 2 z), its sign, and its face's u, v axes. */
@@ -25,7 +26,8 @@ final class LodMesher {
 		IntArrayList out = new IntArrayList();
 		long[] mask = new long[TILE * TILE];
 		int[] p = new int[3];
-		for (int dir = 0; dir < 6; dir++) {
+		for (int pass = 0; pass < 2; pass++) for (int dir = 0; dir < 6; dir++) {
+			boolean waterPass = pass == 1;
 			int axis = AXES[dir][0], sign = AXES[dir][1], ua = AXES[dir][2], va = AXES[dir][3];
 			for (int d = 0; d < TILE; d++) {
 				boolean any = false;
@@ -36,7 +38,7 @@ final class LodMesher {
 					long self = v[Lod.index(p[0], p[1], p[2])];
 					int s = Lod.state(self);
 					long key = 0;
-					if (s != 0) {
+					if (s != 0 && m.water(s) == waterPass) {
 						p[axis] = d + sign;
 						long other = p[axis] < 0 || p[axis] >= TILE
 							? neighbour(neighbours[dir], p, axis) : v[Lod.index(p[0], p[1], p[2])];
@@ -77,7 +79,7 @@ final class LodMesher {
 					int light = (int) (key >>> 32 & 255);
 					out.add(dir | (light & 15) << 3 | (light >> 4 & 15) << 7);
 					out.add((int) (key & 0xFFFFFF));
-					out.add(0);
+					out.add(waterPass ? 1 : 0);
 					u += w;
 				}
 			}

@@ -12,7 +12,7 @@ import static org.lwjgl.util.shaderc.Shaderc.*;
 public final class Shaders {
 	private Shaders() {}
 
-	/** GLSL from the jar to SPIR-V 1.4 via the shaderc Minecraft already ships. */
+	/** GLSL from the jar to SPIR-V 1.4 via the shaderc Minecraft already ships (.vert, .frag; else compute). */
 	public static ByteBuffer compile(String name) throws IOException {
 		String src;
 		try (InputStream in = Shaders.class.getResourceAsStream("/assets/helio/shaders/" + name)) {
@@ -29,7 +29,8 @@ public final class Shaders {
 			ByteBuffer source = MemoryUtil.memUTF8(src, false), file = MemoryUtil.memUTF8(name), entry = MemoryUtil.memUTF8("main");
 			long result;
 			try {
-				result = shaderc_compile_into_spv(compiler, source, shaderc_compute_shader, file, entry, opts);
+				int kind = name.endsWith(".vert") ? shaderc_vertex_shader : name.endsWith(".frag") ? shaderc_fragment_shader : shaderc_compute_shader;
+				result = shaderc_compile_into_spv(compiler, source, kind, file, entry, opts);
 			} finally {
 				MemoryUtil.memFree(source);
 				MemoryUtil.memFree(file);

@@ -71,8 +71,20 @@ public final class PathTracer {
 		return vanillaJittered;
 	}
 
+	/** This frame's projection as vanilla draws with it: jittered (if so), far plane at infinity (with LODs). */
+	private static final Matrix4f jitteredProjection = new Matrix4f();
+
 	public static void jitterLevelProjection(Matrix4f projection) {
+		// LODs reach 12,800 blocks, far past vanilla's far plane: the plane goes to infinity (reversed Z, from
+		// setPerspective(fov, aspect, zFar, zNear): m22 = N / (F - N), m32 = F N / (F - N)). Vanilla, Sodium and
+		// Helio all take this matrix, so their depths agree.
+		if (dev.helio.lod.LodRenderer.active() && projection.m23() == -1f && projection.m22() > 0f) {
+			float far = projection.m32() / projection.m22(), near = projection.m22() * far / (1f + projection.m22());
+			projection.m22(0f);
+			projection.m32(near);
+		}
 		levelProjection.set(projection);
+		jitteredProjection.set(projection);
 		vanillaJittered = false;
 		if (!active() || benchNoJitter || HelioConfig.current.accumulate || !Dlss.available() || HelioConfig.current.debugView != HelioConfig.DebugView.OFF
 			|| Dlss.renderWidth <= 0 || Dlss.renderHeight <= 0) return;
@@ -82,6 +94,7 @@ public final class PathTracer {
 		// The picture shifted by minus the jitter in clip space: a pixel's centre then shows what the jittered
 		// ray through it does (pathtrace.comp vanillaShift).
 		projection.translateLocal(-2f * frameJitterX / Dlss.renderWidth, -2f * frameJitterY / Dlss.renderHeight, 0);
+		jitteredProjection.set(projection);
 		vanillaJittered = true;
 	}
 
@@ -155,6 +168,7 @@ public final class PathTracer {
 		benchFly = false;
 		benchHold = false;
 		benchSpin = false;
+		dev.helio.lod.LodRenderer.benchOff = false;
 		benchNoJitter = false;
 		dev.helio.vk.DisplayClock.logging = bench;
 		if (!bench) return;
@@ -167,6 +181,7 @@ public final class PathTracer {
 				if (word.equalsIgnoreCase("fly")) benchFly = true;
 				if (word.equalsIgnoreCase("hold")) benchHold = true;
 				if (word.equalsIgnoreCase("spin")) benchSpin = true;
+				if (word.equalsIgnoreCase("nolod")) dev.helio.lod.LodRenderer.benchOff = true;
 				if (word.equalsIgnoreCase("nojitter")) benchNoJitter = true;
 				// "nightvision": gives the player night vision (the bench restores the player's data after).
 				if (word.equalsIgnoreCase("nightvision") && Minecraft.getInstance().player != null && !Minecraft.getInstance().player.hasEffect(net.minecraft.world.effect.MobEffects.NIGHT_VISION))
@@ -330,6 +345,39 @@ public final class PathTracer {
 	private static com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture opaqueDepth;
 	private static VulkanGpuTextureView opaqueDepthView;
 	private static boolean opaqueDepthSet;
+
+	/** Vanilla's depth before the LOD pass: the LODs fill only where it's the sky's. */
+	private static com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture vanillaDepth;
+	private static VulkanGpuTextureView vanillaDepthView;
+
+	/** The LOD pass (LodRenderer), into vanilla's picture before the trace: after its opaque terrain. */
+	public static void drawLods() {
+		if (!active() || Helio.device == null || !dev.helio.lod.LodRenderer.active()) return;
+		var main = Minecraft.getInstance().gameRenderer.mainRenderTarget();
+		if (vanillaDepth == null || vanillaDepth.getWidth(0) != main.width || vanillaDepth.getHeight(0) != main.height) {
+			if (vanillaDepth != null) {
+				var t = vanillaDepth;
+				var v = vanillaDepthView;
+				Scene.defer(() -> {
+					v.close();
+					t.close();
+				});
+			}
+			vanillaDepth = (com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture) Helio.device.createTexture("Helio vanilla depth", 15,
+				com.mojang.renderpearl.api.GpuFormat.D32_FLOAT, main.width, main.height, 1, 1);
+			vanillaDepthView = (VulkanGpuTextureView) Helio.device.createTextureView(vanillaDepth, 0, 1);
+		}
+		Helio.device.createCommandEncoder().copyTextureToTexture(main.getDepthTexture(), vanillaDepth, 0, 0, 0, 0, 0, main.width, main.height);
+		Matrix4f viewProj = new Matrix4f(jitteredProjection).mul(viewRotation);
+		dev.helio.lod.LodRenderer.draw(commandBuffer(), Helio.device.vkDevice(), cameraPos, viewProj, vanillaDepthView.vkImageView(),
+			((VulkanGpuTextureView) main.getColorTextureView()).vkImageView(), ((VulkanGpuTextureView) main.getDepthTextureView()).vkImageView(),
+			main.width, main.height, new float[] {skyR, skyG, skyB}, Minecraft.getInstance().options.getEffectiveRenderDistance() * 16f);
+	}
+
+	/** LOD water, after the opaque depth was copied (LodRenderer.drawWater). */
+	public static void drawLodWater() {
+		if (active() && Helio.device != null) dev.helio.lod.LodRenderer.drawWater(commandBuffer());
+	}
 
 	public static void copyOpaqueDepth() {
 		if (!active() || Helio.device == null) return;
@@ -542,7 +590,7 @@ public final class PathTracer {
 				.putFloat(116, HelioConfig.current.normalStrength / 100f)
 				.putFloat(120, exposure).putLong(124, meters.address() + slot * 16L)
 				.putFloat(132, cloudTime).putFloat(136, cloudBottom).putFloat(140, cloudCover(mc))
-				.putFloat(144, mc.options.getEffectiveRenderDistance() * 16)
+				.putFloat(144, dev.helio.lod.LodRenderer.active() ? dev.helio.lod.LodRenderer.DISTANCE : mc.options.getEffectiveRenderDistance() * 16)
 				.putFloat(148, Mth.lerp(vision, HelioConfig.current.nightBrightness / 100f, 1))
 				.putFloat(152, updateWetness(mc)).putInt(156, benchOff)
 				.putInt(160, HelioConfig.current.fogSteps).putInt(164, HelioConfig.current.cloudSteps)
@@ -636,6 +684,9 @@ public final class PathTracer {
 					String.format("%.3f", (cpu - benchCpu) / 120e6), String.format("%.3f", Scene.cpuNanos[Scene.CPU_UPDATE] / 120e6),
 					String.format("%.3f", Scene.cpuNanos[Scene.CPU_TLAS] / 120e6), String.format("%.3f", Scene.cpuNanos[Scene.CPU_LIGHTS] / 120e6),
 					String.format("%.3f", Scene.cpuNanos[Scene.CPU_HIDDEN] / 120e6));
+				if (dev.helio.lod.LodRenderer.active()) Helio.LOG.info("Bench LOD: GPU {} ms, {} tiles, {} quads drawn, {} tiles on the GPU ({} MB)",
+					String.format("%.2f", GpuTimers.ms(GpuTimers.Pass.LOD)), dev.helio.lod.LodRenderer.drawnTiles, dev.helio.lod.LodRenderer.drawnQuads,
+					dev.helio.lod.LodRenderer.gpuTiles(), dev.helio.lod.LodRenderer.gpuBytes() >> 20);
 				benchCpu = cpu;
 				java.util.Arrays.fill(Scene.cpuNanos, 0);
 			}

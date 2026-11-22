@@ -187,6 +187,9 @@ public final class Lod {
 			}
 		}
 		patches.clear();
+		meshRequests.clear();
+		meshResults.clear();
+		dirtyMeshes.clear();
 		worker = null;
 		store = null;
 		mapping = null;
@@ -194,14 +197,44 @@ public final class Lod {
 
 	private static volatile boolean running;
 
+	// --- Meshes for LodRenderer: asked for by the render thread, made by the worker ---
+
+	record MeshResult(long key, int[] quads) {}
+
+	private static final java.util.concurrent.ConcurrentLinkedQueue<Long> meshRequests = new java.util.concurrent.ConcurrentLinkedQueue<>();
+	private static final java.util.concurrent.ConcurrentLinkedQueue<MeshResult> meshResults = new java.util.concurrent.ConcurrentLinkedQueue<>();
+	/** Tiles whose mesh changed (their voxels or a neighbour's): LodRenderer drops and asks again. */
+	private static final java.util.concurrent.ConcurrentLinkedQueue<Long> dirtyMeshes = new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+	static void requestMesh(long key) {
+		meshRequests.add(key);
+	}
+
+	static MeshResult pollMesh() {
+		return meshResults.poll();
+	}
+
+	static long pollDirtyMesh() {
+		Long k = dirtyMeshes.poll();
+		return k == null ? Long.MIN_VALUE : k;
+	}
+
+	static void meshChanged(long key) {
+		dirtyMeshes.add(key);
+	}
+
 	/** The worker's loop: applies patches as they come; mips and writes when there's a lull or every so often. */
 	private static void drainLoop() {
 		running = true;
 		long lastMip = System.nanoTime();
 		while (running) {
 			try {
-				Patch p = patches.poll(50, TimeUnit.MILLISECONDS);
+				Patch p = patches.poll(meshRequests.isEmpty() ? 20 : 0, TimeUnit.MILLISECONDS);
 				if (p != null) store.applyPatch(p, mapping);
+				// Meshes asked for, for up to 8 ms at a time between patches.
+				long until = System.nanoTime() + 8_000_000L;
+				for (Long key; System.nanoTime() < until && (key = meshRequests.poll()) != null; )
+					meshResults.add(new MeshResult(key, store.mesh(key, mapping, colors)));
 				long now = System.nanoTime();
 				if (p == null || now - lastMip > 2_000_000_000L) {
 					store.mipAll(mapping);

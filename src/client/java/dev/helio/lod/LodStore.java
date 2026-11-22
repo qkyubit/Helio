@@ -115,6 +115,7 @@ final class LodStore implements AutoCloseable {
 			System.arraycopy(p.voxels(), (y * n + z) * n, t.v, Lod.index(p.ox(), p.oy() + y, p.oz() + z), n);
 		t.dirty = true;
 		changed[1].add(key);
+		meshDirty.add(key);
 	}
 
 	/** Mips every changed tile into its parent's octant, level by level up to MAX_LEVEL. */
@@ -137,10 +138,30 @@ final class LodStore implements AutoCloseable {
 				}
 				parent.dirty = true;
 				changed[level + 1].add(parentKey);
+				meshDirty.add(parentKey);
 			}
 		}
 		changed[Lod.MAX_LEVEL].clear();
+		// Their meshes, and their neighbours' (faces at the edges look across): to be made again.
+		if (!meshDirty.isEmpty()) {
+			LongOpenHashSet all = new LongOpenHashSet();
+			for (long k : meshDirty) {
+				int l = level(k), x = tx(k), y = ty(k), z = tz(k);
+				all.add(k);
+				all.add(key(l, x - 1, y, z));
+				all.add(key(l, x + 1, y, z));
+				all.add(key(l, x, y - 1, z));
+				all.add(key(l, x, y + 1, z));
+				all.add(key(l, x, y, z - 1));
+				all.add(key(l, x, y, z + 1));
+			}
+			meshDirty.clear();
+			for (long k : all) Lod.meshChanged(k);
+		}
 	}
+
+	/** Tiles changed since the last mipAll: their meshes go stale. */
+	private final LongOpenHashSet meshDirty = new LongOpenHashSet();
 
 	void flush() {
 		for (Map.Entry<Long, Tile> e : cache.entrySet()) if (e.getValue().dirty) write(e.getKey(), e.getValue());

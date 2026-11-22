@@ -1044,7 +1044,7 @@ public final class Scene {
 		return (v + a - 1) / a * a;
 	}
 
-	static void defer(Runnable free) {
+	public static void defer(Runnable free) {
 		deferred.add(new Deferred(frame, free));
 	}
 

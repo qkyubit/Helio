@@ -26,7 +26,7 @@ import java.util.List;
  * per line, the line number is the id). Id 0 is air. Any thread.
  */
 final class Mapping {
-	private static final byte PLANT = 1, SOLID = 2;
+	private static final byte PLANT = 1, SOLID = 2, WATER = 4;
 
 	private final Object2IntOpenHashMap<BlockState> stateIds = new Object2IntOpenHashMap<>();
 	private final List<BlockState> states = new ArrayList<>();
@@ -65,7 +65,7 @@ final class Mapping {
 		if (s != null) stateIds.putIfAbsent(s, id);
 		if (id >= flags.length) flags = java.util.Arrays.copyOf(flags, flags.length * 2);
 		flags[id] = s == null ? 0 : (byte) ((s.canBeReplaced() && s.getFluidState().isEmpty() && !(s.getBlock() instanceof SnowLayerBlock) ? PLANT : 0)
-			| (s.canOcclude() ? SOLID : 0));
+			| (s.canOcclude() ? SOLID : 0) | (s.getFluidState().is(net.minecraft.tags.FluidTags.WATER) && s.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock ? WATER : 0));
 		return id;
 	}
 
@@ -117,6 +117,10 @@ final class Mapping {
 
 	synchronized boolean plant(int id) {
 		return (flags[id] & PLANT) != 0;
+	}
+
+	synchronized boolean water(int id) {
+		return (flags[id] & WATER) != 0;
 	}
 
 	synchronized boolean solid(int id) {

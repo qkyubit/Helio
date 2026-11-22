@@ -1512,6 +1512,28 @@ map's mean tilt out as the atlas is built (a tiling block's map should average f
        handling of the area past the RT distance (fog, sky) applies. For 800 chunks at about 1 ms this has to be
        GPU-driven from early on: tile selection by screen error in a compute pass, occlusion against a depth
        pyramid, and indirect draws. The CPU only streams tiles in and out.
+       - First version (2026-11-22): LodRenderer, lod.vert / lod.frag. Each frame the CPU walks an octree from
+         level-6 tiles out to 800 chunks; a tile closer than SPLIT (6) times its size is drawn as its children,
+         and tiles wholly inside vanilla's render distance are skipped. The worker meshes tiles on request, and
+         the render thread uploads them to host-visible VRAM. Tiles that change (and their neighbours) are
+         meshed again; unseen ones leave the GPU after 600 frames.
+       - Drawing: one indexed indirect draw per tile and direction that can face the camera. Vertices are pulled
+         from the 16-byte quads (4 a quad, a shared index buffer). It uses the jittered projection, so RR
+         anti-aliases LODs too, and vanilla's colour convention (its face shade, its lightmap at the face's sky
+         light), so the far composite (10.0) lights, hazes and fades them like vanilla's own. LODs fill only
+         where vanilla drew nothing: a copy of vanilla's depth from before the pass. Only tiles reaching into
+         vanilla's render distance test it (and a radius) in the fragment shader; the rest use a pipeline
+         without the tests and keep the early depth test. That took the pass from 2.0 to 1.3 ms.
+       - Water quads come in their own group and are drawn after the opaque depth is copied: the composite
+         finds them over the terrain, as it finds vanilla's water, and reflects the sky (bright matte cyan
+         before).
+       - Vanilla's far plane is finite: with LODs, the projection's far plane goes to infinity
+         (PathTracer.jitterLevelProjection), and Helio's sky fade moves out to the LOD distance.
+       - Measured (pregen world, y 150 over spawn, looking at the horizon; bench word `nolod` for A/B, `Bench LOD`
+         log line): 3,800 tiles, 4.8M quads, 1.28 ms of GPU time, 102 -> 88 FPS. 134 MB of meshes on the GPU.
+       - Left for the 1 ms target: occlusion (a depth pyramid; much of a horizon view is behind nearer hills),
+         GPU-driven selection, and possibly a tighter SPLIT. Not checked yet: moving (tile streaming, hitches),
+         night, other dimensions.
     d. [ ] Blending, so there's no abrupt change at the render distance:
        - LOD chunks out to 1.5x the base render distance (a band of 50% of its radius past it) get reflections
          and cheap water effects (Fresnel reflection of the sky and scene, waves, absorption tint).
